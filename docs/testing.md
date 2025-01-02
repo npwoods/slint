@@ -7,7 +7,7 @@ This documents describe the testing infrastructure of Slint
 
 The syntax tests are testing that the compiler show the right error messages in case of error.
 
-The syntax tests are located in `slint_compiler/tests/syntax/` and it's driven by the
+The syntax tests are located in [internal/compiler/tests/syntax/](../internal/compiler/tests/syntax/) and it's driven by the
 [`syntax_tests.rs`](../internal/compiler/tests/syntax_tests.rs) file. More info in the comments of that file.
 
 In summary, each .slint files have comments with `^error` like so:
@@ -46,8 +46,7 @@ cargo test -p test-driver-interpreter --
 
 You can add an argument to test only for particular tests.
 
-If there is a property `test` in the last component of the file, the test will make sure this
-property equal to bool.
+If the last component in the file includes a `bool` property named `test`, the test will verify that its value is `true`.
 
 example:
 

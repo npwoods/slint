@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 # Select C++ and C as languages, as Corrosion needs ${CMAKE_C_COMPILER}
 # for linking
-project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.9.1)
+project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.9.2)
 
 include(FeatureSummary)
 include(CMakeDependentOption)
@@ -13,7 +13,7 @@ include(FetchContent)
 FetchContent_Declare(
     Corrosion
     GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-    GIT_TAG v0.4.9
+    GIT_TAG v0.5.1
 )
 FetchContent_MakeAvailable(Corrosion)
 
