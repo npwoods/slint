@@ -15,7 +15,7 @@ pub struct MudaAdapter {
     entries: Vec<MenuEntry>,
     menubar: Option<vtable::VBox<MenuVTable>>,
     tracker: Option<Pin<Box<PropertyTracker<MudaPropertyTracker>>>>,
-    menu: muda::Menu,
+    pub menu: muda::Menu,
 }
 
 struct MudaPropertyTracker {
@@ -86,14 +86,15 @@ impl MudaAdapter {
         ) -> Box<dyn muda::IsMenuItem> {
             let id = muda::MenuId(format!("{window_id}|{}", map.len()));
             map.push(entry.clone());
-            if entry.is_separator {
+            if entry.is_separator || entry.title.is_empty() {
                 Box::new(muda::PredefinedMenuItem::separator())
             } else if !entry.has_sub_menu && depth != 0 {
                 // the top level always has a sub menu regardless of entry.has_sub_menu
-                Box::new(muda::MenuItem::with_id(
+                Box::new(muda::CheckMenuItem::with_id(
                     id.clone(),
                     &entry.title,
                     true, /*entry.enabled*/
+                    false,
                     None,
                 ))
             } else {

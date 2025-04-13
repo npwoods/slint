@@ -121,7 +121,7 @@ fn window_is_resizable(
     }
 }
 
-enum WinitWindowOrNone {
+pub(crate) enum WinitWindowOrNone {
     HasWindow {
         window: Rc<winit::window::Window>,
         #[cfg(enable_accesskit)]
@@ -288,7 +288,7 @@ pub struct WinitWindowAdapter {
         >,
     >,
 
-    winit_window_or_none: RefCell<WinitWindowOrNone>,
+    pub(crate) winit_window_or_none: RefCell<WinitWindowOrNone>,
 
     #[cfg(not(use_winit_theme))]
     xdg_settings_watcher: RefCell<Option<i_slint_core::future::JoinHandle<()>>>,
