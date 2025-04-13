@@ -6,12 +6,20 @@ import starlight from "@astrojs/starlight";
 import starlightLinksValidator from "starlight-links-validator";
 import rehypeExternalLinks from "rehype-external-links";
 import starlightSidebarTopics from "starlight-sidebar-topics";
-import { BASE_PATH, BASE_URL } from "./src/utils/site-config";
+import {
+    BASE_PATH,
+    BASE_URL,
+    CPP_BASE_URL,
+    RUST_SLINT_CRATE_URL,
+    NODEJS_BASE_URL,
+    PYTHON_BASE_URL,
+} from "./src/utils/site-config";
 
 // https://astro.build/config
 export default defineConfig({
     site: `${BASE_URL}${BASE_PATH}`,
     base: BASE_PATH,
+    trailingSlash: "always",
     markdown: {
         rehypePlugins: [
             [
@@ -31,10 +39,9 @@ export default defineConfig({
     },
     integrations: [
         starlight({
-            title: "1.9.2",
+            title: "Slint Docs",
             logo: {
-                light: "./src/assets/slint-logo-simple-light.webp",
-                dark: "./src/assets/slint-logo-simple-dark.webp",
+                src: "./src/assets/slint-logo-small-light.svg",
             },
             customCss: ["./src/styles/custom.css", "./src/styles/theme.css"],
 
@@ -70,6 +77,10 @@ export default defineConfig({
                                             {
                                                 label: "Reactivity",
                                                 slug: "guide/language/concepts/reactivity",
+                                            },
+                                            {
+                                                label: "Reactivity vs React.js",
+                                                slug: "guide/language/concepts/reactivity-vs-react",
                                             },
                                         ],
                                     },
@@ -376,12 +387,12 @@ export default defineConfig({
                         items: [
                             {
                                 label: "C++ ↗",
-                                link: "https://docs.slint.dev/latest/docs/cpp/",
+                                link: `${CPP_BASE_URL}`,
                                 attrs: { target: "_blank" },
                             },
                             {
                                 label: "Rust ↗",
-                                link: "https://docs.slint.dev/latest/docs/rust/slint/",
+                                link: `${RUST_SLINT_CRATE_URL}`,
                                 attrs: { target: "_blank" },
                             },
                             {
@@ -390,7 +401,16 @@ export default defineConfig({
                                     text: "beta",
                                     variant: "caution",
                                 },
-                                link: "https://docs.slint.dev/latest/docs/node/",
+                                link: `${NODEJS_BASE_URL}`,
+                                attrs: { target: "_blank" },
+                            },
+                            {
+                                label: "Python ↗",
+                                badge: {
+                                    text: "beta",
+                                    variant: "caution",
+                                },
+                                link: `${PYTHON_BASE_URL}`,
                                 attrs: { target: "_blank" },
                             },
                         ],

@@ -78,6 +78,7 @@ export component ComponentContainer inherits Empty {
 
     in-out property <length> width;
     in-out property <length> height;
+    //-accepts_focus
 }
 
 export component Rotate inherits Empty {
@@ -183,30 +184,61 @@ export component SwipeGestureHandler {
     //-default_size_binding:expands_to_parent_geometry
 }
 
-// Lowered to MenuBarImpl from the style
+component MenuItem {
+    in property <string> title;
+    callback activated();
+    //-disallow_global_types_as_child_elements
+    //-is_non_item_type
+}
+
+component MenuSeparator {
+    //-disallow_global_types_as_child_elements
+    //-is_non_item_type
+}
+
+component Menu {
+    in property <string> title;
+    MenuItem {}
+    MenuSeparator {}
+    Menu {}
+    //-disallow_global_types_as_child_elements
+    //-is_non_item_type
+}
+
+// Lowered in lower_menus pass. See that pass documentation for more info
 component MenuBar {
     //-is_non_item_type
     //-disallow_global_types_as_child_elements
+    Menu {}
+}
+
+// The NativeItem, exported as ContextMenuInternal for the style
+component ContextMenu inherits Empty {
+    callback activated(entry: MenuEntry);
+    callback sub-menu(entry: MenuEntry) -> [MenuEntry];
+    callback show(position: Point);
+    function close() {}
+    function is-open() -> bool {}
+}
+
+// Lowered in lower_menus pass.
+export component ContextMenuInternal inherits ContextMenu {
     in property <[MenuEntry]> entries;
-
-    callback activated(entry: MenuEntry);
-    callback sub-menu(entry: MenuEntry) -> [MenuEntry];
-
-    // Currently experimental
-    //-is_internal
-}
-
-// Lowered to a call that generate a ContextMenuImpl
-export component ContextMenu {
-    function show() {}
-    //in property <[MenuEntry]> entries;
-    callback activated(entry: MenuEntry);
-    callback sub-menu(entry: MenuEntry) -> [MenuEntry];
     //-default_size_binding:expands_to_parent_geometry
-
-    // Currently experimental
     //-is_internal
 }
+
+// The public ContextMenu which is lowered in the lower_menus pass. See that pass documentation for more info
+// Note that this element cannot be named `ContextMenu` because that's the same name as a native item,
+// and the load_builtins code doesn't allow that. So use a placeholder name and re-export under `ContextMenu`
+export component ContextMenuArea inherits Empty {
+    // This is actually function as part of out interface, but a callback as much is the runtime concerned
+    callback show(position: Point);
+    function close() {}
+    //-default_size_binding:expands_to_parent_geometry
+    Menu {}
+}
+
 
 component WindowItem {
     in-out property <length> width;
@@ -253,6 +285,7 @@ export component TextInput {
     in property <length> letter-spacing;
     in property <length> width;
     in property <length> height;
+    in property <length> page-height;
     in property <length> text-cursor-width; // StyleMetrics.text-cursor-width  set in apply_default_properties_from_style
     in property <InputType> input-type;
     // Internal, undocumented property, only exposed for tests.
@@ -400,12 +433,14 @@ export component Path {
     in property <FillRule> fill-rule;
     in property <brush> stroke;
     in property <length> stroke-width;
+    in property <LineCap> stroke-line-cap;
     in property <string> commands;  // 'fake' hardcoded in typeregister.rs
     in property <float> viewbox-x;
     in property <float> viewbox-y;
     in property <float> viewbox-width;
     in property <float> viewbox-height;
     in property <bool> clip;
+    in property <bool> anti-alias: true;
 
     //-disallow_global_types_as_child_elements
     MoveTo { }
@@ -667,6 +702,7 @@ export global NativeStyleMetrics {
 }
 
 export global NativePalette {
+    out property <string> style-name: "qt";
     out property <brush> background;
     out property <brush> foreground;
     out property <brush> alternate-background;

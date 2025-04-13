@@ -30,6 +30,8 @@
                 "refcell",
                 "Rgba",
                 "rtti",
+                "Smol",
+                "smolstr",
                 "subspan",
                 "uninit",
                 "unmap",
@@ -58,12 +60,16 @@
             ]
         },
         {
-            "languageId": ["markdown", "md", "mdx"],
+            "languageId": [
+                "markdown",
+                "md",
+                "mdx"
+            ],
             "words": [
                 "Espressif",
                 "linebuffer",
-                "mylibrary", 
-                "otherlibrary", 
+                "mylibrary",
+                "otherlibrary",
                 "Lmylibrary",
                 "progressindicator",
                 "standardbutton",
@@ -73,7 +79,17 @@
                 "Sonoma",
                 "SUBDIR",
                 "Torizon",
-                "Yocto"
+                "Yocto",
+                "relpath",
+                "classslint",
+                "vectormodel",
+                "structslint",
+                "namespaceslint",
+                "compilerconfiguration",
+                "tschüß",
+                "TSCHÜSS",
+                "ὈΔΥΣΣΕΎΣ",
+                "ὀδυσσεύς"
             ],
         }
     ],
@@ -117,6 +133,7 @@
         "lvalue",
         "microcontroller",
         "microcontrollers",
+        "muda",
         "MSVC",
         "napi",
         "ogoffart",
@@ -125,6 +142,7 @@
         "pixmap",
         "prestart",
         "printerdemo",
+        "pythonw",
         "riscv",
         "rowspan",
         "rustc",

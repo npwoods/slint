@@ -6,6 +6,7 @@ export { ScrollView } from "scrollview.slint";
 export { ListItem } from "components.slint";
 export { LineEdit } from "lineedit.slint";
 import { FluentPalette } from "styling.slint";
+export { MenuBarItem, MenuBar, MenuFrame, MenuItem } from "menu.slint";
 
 export global StyleMetrics  {
     out property <length> layout-spacing: 8px;
@@ -21,6 +22,7 @@ export global StyleMetrics  {
 }
 
 export global Palette {
+    out property <string> style-name: "fluent";
     out property <brush> background: FluentPalette.background;
     out property <brush> foreground: FluentPalette.foreground;
     out property <brush> alternate-background: FluentPalette.alternate-background;

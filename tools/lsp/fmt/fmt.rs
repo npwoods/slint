@@ -251,14 +251,14 @@ fn whitespace_to_one_of(
                 return Ok(SyntaxMatch::Found(expected_kind));
             }
             _ => {
-                eprintln!("Inconsistency: expected {:?},  found {:?}", elements, n);
+                eprintln!("Inconsistency: expected {elements:?},  found {n:?}");
                 fold(n, writer, state)?;
                 return Ok(SyntaxMatch::NotFound);
             }
         }
         fold(n, writer, state)?;
     }
-    eprintln!("Inconsistency: expected {:?},  not found", elements);
+    eprintln!("Inconsistency: expected {elements:?},  not found");
     Ok(SyntaxMatch::NotFound)
 }
 
@@ -693,7 +693,7 @@ fn format_conditional_expression(
     writer: &mut impl TokenWriter,
     state: &mut FormatState,
 ) -> Result<(), std::io::Error> {
-    let has_if = node.child_text(SyntaxKind::Identifier).map_or(false, |x| x == "if");
+    let has_if = node.child_text(SyntaxKind::Identifier).is_some_and(|x| x == "if");
 
     let mut sub = node.children_with_tokens();
     if has_if {
@@ -979,7 +979,7 @@ fn format_state(
     writer: &mut impl TokenWriter,
     state: &mut FormatState,
 ) -> Result<(), std::io::Error> {
-    let has_when = node.child_text(SyntaxKind::Identifier).map_or(false, |x| x == "when");
+    let has_when = node.child_text(SyntaxKind::Identifier).is_some_and(|x| x == "when");
     let mut sub = node.children_with_tokens();
     let ok = if has_when {
         whitespace_to(&mut sub, SyntaxKind::DeclaredIdentifier, writer, state, "")?
@@ -1279,7 +1279,7 @@ fn format_member_access(
     state: &mut FormatState,
 ) -> Result<(), std::io::Error> {
     let n = syntax_nodes::MemberAccess::from(node.clone());
-    // Special case fo things like `42 .mod(x)` where a space is needed otherwise it lexes differently
+    // Special case of things like `42 .mod(x)` where a space is needed otherwise it lexes differently
     let need_space = n.Expression().child_token(SyntaxKind::NumberLiteral).is_some_and(|nl| {
         !nl.text().contains('.') && nl.text().chars().last().is_some_and(|c| c.is_numeric())
     });

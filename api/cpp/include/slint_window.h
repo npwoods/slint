@@ -79,6 +79,47 @@ public:
     {
         return slint_windowrc_color_scheme(&inner);
     }
+    bool supports_native_menu_bar() const
+    {
+        return slint_windowrc_supports_native_menu_bar(&inner);
+    }
+
+    template<typename Component, typename SubMenu, typename Activated>
+    void setup_native_menu_bar(Component component, SubMenu submenu, Activated activated) const
+    {
+        if (!supports_native_menu_bar()) {
+            return;
+        }
+        struct MenuWrapper
+        {
+            Component component;
+            SubMenu submenu;
+            Activated activated;
+        };
+        static cbindgen_private::MenuVTable menu_vtable = {
+            .drop = [](auto data) { delete reinterpret_cast<MenuWrapper *>(data.instance); },
+            .sub_menu =
+                    [](auto data, const cbindgen_private::MenuEntry *entry,
+                       slint::SharedVector<cbindgen_private::MenuEntry> *result) {
+                        auto wrapper = reinterpret_cast<MenuWrapper *>(data.instance);
+                        auto model = wrapper->submenu(wrapper->component, entry);
+                        result->clear();
+                        if (model) {
+                            auto count = model->row_count();
+                            for (size_t i = 0; i < count; ++i) {
+                                result->push_back(*model->row_data(i));
+                            }
+                        }
+                    },
+            .activate =
+                    [](auto data, const cbindgen_private::MenuEntry *entry) {
+                        auto wrapper = reinterpret_cast<MenuWrapper *>(data.instance);
+                        wrapper->activated(wrapper->component, *entry);
+                    },
+        };
+        auto instance = new MenuWrapper { component, std::move(submenu), std::move(activated) };
+        cbindgen_private::slint_windowrc_setup_native_menu_bar(&inner, &menu_vtable, instance);
+    }
 
     bool text_input_focused() const { return slint_windowrc_get_text_input_focused(&inner); }
     void set_text_input_focused(bool value) const
@@ -115,7 +156,7 @@ public:
         auto p = pos(popup);
         auto popup_dyn = popup.into_dyn();
         auto id = cbindgen_private::slint_windowrc_show_popup(&inner, &popup_dyn, p, close_policy,
-                                                              &parent_item);
+                                                              &parent_item, false);
         popup->user_init();
         return id;
     }
@@ -136,9 +177,11 @@ public:
         auto popup = Component::create(globals);
         init(&*popup);
         auto popup_dyn = popup.into_dyn();
-        return cbindgen_private::slint_windowrc_show_popup(
+        auto id = cbindgen_private::slint_windowrc_show_popup(
                 &inner, &popup_dyn, pos, cbindgen_private::PopupClosePolicy::CloseOnClickOutside,
-                &context_menu_rc);
+                &context_menu_rc, true);
+        popup->user_init();
+        return id;
     }
 
     template<std::invocable<RenderingState, GraphicsAPI> F>

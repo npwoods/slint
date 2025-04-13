@@ -286,6 +286,22 @@ impl Item for NativeSlider {
                 }
                 return KeyEventResult::EventAccepted;
             }
+            if keycode == key_codes::Home {
+                if event.event_type == KeyEventType::KeyPressed {
+                    self.set_value(self.minimum());
+                } else if event.event_type == KeyEventType::KeyReleased {
+                    Self::FIELD_OFFSETS.released.apply_pin(self).call(&(self.value(),));
+                }
+                return KeyEventResult::EventAccepted;
+            }
+            if keycode == key_codes::End {
+                if event.event_type == KeyEventType::KeyPressed {
+                    self.set_value(self.maximum());
+                } else if event.event_type == KeyEventType::KeyReleased {
+                    Self::FIELD_OFFSETS.released.apply_pin(self).call(&(self.value(),));
+                }
+                return KeyEventResult::EventAccepted;
+            }
         }
         KeyEventResult::EventIgnored
     }
@@ -346,6 +362,19 @@ impl Item for NativeSlider {
             auto style = qApp->style();
             style->drawComplexControl(QStyle::CC_Slider, &option, painter->get(), widget);
         });
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 

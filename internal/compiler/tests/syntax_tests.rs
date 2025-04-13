@@ -37,7 +37,7 @@ fn syntax_tests() -> std::io::Result<()> {
     let mut test_entries = Vec::new();
     for entry in std::fs::read_dir(format!("{}/tests/syntax", env!("CARGO_MANIFEST_DIR")))? {
         let entry = entry?;
-        if entry.file_type().map_or(false, |f| f.is_dir()) {
+        if entry.file_type().is_ok_and(|f| f.is_dir()) {
             let path = entry.path();
             for test_entry in path.read_dir()? {
                 let test_entry = test_entry?;
@@ -69,6 +69,12 @@ fn syntax_tests() -> std::io::Result<()> {
 
 fn process_file(path: &std::path::Path) -> std::io::Result<bool> {
     let source = std::fs::read_to_string(path)?;
+    if path.to_str().unwrap_or("").contains("bom-") && !source.starts_with("\u{FEFF}") {
+        // make sure that the file still contains BOM and it wasn't remove by some tools
+        return Err(std::io::Error::other(format!(
+            "{path:?} does not contains BOM while it should"
+        )));
+    }
     std::panic::catch_unwind(|| process_file_source(path, source, false)).unwrap_or_else(|err| {
         println!("Panic while processing {}: {:?}", path.display(), err);
         Ok(false)
@@ -113,7 +119,7 @@ fn process_diagnostics(
         let rx = m.get(3).unwrap().as_str();
         let r = match regex::Regex::new(rx) {
             Err(e) => {
-                eprintln!("{:?}: Invalid regexp {:?} : {:?}", path, rx, e);
+                eprintln!("{path:?}: Invalid regexp {rx:?} : {e:?}");
                 return Ok(false);
             }
             Ok(r) => r,
@@ -136,7 +142,7 @@ fn process_diagnostics(
         let expected_diag_level = match warning_or_error {
             "warning" => i_slint_compiler::diagnostics::DiagnosticLevel::Warning,
             "error" => i_slint_compiler::diagnostics::DiagnosticLevel::Error,
-            _ => panic!("Unsupported diagnostic level {}", warning_or_error),
+            _ => panic!("Unsupported diagnostic level {warning_or_error}"),
         };
 
         match diags.iter().position(|e| {
@@ -149,10 +155,7 @@ fn process_diagnostics(
             }
             None => {
                 success = false;
-                println!(
-                    "{:?}: {} not found at offset {}: {:?}",
-                    path, warning_or_error, offset, rx
-                );
+                println!("{path:?}: {warning_or_error} not found at offset {offset}: {rx:?}");
             }
         }
     }
@@ -161,7 +164,7 @@ fn process_diagnostics(
     diags.retain(|d| !(d.message().contains("':='") && d.message().contains("deprecated")));
 
     if !diags.is_empty() {
-        println!("{:?}: Unexpected errors/warnings: {:#?}", path, diags);
+        println!("{path:?}: Unexpected errors/warnings: {diags:#?}");
 
         #[cfg(feature = "display-diagnostics")]
         if !_silent {

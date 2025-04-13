@@ -7,7 +7,7 @@
 [![Discussions](https://img.shields.io/github/discussions/slint-ui/slint)](https://github.com/slint-ui/slint/discussions)
 
 Slint is a declarative GUI toolkit to build native user interfaces for embedded,
-desktop, and mobile applications written in Rust, C++, JavaScript, or Python. 
+desktop, and mobile applications written in Rust, C++, JavaScript, or Python.
 
 The name *Slint* is derived from our design goals:
 
@@ -121,6 +121,7 @@ Refer to the README of each language directory in the `api` folder:
 - [C++](api/cpp) ([Documentation][#15] | [Getting Started Template][#17])
 - [Rust](api/rs/slint) [![Crates.io][#18]][#19] ([Documentation][#20] | [Tutorial Video][#22] | [Getting Started Template][#23])
 - [JavaScript/NodeJS (Beta)](api/node) [![npm][#24]][#25] ([Documentation][#26] | [Getting Started Template][#28])
+- [Python (Beta)](api/python) [![pypi][#31]][#32] ([Documentation][#33] | [Getting Started Template][#34])
 
 ## Architecture
 
@@ -177,7 +178,7 @@ We have a few tools to help with the development of .slint files:
   without installing anything ([sources](./tools/slintpad)).
 - An [**updater**](./tools/updater) to convert the .slint files from
   previous versions to newer versions.
-- An experimental [**Figma importer**](./tools/figma_import).
+- A [**Figma to Slint**](https://www.figma.com/community/plugin/1474418299182276871/figma-to-slint) plugin.
 
 Please check our [Editors README](./editors/README.md) for tips on how to
 configure your favorite editor to work well with Slint.
@@ -220,7 +221,7 @@ located remotely in Germany.
 - Follow [@slint-ui](https://www.linkedin.com/company/slint-ui/) on LinkedIn.
 - Follow [@slint.dev](https://bsky.app/profile/slint.dev) on Bluesky
 - Subscribe to our [YouTube channel](https://www.youtube.com/@Slint-UI)
- 
+
 ### Contact us
 
 Feel free to join [Github discussions](https://github.com/slint-ui/slint/discussions)
@@ -259,4 +260,7 @@ You can of course also contact us privately via email to [info@slint.dev](mailto
 [#28]: https://github.com/slint-ui/slint-nodejs-template
 [#29]: ./demos/weather-demo/docs/img/desktop-preview.png "Weather Demo"
 [#30]: https://slint.dev/demos/weather-demo/
-
+[#31]: https://img.shields.io/pypi/v/slint
+[#32]: https://pypi.org/project/slint/
+[#33]: http://snapshots.slint.dev/master/docs/python/
+[#34]: https://github.com/slint-ui/slint-python-template

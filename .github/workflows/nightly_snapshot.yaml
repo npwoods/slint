@@ -83,7 +83,7 @@ jobs:
         strategy:
             matrix:
                 include:
-                    - os: ubuntu-20.04
+                    - os: ubuntu-22.04
                       toolchain: x86_64-unknown-linux-gnu
                       binary_built: slint-lsp
                       artifact_name: slint-lsp-x86_64-unknown-linux-gnu
@@ -124,10 +124,6 @@ jobs:
                   target: x86_64-apple-darwin
             - name: Install cargo-bundle
               run: cargo install --version=0.6.0 cargo-bundle
-            # Pin Python version until https://github.com/slint-ui/slint/issues/6615 is fixed.
-            - uses: actions/setup-python@v5
-              with:
-                python-version: '3.12'
             - name: Build Main LSP Bundle
               working-directory: tools/lsp
               run: cargo bundle --release --features ${{ env.SLINT_BINARY_FEATURES }}
@@ -151,10 +147,6 @@ jobs:
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-darwin
-            # Pin Python version until https://github.com/slint-ui/slint/issues/6615 is fixed.
-            - uses: actions/setup-python@v5
-              with:
-                python-version: '3.12'
             - name: Build AArch64 LSP
               run: cargo build --target aarch64-apple-darwin --features ${{ env.SLINT_BINARY_FEATURES }} --release -p slint-lsp
             - name: Create artifact directory
@@ -210,7 +202,7 @@ jobs:
                 target:
                     - armv7-unknown-linux-gnueabihf
                     - aarch64-unknown-linux-gnu
-        runs-on: ubuntu-20.04
+        runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v4
             - uses: ./.github/actions/setup-rust
@@ -244,9 +236,9 @@ jobs:
         if: ${{ needs.check-for-secrets.outputs.has-openvsx-pat == 'yes' && needs.check-for-secrets.outputs.has-vscode-marketplace-pat == 'yes' }}
         steps:
             - uses: actions/checkout@v4
-            - uses: pnpm/action-setup@v4.0.0
+            - uses: pnpm/action-setup@v4.1.0
               with:
-                version: 9.11.0
+                version: 10.3.0
             - name: Install GNU Sed
               run: brew install gnu-sed
             - uses: actions/setup-node@v4
@@ -296,7 +288,7 @@ jobs:
               run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
             - name: Build package and optionally publish to Visual Studio Marketplace
               id: publishToVSCM
-              uses: HaaLeo/publish-vscode-extension@v1
+              uses: HaaLeo/publish-vscode-extension@v2
               with:
                   pat: ${{ secrets.VSCODE_MARKETPLACE_PAT }}
                   registryUrl: https://marketplace.visualstudio.com
@@ -306,7 +298,7 @@ jobs:
             - name: Publish to Open VSX Registry
               continue-on-error: true
               if: ${{ github.event.inputs.private != 'true' && (github.ref == 'refs/heads/master' || github.event.inputs.release == 'true') }}
-              uses: HaaLeo/publish-vscode-extension@v1
+              uses: HaaLeo/publish-vscode-extension@v2
               with:
                   pat: ${{ secrets.OPENVSX_PAT }}
                   extensionFile: ${{ steps.publishToVSCM.outputs.vsixPath }}
@@ -318,9 +310,38 @@ jobs:
                   path: |
                       ${{ steps.publishToVSCM.outputs.vsixPath }}
 
+    build-figma-plugin:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                node-version: 20
+              id: node-install
+            - uses: pnpm/action-setup@v4.1.0
+              with:
+                version: 10.3.0
+            - name: Run pnpm install
+              working-directory: tools/figma-inspector
+              run: pnpm install --frozen-lockfile
+            - name: Add build timestamp to readme
+              working-directory: tools/figma-inspector/public-zip
+              run: echo "Built on $(date '+%d-%m-%Y %H:%M:%S %Z')" >> readme.txt
+            - name: Build zip
+              working-directory: tools/figma-inspector
+              run: pnpm zip
+            - name: Prepare Figma plugin artifact
+              run: mv *.zip figma-plugin.zip
+              working-directory: tools/figma-inspector/zip
+            - name: Archive zip
+              uses: actions/upload-artifact@v4
+              with:
+                  name: figma-plugin
+                  path: tools/figma-inspector/zip
+
     #  publish_tree_sitter:
     #    if: github.event.inputs.private != 'true'
-    #    runs-on: ubuntu-20.04
+    #    runs-on: ubuntu-22.04
     #    steps:
     #      - uses: actions/checkout@v4
     #      - name: Upload artifact
@@ -332,7 +353,7 @@ jobs:
     publish_artifacts:
         if: ${{ github.event.inputs.private != 'true' }}
         needs: [docs, wasm_demo, wasm, check-for-secrets, android]
-        runs-on: ubuntu-20.04
+        runs-on: ubuntu-22.04
         steps:
             - uses: actions/download-artifact@v4
               with:
@@ -407,7 +428,7 @@ jobs:
                 rm -rf $output_path/demos
                 mkdir -p $output_path/demos
 
-                for demo_subdir in examples,gallery, demos,printerdemo,rust examples,todo,rust examples,todo-mvc,rust examples,slide_puzzle, examples,memory, examples,imagefilter,rust examples,plotter, examples,opengl_underlay, examples,carousel,rust demos,energy-monitor, demos,weather-demo, demos,home-automation,rust; do
+                for demo_subdir in examples,gallery, demos,printerdemo,rust examples,todo,rust examples,todo-mvc,rust examples,slide_puzzle, examples,memory, examples,imagefilter,rust examples,plotter, examples,opengl_underlay, examples,carousel,rust demos,energy-monitor, demos,weather-demo, demos,home-automation,rust demos,usecases,rust; do
                   IFS=',' read example_or_demo demo subdir <<< "${demo_subdir}"
 
                   mkdir -p $output_path/demos/$demo
@@ -445,6 +466,8 @@ jobs:
 
                 mkdir -p $output_path/docs/node
                 cp -a ../api/node/docs/* $output_path/docs/node/
+                mkdir -p $output_path/docs/python
+                cp -a ../api/python/docs/* $output_path/docs/python/
                 mkdir -p $output_path/docs/slint
                 cp -a ../docs/astro/dist/* $output_path/docs/slint/
 
@@ -466,7 +489,7 @@ jobs:
               if: github.event.inputs.release == 'true'
               working-directory: www-releases/releases
               run: cat versions.json
-      
+
             - name: Update version in versions.json
               if: github.event.inputs.release == 'true'
               working-directory: www-releases/releases
@@ -522,7 +545,7 @@ jobs:
 
     prepare_release:
         if: github.event.inputs.private != 'true'
-        needs: [cpp_package, slint-viewer-binary, slint-lsp-binary]
+        needs: [cpp_package, slint-viewer-binary, slint-lsp-binary, build-figma-plugin]
         runs-on: ubuntu-22.04
         permissions:
             contents: write
@@ -547,6 +570,9 @@ jobs:
               with:
                   pattern: slint-lsp-*
                   merge-multiple: true
+            - uses: actions/download-artifact@v4
+              with:
+                  name: figma-plugin
             - name: Extract files
               run: |
                   ls -l
@@ -562,6 +588,7 @@ jobs:
                   mv slint-lsp-aarch64-unknown-linux-gnu.tar.gz artifacts/
                   mv slint-lsp-macos.tar.gz artifacts/
                   mv slint-compiler-*.tar.gz artifacts/
+                  mv figma-plugin.zip artifacts/
             - uses: montudor/action-zip@v1
               with:
                   args: zip -r artifacts/slint-viewer-windows.zip slint-viewer
@@ -687,6 +714,8 @@ jobs:
               run: cargo apk build -p todo --target aarch64-linux-android --lib --release
             - name: Build weather-demo example
               run: cargo apk build -p weather-demo --target aarch64-linux-android --lib --release
+            - name: Build usecases demo
+              run: cargo apk build -p usecases --target aarch64-linux-android --lib --release
             - name: "upload APK artifact"
               uses: actions/upload-artifact@v4
               with:
@@ -695,3 +724,4 @@ jobs:
                     target/release/apk/energy-monitor.apk
                     target/release/apk/todo_lib.apk
                     target/release/apk/weather_demo.apk
+                    target/release/apk/usecases_lib.apk

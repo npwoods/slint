@@ -24,10 +24,11 @@ impl syn::visit_mut::VisitMut for Visitor {
 
 impl Visitor {
     pub fn new() -> Self {
-        let link_path = concat!(env!("CARGO_MANIFEST_DIR"), "/link-data.json");
-        let link_data = std::fs::read_to_string(link_path).expect("Failed to read {link_path}");
-        let link_data: serde_json::Value =
-            serde_json::from_str(&link_data).expect("Failed to parse link-data.json");
+        let link_data: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/link-data.json"
+        )))
+        .expect("Failed to parse link-data.json");
         Self(link_data, false)
     }
 
@@ -57,7 +58,7 @@ impl Visitor {
                     .expect("invalid string in link-data.json");
                 format!("https://releases.slint.dev/{}/docs/slint/{dst}", env!("CARGO_PKG_VERSION"),)
             } else {
-                panic!("Unknown link {}", link);
+                panic!("Unknown link {link}");
             };
             doc.replace_range(pos..pos + NEEDLE.len() + link.len(), &dst);
             begin = pos + dst.len();

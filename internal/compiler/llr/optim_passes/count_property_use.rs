@@ -14,7 +14,7 @@ pub fn count_property_use(root: &CompilationUnit) {
     // Visit the root properties that are used.
     // 1. the public properties
     for c in &root.public_components {
-        let root_ctx = EvaluationContext::new_sub_component(root, &c.item_tree.root, (), None);
+        let root_ctx = EvaluationContext::new_sub_component(root, c.item_tree.root, (), None);
         for p in c.public_properties.iter().filter(|p| {
             !matches!(
                 p.prop,
@@ -24,8 +24,8 @@ pub fn count_property_use(root: &CompilationUnit) {
             visit_property(&p.prop, &root_ctx);
         }
     }
-    for g in root.globals.iter().filter(|g| g.exported) {
-        let ctx = EvaluationContext::new_global(root, g, ());
+    for (idx, g) in root.globals.iter_enumerated().filter(|(_, g)| g.exported) {
+        let ctx = EvaluationContext::new_global(root, idx, ());
         for p in g.public_properties.iter().filter(|p| {
             !matches!(
                 p.prop,
@@ -43,7 +43,7 @@ pub fn count_property_use(root: &CompilationUnit) {
                 PropertyReference::Local { sub_component_path, property_index } => {
                     let mut sc = sc;
                     for i in sub_component_path {
-                        sc = &sc.sub_components[*i].ty;
+                        sc = &ctx.compilation_unit.sub_components[sc.sub_components[*i].ty];
                     }
                     if sc.properties[*property_index].use_count.get() == 0 {
                         continue;
@@ -63,7 +63,7 @@ pub fn count_property_use(root: &CompilationUnit) {
             expr.borrow().visit_property_references(ctx, &mut visit_property);
         }
         // 4. the models
-        for (idx, r) in sc.repeated.iter().enumerate() {
+        for (idx, r) in sc.repeated.iter_enumerated() {
             r.model.borrow().visit_property_references(ctx, &mut visit_property);
             if let Some(lv) = &r.listview {
                 visit_property(&lv.viewport_y, ctx);
@@ -74,17 +74,16 @@ pub fn count_property_use(root: &CompilationUnit) {
 
                 let rep_ctx = EvaluationContext::new_sub_component(
                     root,
-                    &r.sub_tree.root,
+                    r.sub_tree.root,
                     (),
-                    Some(ParentCtx::new(ctx, Some(idx as u32))),
+                    Some(ParentCtx::new(ctx, Some(idx))),
                 );
                 visit_property(&lv.prop_y, &rep_ctx);
-                visit_property(&lv.prop_width, &rep_ctx);
                 visit_property(&lv.prop_height, &rep_ctx);
             }
             for idx in r.data_prop.iter().chain(r.index_prop.iter()) {
                 // prevent optimizing model properties
-                let p = &r.sub_tree.root.properties[*idx];
+                let p = &root.sub_components[r.sub_tree.root].properties[*idx];
                 p.use_count.set(2);
             }
         }
@@ -122,9 +121,9 @@ pub fn count_property_use(root: &CompilationUnit) {
         for popup in &sc.popup_windows {
             let popup_ctx = EvaluationContext::new_sub_component(
                 root,
-                &popup.item_tree.root,
+                popup.item_tree.root,
                 (),
-                Some(ParentCtx::new(&ctx, None)),
+                Some(ParentCtx::new(ctx, None)),
             );
             popup.position.borrow().visit_property_references(&popup_ctx, &mut visit_property)
         }
@@ -137,11 +136,18 @@ pub fn count_property_use(root: &CompilationUnit) {
     });
 
     // TODO: only visit used function
-    for g in root.globals.iter() {
-        let ctx = EvaluationContext::new_global(root, g, ());
+    for (idx, g) in root.globals.iter_enumerated() {
+        let ctx = EvaluationContext::new_global(root, idx, ());
         for f in &g.functions {
             f.code.visit_property_references(&ctx, &mut visit_property);
         }
+    }
+
+    if let Some(p) = &root.popup_menu {
+        let ctx = EvaluationContext::new_sub_component(root, p.item_tree.root, (), None);
+        visit_property(&p.entries, &ctx);
+        visit_property(&p.sub_menu, &ctx);
+        visit_property(&p.activated, &ctx);
     }
 
     clean_unused_bindings(root);

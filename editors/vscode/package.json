@@ -11,7 +11,7 @@
     "live preview",
     "drag-and-drop editor"
   ],
-  "version": "1.9.2",
+  "version": "1.11.0",
   "publisher": "Slint",
   "icon": "extension-logo.png",
   "license": "GPL-3.0",
@@ -203,9 +203,6 @@
       }
     ]
   },
-  "files": [
-    "bin/slint-lsp-*"
-  ],
   "scripts": {
     "vscode:prepublish": "pnpm build:wasm_lsp-release && pnpm compile-production && shx echo \"GPL-3.0-only OR LicenseRef-Slint-Software-3.0\" > LICENSE.txt",
     "build:lsp": "cargo build -p slint-lsp",
@@ -214,7 +211,7 @@
     "build:wasm_lsp-release": "shx pwd | xargs -I {} wasm-pack build --release --target web --no-pack ../../tools/lsp --out-dir {}/out -- --no-default-features --features backend-winit,renderer-femtovg,preview",
     "compile": "node ./esbuild.js",
     "compile-production": "node ./esbuild.js --production",
-    "local-package": "shx mkdir -p bin && shx cp ../../target/debug/slint-lsp* bin/ && pnpm dlx vsce package --no-dependencies",
+    "local-package": "shx mkdir -p bin && shx cp ../../target/debug/slint-lsp* bin/ && pnpm dlx @vscode/vsce package --no-dependencies",
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm compile && pnpm check",
     "check": "biome check",
@@ -228,7 +225,7 @@
     "clean": "shx rm -rf out bin LICENSE.txt slint-*.vsix"
   },
   "dependencies": {
-    "fs-extra": "11.2.0",
+    "fs-extra": "11.3.0",
     "simple-git": "3.27.0",
     "vscode-languageclient": "9.0.1",
     "vscode-languageserver": "9.0.1"
@@ -239,9 +236,9 @@
     "@types/fs-extra": "11.0.4",
     "@types/node": "18.11.9",
     "@types/vscode": "1.82.0",
-    "esbuild": "0.24.2",
-    "shx": "0.3.4",
-    "typescript": "5.7.2",
+    "esbuild": "0.25.2",
+    "shx": "0.4.0",
+    "typescript": "5.8.3",
     "vscode-tmgrammar-test": "0.1.3"
   }
 }

@@ -44,7 +44,7 @@ This method combines your Rust code with the `.slint` design markup in one file,
 
 ```rust
 slint::slint!{
-    export component HelloWorld {
+    export component HelloWorld inherits Window {
         Text {
             text: "hello world";
             color: green;
@@ -65,7 +65,9 @@ When your design becomes bigger in terms of markup code, you may want move it to
 /*!Use a [build script](https://doc.rust-lang.org/cargo/reference/build-scripts.html) to compile
 your main `.slint` file:
 
-In your Cargo.toml add a `build` assignment and use the `slint-build` crate in `build-dependencies`:
+*/
+#![doc = i_slint_core_macros::slint_doc_str!("In your Cargo.toml add a `build` assignment and use the [`slint-build`](slint:rust:slint_build/) crate in `build-dependencies`:")]
+/*
 
 ```toml
 [package]
@@ -74,11 +76,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "1.9.0"
+slint = "1.10.0"
 ...
 
 [build-dependencies]
-slint-build = "1.9.0"
+slint-build = "1.10.0"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -352,6 +354,7 @@ pub fn spawn_local<F: core::future::Future + 'static>(
 /// available for you to instantiate.
 ///
 /// Check the documentation of the `slint-build` crate for more information.
+#[doc = i_slint_core_macros::slint_doc_str!("Check the documentation of the [`slint-build`](slint:rust:slint_build/) crate for more information.")]
 #[macro_export]
 macro_rules! include_modules {
     () => {
@@ -433,7 +436,7 @@ pub use i_slint_backend_selector::api::*;
 /// Helper type that helps checking that the generated code is generated for the right version
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct VersionCheck_1_9_2;
+pub struct VersionCheck_1_11_0;
 
 #[cfg(doctest)]
 mod compile_fail_tests;

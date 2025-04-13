@@ -15,7 +15,11 @@ rust-version.workspace = true
 
 [lib]
 path = "lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "stub-gen"
+path = "stub-gen/main.rs"
 
 [features]
 default = ["backend-winit", "renderer-femtovg", "renderer-software", "backend-qt", "accessibility"]
@@ -41,11 +45,12 @@ i-slint-backend-selector = { workspace = true }
 i-slint-core = { workspace = true }
 slint-interpreter = { workspace = true, features = ["default", "display-diagnostics", "internal"] }
 i-slint-compiler = { workspace = true }
-pyo3 = { version = "0.21.0", features = ["extension-module", "indexmap", "chrono", "abi3-py310"] }
+pyo3 = { version = "0.24", features = ["extension-module", "indexmap", "chrono", "abi3-py310"] }
 indexmap = { version = "2.1.0" }
 chrono = "0.4"
 spin_on = { workspace = true }
 css-color-parser2 = { workspace = true }
+pyo3-stub-gen = { version = "0.7.0", default-features = false }
 
 [package.metadata.maturin]
 python-source = "slint"

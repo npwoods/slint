@@ -28,31 +28,37 @@ jobs:
                     - runner: macos-14
                       target: aarch64
                       container: auto
-                    - runner: ubuntu-latest
+                    - runner: ubuntu-22.04
                       target: x86_64
                       container: auto
-                    - runner: ubuntu-latest
+                    - runner: ubuntu-22.04
                       target: aarch64
                       container: "ghcr.io/slint-ui/slint/aarch64-unknown-linux-gnu"
-                    - runner: ubuntu-latest
+                    - runner: ubuntu-22.04
                       target: armv7
                       container: "ghcr.io/slint-ui/slint/armv7-unknown-linux-gnueabihf"
         runs-on: ${{ matrix.platform.runner }}
         steps:
             - uses: actions/checkout@v4
             - uses: ./.github/actions/install-linux-dependencies
-              if: runner.os == 'Linux'              
+              if: runner.os == 'Linux'
             - uses: actions/setup-python@v5
               with:
-                python-version: '3.10'
+                python-version: '3.12'
+            - uses: baptiste0928/cargo-install@v3
+              with:
+                  crate: taplo-cli
             - name: Prepare feature config for binaries
               working-directory: api/python
               shell: bash
               run: |
-                perl -pi -e 's,^default =.*,,' Cargo.toml
-                perl -pi -e 's,# binaries:,,' Cargo.toml
-                echo "New defaults:"
-                grep "^\s*default =" Cargo.toml  
+                cat Cargo.toml | taplo format --option column_width=100000 --stdin-filepath=Cargo.toml - | \
+                  perl -p -e 's,^\s*default\s*=.*,,' | \
+                  perl -p -e 's,# binaries:\s?,,' > Cargo.toml.new
+                cat Cargo.toml.new | taplo format --stdin-filepath=Cargo.toml - > Cargo.toml
+                rm Cargo.toml.new
+                taplo get -f Cargo.toml features.default
+
             - name: Build a binary wheel
               uses: PyO3/maturin-action@v1
               with:
@@ -64,21 +70,26 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                 name: python-package-distributions-${{ matrix.platform.runner }}-${{ strategy.job-index }}
-                path: api/python/wheelhouse/*.whl             
+                path: api/python/wheelhouse/*.whl
 
     build_source_package:
         name: Build source package
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
+            - uses: baptiste0928/cargo-install@v3
+              with:
+                  crate: taplo-cli
             - name: Prepare feature config for binaries
               working-directory: api/python
               shell: bash
               run: |
-                  perl -pi -e 's,^default =.*,,' Cargo.toml
-                  perl -pi -e 's,# binaries:,,' Cargo.toml
-                  echo "New defaults:"
-                  grep "^\s*default =" Cargo.toml
+                cat Cargo.toml | taplo format --option column_width=100000 --stdin-filepath=Cargo.toml - | \
+                  perl -p -e 's,^\s*default\s*=.*,,' | \
+                  perl -p -e 's,# binaries:\s?,,' > Cargo.toml.new
+                cat Cargo.toml.new | taplo format --stdin-filepath=Cargo.toml - > Cargo.toml
+                rm Cargo.toml.new
+                taplo get -f Cargo.toml features.default
             - name: Build source package
               uses: PyO3/maturin-action@v1
               with:
@@ -88,7 +99,7 @@ jobs:
             - uses: actions/upload-artifact@v4
               with:
                 name: python-package-distributions-source
-                path: api/python/dist/*.tar.gz                
+                path: api/python/dist/*.tar.gz
 
     publish-to-test-pypi:
         if: ${{ github.event.inputs.release != 'true' }}
@@ -100,13 +111,13 @@ jobs:
             name: testpypi
             url: https://test.pypi.org/p/slint
         permissions:
-            id-token: write  # IMPORTANT: mandatory for trusted publishing                
+            id-token: write  # IMPORTANT: mandatory for trusted publishing
         steps:
             - uses: actions/download-artifact@v4
-              with:              
+              with:
                 pattern: python-package-distributions-*
                 path: dist
-                merge-multiple: true            
+                merge-multiple: true
             - name: Publish distribution 📦 to Test PyPI
               uses: pypa/gh-action-pypi-publish@release/v1
               with:
@@ -122,13 +133,13 @@ jobs:
           name: pypi
           url: https://test.pypi.org/p/slint
       permissions:
-          id-token: write  # IMPORTANT: mandatory for trusted publishing                
+          id-token: write  # IMPORTANT: mandatory for trusted publishing
       steps:
           - uses: actions/download-artifact@v4
-            with:              
+            with:
               pattern: python-package-distributions-*
               path: dist
-              merge-multiple: true            
+              merge-multiple: true
           - name: Publish distribution 📦 to PyPI
             uses: pypa/gh-action-pypi-publish@release/v1
-          
+

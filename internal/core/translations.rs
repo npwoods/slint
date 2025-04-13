@@ -52,7 +52,7 @@ mod formatter {
         args: &'a T,
     }
 
-    impl<'a, T: FormatArgs + ?Sized> Display for FormatResult<'a, T> {
+    impl<T: FormatArgs + ?Sized> Display for FormatResult<'_, T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result {
             let mut arg_idx = 0;
             let mut pos = 0;
@@ -118,6 +118,7 @@ mod formatter {
     mod tests {
         use super::format;
         use core::fmt::Display;
+        use std::string::{String, ToString};
         #[test]
         fn test_format() {
             assert_eq!(format("Hello", (&[]) as &[String]).to_string(), "Hello");
@@ -159,7 +160,7 @@ impl<T: Display> Display for DisplayOrInt<T> {
     }
 }
 
-impl<'a, T: FormatArgs + ?Sized> FormatArgs for WithPlural<'a, T> {
+impl<T: FormatArgs + ?Sized> FormatArgs for WithPlural<'_, T> {
     type Output<'b>
         = DisplayOrInt<T::Output<'b>>
     where
@@ -198,14 +199,21 @@ pub fn translate(
 }
 
 #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
-fn translate_gettext(string: &str, ctx: &str, domain: &str, n: i32, plural: &str) -> String {
+fn translate_gettext(
+    string: &str,
+    ctx: &str,
+    domain: &str,
+    n: i32,
+    plural: &str,
+) -> std::string::String {
+    use std::string::String;
     global_translation_property();
     fn mangle_context(ctx: &str, s: &str) -> String {
-        format!("{}\u{4}{}", ctx, s)
+        std::format!("{ctx}\u{4}{s}")
     }
     fn demangle_context(r: String) -> String {
         if let Some(x) = r.split('\u{4}').last() {
-            return x.to_owned();
+            return x.into();
         }
         r
     }
@@ -334,7 +342,7 @@ fn index_for_locale(languages: &[&'static str]) -> Option<usize> {
     // first, try an exact match
     let idx = languages.iter().position(|x| *x == locale);
     // else, only match the language part
-    fn base<'a>(l: &'a str) -> &'a str {
+    fn base(l: &str) -> &str {
         l.find(['-', '_', '@']).map_or(l, |i| &l[..i])
     }
     idx.or_else(|| {
@@ -363,7 +371,7 @@ pub fn select_bundled_translation(language: &str) -> Result<(), SelectBundledTra
         if let Some(idx) = idx {
             ctx.0.translations_dirty.as_ref().set(idx);
             Ok(())
-        } else if language == "" || language == "en" {
+        } else if language.is_empty() || language == "en" {
             ctx.0.translations_dirty.as_ref().set(0);
             Ok(())
         } else {
@@ -417,7 +425,7 @@ mod ffi {
         plural: &SharedString,
     ) {
         *to_translate =
-            translate(to_translate.as_str(), &context, &domain, arguments.as_slice(), n, &plural)
+            translate(to_translate.as_str(), context, domain, arguments.as_slice(), n, plural)
     }
 
     /// Mark all translated string as dirty to perform re-translation in case the language change
@@ -499,6 +507,6 @@ mod ffi {
     #[no_mangle]
     pub extern "C" fn slint_translate_select_bundled_translation(language: Slice<u8>) -> bool {
         let language = core::str::from_utf8(&language).unwrap();
-        return select_bundled_translation(language).is_ok();
+        select_bundled_translation(language).is_ok()
     }
 }

@@ -192,7 +192,7 @@ fn ensure_cargo_rerun_for_crate(
     dependencies.push(crate_dir.to_path_buf());
     for entry in std::fs::read_dir(crate_dir)? {
         let entry = entry?;
-        if entry.path().extension().map_or(false, |e| e == "rs") {
+        if entry.path().extension().is_some_and(|e| e == "rs") {
             dependencies.push(entry.path());
         }
     }
@@ -235,7 +235,9 @@ fn default_config() -> cbindgen::Config {
     config.defines = [
         ("target_pointer_width = 64".into(), "SLINT_TARGET_64".into()),
         ("target_pointer_width = 32".into(), "SLINT_TARGET_32".into()),
-        ("target_arch = wasm32".into(), "SLINT_TARGET_WASM".into()), // Disable any wasm guarded code in C++, too - so that there are no gaps in enums.
+        // Disable any wasm guarded code in C++, too - so that there are no gaps in enums.
+        ("target_arch = wasm32".into(), "SLINT_TARGET_WASM".into()),
+        ("target_os = android".into(), "__ANDROID__".into()),
     ]
     .iter()
     .cloned()
@@ -262,7 +264,7 @@ extern "C" {{
 "#,
         items
             .iter()
-            .map(|item_name| format!("SLINT_DECL_ITEM({});", item_name))
+            .map(|item_name| format!("SLINT_DECL_ITEM({item_name});"))
             .collect::<Vec<_>>()
             .join("\n")
     )
@@ -298,6 +300,7 @@ fn gen_corelib(
         "Opacity",
         "Layer",
         "ContextMenu",
+        "MenuItem",
     ];
 
     config.export.include = [
@@ -326,6 +329,7 @@ fn gen_corelib(
         "SortOrder",
         "BitmapFont",
         "PhysicalRegion",
+        "CompositionMode",
     ]
     .iter()
     .chain(items.iter())
@@ -570,6 +574,8 @@ fn gen_corelib(
             "slint_windowrc_set_logical_size",
             "slint_windowrc_set_physical_size",
             "slint_windowrc_color_scheme",
+            "slint_windowrc_supports_native_menu_bar",
+            "slint_windowrc_setup_native_menu_bar",
             "slint_windowrc_default_font_size",
             "slint_windowrc_dispatch_pointer_event",
             "slint_windowrc_dispatch_key_event",
@@ -641,7 +647,7 @@ fn gen_corelib(
             .with_src(crate_dir.join("window.rs"))
             .with_include("slint_enums_internal.h")
             .generate()
-            .with_context(|| format!("Unable to generate bindings for {}", internal_header))?
+            .with_context(|| format!("Unable to generate bindings for {internal_header}"))?
             .write_to_file(include_dir.join(internal_header));
     }
 
@@ -652,6 +658,7 @@ fn gen_corelib(
     // Previously included types are now excluded (to avoid duplicates)
     public_config.export.exclude = private_exported_types.into_iter().collect();
     public_config.export.exclude.push("LogicalPosition".into());
+    public_config.export.exclude.push("MenuVTable".into());
     public_config.export.include = public_exported_types.into_iter().map(str::to_string).collect();
     public_config.export.body.insert(
         "Rgb8Pixel".to_owned(),
@@ -892,7 +899,8 @@ fn gen_platform(
         .with_include("slint_internal.h")
         .with_after_include(
             r"
-namespace slint::cbindgen_private { struct WindowProperties; }
+namespace slint::platform { struct Rgb565Pixel; }
+namespace slint::cbindgen_private { struct WindowProperties; using slint::platform::Rgb565Pixel; using slint::cbindgen_private::types::TexturePixelFormat; }
 ",
         )
         .generate()

@@ -17,6 +17,7 @@ use crate::namedreference::NamedReference;
 use crate::object_tree::{find_parent_element, Document, ElementRc, PropertyAnimation};
 use derive_more as dm;
 
+use crate::expression_tree::Callable;
 use smol_str::{SmolStr, ToSmolStr};
 
 /// Maps the alias in the other direction than what the BindingExpression::two_way_binding does.
@@ -78,7 +79,7 @@ impl PropertyPath {
                         || enclosing
                             .parent_element
                             .upgrade()
-                            .map_or(false, |e| check_that_element_is_in_the_component(&e, c))
+                            .is_some_and(|e| check_that_element_is_in_the_component(&e, c))
                 }
                 #[cfg(debug_assertions)]
                 debug_assert!(
@@ -86,9 +87,7 @@ impl PropertyPath {
                         &element,
                         last.borrow().base_type.as_component()
                     ),
-                    "The element is not in the component pointed at by the path ({:?} / {:?})",
-                    self,
-                    second
+                    "The element is not in the component pointed at by the path ({self:?} / {second:?})"
                 );
                 element = last.0;
             } else {
@@ -208,7 +207,7 @@ fn analyze_binding(
     let mut depends_on_external = DependsOnExternal(false);
     let element = current.prop.element();
     let name = current.prop.name();
-    if context.currently_analyzing.back().map_or(false, |r| r == current)
+    if (context.currently_analyzing.back() == Some(current))
         && !element.borrow().bindings[name].borrow().two_way_bindings.is_empty()
     {
         let span = element.borrow().bindings[name]
@@ -243,7 +242,7 @@ fn analyze_binding(
     }
 
     let binding = &element.borrow().bindings[name];
-    if binding.borrow().analysis.as_ref().map_or(false, |a| a.no_external_dependencies) {
+    if binding.borrow().analysis.as_ref().is_some_and(|a| a.no_external_dependencies) {
         return depends_on_external;
     } else if !context.visited.insert(current.clone()) {
         return DependsOnExternal(true);
@@ -385,9 +384,7 @@ fn recurse_expression(expr: &Expression, vis: &mut impl FnMut(&PropertyPath, Rea
     const P: ReadType = ReadType::PropertyRead;
     expr.visit(|sub| recurse_expression(sub, vis));
     match expr {
-        Expression::PropertyReference(r)
-        | Expression::CallbackReference(r, _)
-        | Expression::FunctionReference(r, _) => vis(&r.clone().into(), P),
+        Expression::PropertyReference(r) => vis(&r.clone().into(), P),
         Expression::LayoutCacheAccess { layout_cache_prop, .. } => {
             vis(&layout_cache_prop.clone().into(), P)
         }
@@ -411,11 +408,12 @@ fn recurse_expression(expr: &Expression, vis: &mut impl FnMut(&PropertyPath, Rea
             g.rect = Default::default(); // already visited;
             g.visit_named_references(&mut |nr| vis(&nr.clone().into(), P))
         }
-        Expression::FunctionCall { function, arguments, .. } => match &**function {
-            Expression::BuiltinFunctionReference(
-                BuiltinFunction::ImplicitLayoutInfo(orientation),
-                _,
-            ) => {
+        Expression::FunctionCall {
+            function: Callable::Callback(nr) | Callable::Function(nr),
+            ..
+        } => vis(&nr.clone().into(), P),
+        Expression::FunctionCall { function: Callable::Builtin(b), arguments, .. } => match b {
+            BuiltinFunction::ImplicitLayoutInfo(orientation) => {
                 if let [Expression::ElementReference(item)] = arguments.as_slice() {
                     visit_implicit_layout_info_dependencies(
                         *orientation,
@@ -424,7 +422,7 @@ fn recurse_expression(expr: &Expression, vis: &mut impl FnMut(&PropertyPath, Rea
                     );
                 }
             }
-            Expression::BuiltinFunctionReference(BuiltinFunction::ItemAbsolutePosition, _) => {
+            BuiltinFunction::ItemAbsolutePosition => {
                 if let Some(Expression::ElementReference(item)) = arguments.first() {
                     let mut item = item.upgrade().unwrap();
                     while let Some(parent) = find_parent_element(&item) {
@@ -440,7 +438,7 @@ fn recurse_expression(expr: &Expression, vis: &mut impl FnMut(&PropertyPath, Rea
                     }
                 }
             }
-            Expression::BuiltinFunctionReference(BuiltinFunction::ItemFontMetrics, _) => {
+            BuiltinFunction::ItemFontMetrics => {
                 if let Some(Expression::ElementReference(item)) = arguments.first() {
                     let item = item.upgrade().unwrap();
                     vis(
@@ -474,7 +472,7 @@ fn visit_layout_items_dependencies<'a>(
 ) {
     for it in items {
         let mut element = it.element.clone();
-        if element.borrow().repeated.is_some() {
+        if element.borrow().repeated.as_ref().map(|r| recurse_expression(&r.model, vis)).is_some() {
             element = it.element.borrow().base_type.as_component().root_element.clone();
         }
 
@@ -529,7 +527,7 @@ fn visit_implicit_layout_info_dependencies(
                     .property_analysis
                     .borrow()
                     .get("wrap")
-                    .map_or(false, |a| a.is_set || a.is_set_externally);
+                    .is_some_and(|a| a.is_set || a.is_set_externally);
             if wrap_set && orientation == Orientation::Vertical {
                 vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
             }

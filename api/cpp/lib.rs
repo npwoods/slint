@@ -3,8 +3,10 @@
 
 /*! This crate just expose the function used by the C++ integration */
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 use alloc::rc::Rc;
 use core::ffi::c_void;
@@ -102,17 +104,16 @@ pub unsafe extern "C" fn slint_quit_event_loop() {
 pub unsafe extern "C" fn slint_register_font_from_path(
     win: *const WindowAdapterRcOpaque,
     path: &SharedString,
-    error_str: *mut SharedString,
+    error_str: &mut SharedString,
 ) {
     let window_adapter = &*(win as *const Rc<dyn WindowAdapter>);
-    core::ptr::write(
-        error_str,
-        match window_adapter.renderer().register_font_from_path(std::path::Path::new(path.as_str()))
-        {
-            Ok(()) => Default::default(),
-            Err(err) => err.to_string().into(),
-        },
-    )
+    *error_str = match window_adapter
+        .renderer()
+        .register_font_from_path(std::path::Path::new(path.as_str()))
+    {
+        Ok(()) => Default::default(),
+        Err(err) => i_slint_core::string::ToSharedString::to_shared_string(&err),
+    };
 }
 
 #[cfg(feature = "std")]
@@ -120,16 +121,13 @@ pub unsafe extern "C" fn slint_register_font_from_path(
 pub unsafe extern "C" fn slint_register_font_from_data(
     win: *const WindowAdapterRcOpaque,
     data: i_slint_core::slice::Slice<'static, u8>,
-    error_str: *mut SharedString,
+    error_str: &mut SharedString,
 ) {
     let window_adapter = &*(win as *const Rc<dyn WindowAdapter>);
-    core::ptr::write(
-        error_str,
-        match window_adapter.renderer().register_font_from_memory(data.as_slice()) {
-            Ok(()) => Default::default(),
-            Err(err) => err.to_string().into(),
-        },
-    )
+    *error_str = match window_adapter.renderer().register_font_from_memory(data.as_slice()) {
+        Ok(()) => Default::default(),
+        Err(err) => i_slint_core::string::ToSharedString::to_shared_string(&err),
+    };
 }
 
 #[no_mangle]
@@ -150,6 +148,11 @@ pub extern "C" fn slint_string_to_float(string: &SharedString, value: &mut f32) 
         }
         Err(_) => false,
     }
+}
+
+#[no_mangle]
+pub extern "C" fn slint_string_character_count(string: &SharedString) -> usize {
+    unicode_segmentation::UnicodeSegmentation::graphemes(string.as_str(), true).count()
 }
 
 #[no_mangle]

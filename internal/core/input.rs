@@ -15,7 +15,6 @@ use crate::timers::Timer;
 use crate::window::{WindowAdapter, WindowInner};
 use crate::{Coord, Property, SharedString};
 use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use const_field_offset::FieldOffsets;
 use core::cell::Cell;
@@ -435,22 +434,24 @@ pub enum TextShortcut {
 /// Represents how an item's key_event handler dealt with a key event.
 /// An accepted event results in no further event propagation.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum KeyEventResult {
     /// The event was handled.
     EventAccepted,
     /// The event was not handled and should be sent to other items.
+    #[default]
     EventIgnored,
 }
 
 /// Represents how an item's focus_event handler dealt with a focus event.
 /// An accepted event results in no further event propagation.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FocusEventResult {
     /// The event was handled.
     FocusAccepted,
     /// The event was not handled and should be sent to other items.
+    #[default]
     FocusIgnored,
 }
 
@@ -465,7 +466,7 @@ pub enum FocusEvent {
     FocusOut,
     /// This event is sent when the window receives the keyboard focus.
     WindowReceivedFocus,
-    /// This event is sent when the window looses the keyboard focus.
+    /// This event is sent when the window looses the keyboard focus. (including if this is because of a popup)
     WindowLostFocus,
 }
 
@@ -644,12 +645,12 @@ pub(crate) fn send_exit_events(
     for (idx, it) in old_input_state.item_stack.iter().enumerate() {
         let Some(item) = it.0.upgrade() else { break };
         let g = item.geometry();
-        let contains = pos.map_or(false, |p| g.contains(p));
+        let contains = pos.is_some_and(|p| g.contains(p));
         if let Some(p) = pos.as_mut() {
             *p -= g.origin.to_vector();
         }
         if !contains || clipped {
-            if crate::item_rendering::is_clipping_item(item.borrow()) {
+            if item.borrow().as_ref().clips_children() {
                 clipped = true;
             }
             item.borrow().as_ref().input_event(MouseEvent::Exit, window_adapter, &item);
@@ -668,16 +669,15 @@ pub(crate) fn send_exit_events(
 /// of mouse grabber.
 /// Returns a new mouse grabber stack.
 pub fn process_mouse_input(
-    component: ItemTreeRc,
+    root: ItemRc,
     mouse_event: MouseEvent,
     window_adapter: &Rc<dyn WindowAdapter>,
     mouse_input_state: MouseInputState,
 ) -> MouseInputState {
     let mut result = MouseInputState::default();
-    let root = ItemRc::new(component.clone(), 0);
     let r = send_mouse_event_to_item(
         mouse_event,
-        root,
+        root.clone(),
         window_adapter,
         &mut result,
         mouse_input_state.top_item().as_ref(),
@@ -697,7 +697,7 @@ pub fn process_mouse_input(
         if r.has_aborted() {
             // An accepted wheel event might have moved things. Send a move event at the position to reset the has-hover
             return process_mouse_input(
-                component,
+                root,
                 MouseEvent::Moved { position },
                 window_adapter,
                 result,
@@ -757,8 +757,8 @@ fn send_mouse_event_to_item(
     let mut event_for_children = mouse_event;
     event_for_children.translate(-geom.origin.to_vector());
 
-    let filter_result = if mouse_event.position().map_or(false, |p| geom.contains(p))
-        || crate::item_rendering::is_clipping_item(item)
+    let filter_result = if mouse_event.position().is_some_and(|p| geom.contains(p))
+        || item.as_ref().clips_children()
     {
         item.as_ref().input_event_filter_before_children(
             event_for_children,

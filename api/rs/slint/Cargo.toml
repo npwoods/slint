@@ -20,14 +20,7 @@ path = "lib.rs"
 
 [features]
 
-default = [
-  "std",
-  "backend-default",
-  "renderer-femtovg",
-  "renderer-software",
-  "accessibility",
-  "compat-1-2",
-]
+default = ["std", "backend-default", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"]
 
 ## Mandatory feature:
 ## This feature is required to keep the compatibility with Slint 1.2
@@ -84,6 +77,12 @@ accessibility = ["i-slint-backend-selector/accessibility"]
 ## [HasDisplayHandle](raw_window_handle_06::HasDisplayHandle) implementation.
 raw-window-handle-06 = ["dep:raw-window-handle-06", "i-slint-backend-selector/raw-window-handle-06"]
 
+## Enable the default image formats from the `image` crate, to support additional image formats in [`Image::load_from_path`]
+## and `@image-url`. When this feature is disabled, only PNG and JPEG are supported. When enabled,
+## the following image formats are supported:
+## AVIF, BMP, DDS, Farbfeld, GIF, HDR, ICO, JPEG, EXR, PNG, PNM, QOI, TGA, TIFF, WebP.
+image-default-formats = ["i-slint-core/image-default-formats"]
+
 #! ### Backends
 
 #! Slint needs a backend that will act as liaison between Slint and the OS.
@@ -136,8 +135,8 @@ backend-default = ["i-slint-backend-selector/default", "i-slint-backend-qt"]
 # deprecated aliases
 renderer-winit-femtovg = ["renderer-femtovg"]
 renderer-winit-skia = ["renderer-skia"]
-renderer-winit-skia-opengl= ["renderer-skia-opengl"]
-renderer-winit-skia-vulkan= ["renderer-skia-vulkan"]
+renderer-winit-skia-opengl = ["renderer-skia-opengl"]
+renderer-winit-skia-vulkan = ["renderer-skia-vulkan"]
 renderer-winit-software = ["renderer-software"]
 
 ## Render using the [FemtoVG](https://crates.io/crates/femtovg) crate.
@@ -164,10 +163,16 @@ backend-linuxkms = ["i-slint-backend-selector/backend-linuxkms", "std"]
 backend-linuxkms-noseat = ["i-slint-backend-selector/backend-linuxkms-noseat", "std"]
 
 ## Use the backend based on the [android-activity](https://docs.rs/android-activity) crate. (Using it's native activity feature)
-backend-android-activity-06 = ["i-slint-backend-android-activity/native-activity", "i-slint-backend-android-activity/aa-06"]
+backend-android-activity-06 = [
+  "i-slint-backend-android-activity/native-activity",
+  "i-slint-backend-android-activity/aa-06",
+]
 
 ## **Deprecated** Use previous version of android-activity. This is mutually exclusive with `backend-android-activity-06`.
-backend-android-activity-05 = ["i-slint-backend-android-activity/native-activity", "i-slint-backend-android-activity/aa-05"]
+backend-android-activity-05 = [
+  "i-slint-backend-android-activity/native-activity",
+  "i-slint-backend-android-activity/aa-05",
+]
 
 [dependencies]
 i-slint-core = { workspace = true }
@@ -187,6 +192,8 @@ log = { workspace = true, optional = true }
 
 raw-window-handle-06 = { workspace = true, optional = true }
 
+unicode-segmentation = { workspace = true }
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # FemtoVG is disabled on android because it doesn't compile without setting RUST_FONTCONFIG_DLOPEN=on
 # end even then wouldn't work because it can't load fonts
@@ -198,15 +205,17 @@ i-slint-backend-android-activity = { workspace = true, optional = true }
 [dev-dependencies]
 slint-build = { path = "../build" }
 # The next can not be a workspace dependency because it may not have a version
-i-slint-backend-testing = {  path = "../../../internal/backends/testing", features = ["internal"] }
+i-slint-backend-testing = { path = "../../../internal/backends/testing", features = ["internal"] }
+i-slint-renderer-skia = { path = "../../../internal/renderers/skia" }
 serde_json = { workspace = true }
 serde = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"]}
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
 async-compat = { version = "0.2.4" }
+bytemuck = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # this line is there to add the "enable" feature by default, but only on linux
-i-slint-backend-qt = { workspace = true, features = [ "enable" ], optional = true }
+i-slint-backend-qt = { workspace = true, features = ["enable"], optional = true }
 
 [package.metadata.docs.rs]
 features = ["document-features", "log", "gettext", "renderer-software", "renderer-femtovg", "raw-window-handle-06"]

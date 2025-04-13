@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
 use core::ffi::c_void;
 use i_slint_core::api::{
@@ -255,7 +254,7 @@ impl Platform for CppPlatform {
 
     #[cfg(feature = "esp-println")]
     fn debug_log(&self, arguments: core::fmt::Arguments) {
-        esp_println::println!("{}", arguments);
+        esp_println::println!("{arguments}");
     }
 }
 
@@ -361,6 +360,268 @@ mod software_renderer {
     };
     use i_slint_core::SharedVector;
 
+    #[cfg(feature = "experimental")]
+    use i_slint_core::software_renderer::{
+        CompositionMode, PremultipliedRgbaColor, RenderingRotation, TargetPixelBuffer, Texture,
+        TexturePixelFormat,
+    };
+
+    #[cfg(feature = "experimental")]
+    type CppTargetPixelBufferUserData = *mut c_void;
+
+    #[repr(C)]
+    #[cfg(feature = "experimental")]
+    pub struct CppInternalTexture {
+        pub bytes: *const u8,
+        pub bytes_len: usize,
+        pub pixel_format: TexturePixelFormat,
+        pub pixel_stride: u16,
+        pub width: u16,
+        pub height: u16,
+        pub delta_x: u16,
+        pub delta_y: u16,
+        pub source_offset_x: u16,
+        pub source_offset_y: u16,
+    }
+
+    #[repr(C)]
+    #[cfg(feature = "experimental")]
+    pub struct CppRgb8TargetPixelBuffer {
+        user_data: CppTargetPixelBufferUserData,
+        line_slice: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            usize,
+            slice_ptr: &mut *mut Rgb8Pixel,
+            slice_len: *mut usize,
+        ),
+        num_lines: unsafe extern "C" fn(CppTargetPixelBufferUserData) -> usize,
+        fill_rectangle: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            i16,
+            i16,
+            i16,
+            i16,
+            u8,
+            u8,
+            u8,
+            u8,
+            CompositionMode,
+        ) -> bool,
+        draw_texture: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            i16,
+            i16,
+            i16,
+            i16,
+            &CppInternalTexture,
+            u32,
+            u8,
+            i32,
+            CompositionMode,
+        ) -> bool,
+    }
+
+    #[cfg(feature = "experimental")]
+    impl TargetPixelBuffer for CppRgb8TargetPixelBuffer {
+        type TargetPixel = Rgb8Pixel;
+
+        fn line_slice(&mut self, line_number: usize) -> &mut [Self::TargetPixel] {
+            unsafe {
+                let mut data = core::ptr::null_mut();
+                let mut len = 0;
+                (self.line_slice)(self.user_data, line_number, &mut data, &mut len);
+                core::slice::from_raw_parts_mut(data, len)
+            }
+        }
+
+        fn num_lines(&self) -> usize {
+            unsafe { (self.num_lines)(self.user_data) }
+        }
+
+        fn fill_rectangle(
+            &mut self,
+            x: i16,
+            y: i16,
+            width: i16,
+            height: i16,
+            color: PremultipliedRgbaColor,
+            composition_mode: CompositionMode,
+        ) -> bool {
+            unsafe {
+                (self.fill_rectangle)(
+                    self.user_data,
+                    x,
+                    y,
+                    width,
+                    height,
+                    color.red,
+                    color.green,
+                    color.blue,
+                    color.alpha,
+                    composition_mode,
+                )
+            }
+        }
+
+        fn draw_texture(
+            &mut self,
+            x: i16,
+            y: i16,
+            width: i16,
+            height: i16,
+            texture: Texture<'_>,
+            colorize: u32,
+            alpha: u8,
+            rotation: RenderingRotation,
+            composition_mode: CompositionMode,
+        ) -> bool {
+            unsafe {
+                (self.draw_texture)(
+                    self.user_data,
+                    x,
+                    y,
+                    width,
+                    height,
+                    &CppInternalTexture {
+                        bytes: texture.bytes.as_ptr(),
+                        bytes_len: texture.bytes.len(),
+                        pixel_format: texture.pixel_format,
+                        pixel_stride: texture.pixel_stride,
+                        width: texture.width,
+                        height: texture.height,
+                        delta_x: texture.delta_x,
+                        delta_y: texture.delta_y,
+                        source_offset_x: texture.source_offset_x,
+                        source_offset_y: texture.source_offset_y,
+                    },
+                    colorize,
+                    alpha,
+                    rotation.angle() as i32,
+                    composition_mode,
+                )
+            }
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[repr(C)]
+    pub struct CppRgb565TargetPixelBuffer {
+        user_data: CppTargetPixelBufferUserData,
+        line_slice: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            usize,
+            slice_ptr: &mut *mut u16,
+            slice_len: *mut usize,
+        ),
+        num_lines: unsafe extern "C" fn(CppTargetPixelBufferUserData) -> usize,
+        fill_rectangle: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            i16,
+            i16,
+            i16,
+            i16,
+            u8,
+            u8,
+            u8,
+            u8,
+            CompositionMode,
+        ) -> bool,
+        draw_texture: unsafe extern "C" fn(
+            CppTargetPixelBufferUserData,
+            i16,
+            i16,
+            i16,
+            i16,
+            &CppInternalTexture,
+            u32,
+            u8,
+            i32,
+            CompositionMode,
+        ) -> bool,
+    }
+
+    #[cfg(feature = "experimental")]
+    impl TargetPixelBuffer for CppRgb565TargetPixelBuffer {
+        type TargetPixel = Rgb565Pixel;
+
+        fn line_slice(&mut self, line_number: usize) -> &mut [Self::TargetPixel] {
+            unsafe {
+                let mut data = core::ptr::null_mut();
+                let mut len = 0;
+                (self.line_slice)(self.user_data, line_number, &mut data, &mut len);
+                core::slice::from_raw_parts_mut(data as *mut Rgb565Pixel, len)
+            }
+        }
+
+        fn num_lines(&self) -> usize {
+            unsafe { (self.num_lines)(self.user_data) }
+        }
+
+        fn fill_rectangle(
+            &mut self,
+            x: i16,
+            y: i16,
+            width: i16,
+            height: i16,
+            color: PremultipliedRgbaColor,
+            composition_mode: CompositionMode,
+        ) -> bool {
+            unsafe {
+                (self.fill_rectangle)(
+                    self.user_data,
+                    x,
+                    y,
+                    width,
+                    height,
+                    color.red,
+                    color.green,
+                    color.blue,
+                    color.alpha,
+                    composition_mode,
+                )
+            }
+        }
+
+        fn draw_texture(
+            &mut self,
+            x: i16,
+            y: i16,
+            width: i16,
+            height: i16,
+            texture: Texture<'_>,
+            colorize: u32,
+            alpha: u8,
+            rotation: RenderingRotation,
+            composition_mode: CompositionMode,
+        ) -> bool {
+            unsafe {
+                (self.draw_texture)(
+                    self.user_data,
+                    x,
+                    y,
+                    width,
+                    height,
+                    &CppInternalTexture {
+                        bytes: texture.bytes.as_ptr(),
+                        bytes_len: texture.bytes.len(),
+                        pixel_format: texture.pixel_format,
+                        pixel_stride: texture.pixel_stride,
+                        width: texture.width,
+                        height: texture.height,
+                        delta_x: texture.delta_x,
+                        delta_y: texture.delta_y,
+                        source_offset_x: texture.source_offset_x,
+                        source_offset_y: texture.source_offset_y,
+                    },
+                    colorize,
+                    alpha,
+                    rotation.angle() as i32,
+                    composition_mode,
+                )
+            }
+        }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn slint_software_renderer_new(
         buffer_age: u32,
@@ -392,6 +653,26 @@ mod software_renderer {
         renderer.render(buffer, pixel_stride)
     }
 
+    #[cfg(feature = "experimental")]
+    #[no_mangle]
+    pub unsafe extern "C" fn slint_software_renderer_render_accel_rgb8(
+        r: SoftwareRendererOpaque,
+        buffer: *mut CppRgb8TargetPixelBuffer,
+    ) -> PhysicalRegion {
+        let renderer = &*(r as *const SoftwareRenderer);
+        unsafe { renderer.render_into_buffer(&mut *buffer) }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[no_mangle]
+    pub unsafe extern "C" fn slint_software_renderer_render_accel_rgb565(
+        r: SoftwareRendererOpaque,
+        buffer: *mut CppRgb565TargetPixelBuffer,
+    ) -> PhysicalRegion {
+        let renderer = &*(r as *const SoftwareRenderer);
+        unsafe { renderer.render_into_buffer(&mut *buffer) }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn slint_software_renderer_render_rgb565(
         r: SoftwareRendererOpaque,
@@ -404,7 +685,67 @@ mod software_renderer {
         renderer.render(buffer, pixel_stride)
     }
 
-    #[cfg(feature = "experimental")]
+    struct LineByLineProcessor<TargetPixel> {
+        process_line_fn: extern "C" fn(
+            *mut core::ffi::c_void,
+            usize,
+            usize,
+            usize,
+            extern "C" fn(*const core::ffi::c_void, *mut TargetPixel, usize),
+            *const core::ffi::c_void,
+        ),
+        user_data: *mut core::ffi::c_void,
+    }
+
+    impl<TargetPixel: i_slint_core::software_renderer::TargetPixel>
+        i_slint_core::software_renderer::LineBufferProvider for LineByLineProcessor<TargetPixel>
+    {
+        type TargetPixel = TargetPixel;
+        fn process_line(
+            &mut self,
+            line: usize,
+            range: core::ops::Range<usize>,
+            render_fn: impl FnOnce(&mut [TargetPixel]),
+        ) {
+            self.cpp_process_line(line, range, render_fn);
+        }
+    }
+
+    impl<TargetPixel> LineByLineProcessor<TargetPixel> {
+        fn cpp_process_line<RenderFn: FnOnce(&mut [TargetPixel])>(
+            &mut self,
+            line: usize,
+            range: core::ops::Range<usize>,
+            render_fn: RenderFn,
+        ) {
+            let mut render_fn = Some(render_fn);
+            let render_fn_ptr = &mut render_fn as *mut Option<RenderFn> as *const core::ffi::c_void;
+
+            extern "C" fn cpp_render_line_callback<
+                TargetPixel,
+                RenderFn: FnOnce(&mut [TargetPixel]),
+            >(
+                render_fn_ptr: *const core::ffi::c_void,
+                line_start: *mut TargetPixel,
+                len: usize,
+            ) {
+                let line_slice = unsafe { core::slice::from_raw_parts_mut(line_start, len) };
+                let render_fn =
+                    unsafe { (*(render_fn_ptr as *mut Option<RenderFn>)).take().unwrap() };
+                render_fn(line_slice);
+            }
+
+            (self.process_line_fn)(
+                self.user_data,
+                line,
+                range.start,
+                range.end,
+                cpp_render_line_callback::<TargetPixel, RenderFn>,
+                render_fn_ptr,
+            );
+        }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn slint_software_renderer_render_by_line_rgb565(
         r: SoftwareRendererOpaque,
@@ -413,74 +754,31 @@ mod software_renderer {
             usize,
             usize,
             usize,
-            extern "C" fn(*const core::ffi::c_void, *mut u16, usize),
+            extern "C" fn(*const core::ffi::c_void, *mut Rgb565Pixel, usize),
             *const core::ffi::c_void,
         ),
         user_data: *mut core::ffi::c_void,
     ) -> PhysicalRegion {
-        struct Rgb565Processor {
-            process_line_fn: extern "C" fn(
-                *mut core::ffi::c_void,
-                usize,
-                usize,
-                usize,
-                extern "C" fn(*const core::ffi::c_void, *mut u16, usize),
-                *const core::ffi::c_void,
-            ),
-            user_data: *mut core::ffi::c_void,
-        }
-
-        impl i_slint_core::software_renderer::LineBufferProvider for Rgb565Processor {
-            type TargetPixel = Rgb565Pixel;
-            fn process_line(
-                &mut self,
-                line: usize,
-                range: core::ops::Range<usize>,
-                render_fn: impl FnOnce(&mut [Rgb565Pixel]),
-            ) {
-                self.cpp_process_line(line, range, render_fn);
-            }
-        }
-
-        impl Rgb565Processor {
-            fn cpp_process_line<RenderFn: FnOnce(&mut [Rgb565Pixel])>(
-                &mut self,
-                line: usize,
-                range: core::ops::Range<usize>,
-                render_fn: RenderFn,
-            ) {
-                let mut render_fn = Some(render_fn);
-                let render_fn_ptr =
-                    &mut render_fn as *mut Option<RenderFn> as *const core::ffi::c_void;
-
-                extern "C" fn cpp_render_line_callback<RenderFn: FnOnce(&mut [Rgb565Pixel])>(
-                    render_fn_ptr: *const core::ffi::c_void,
-                    line_start: *mut u16,
-                    len: usize,
-                ) {
-                    let line_slice = unsafe {
-                        core::slice::from_raw_parts_mut(line_start as *mut Rgb565Pixel, len)
-                    };
-                    let render_fn =
-                        unsafe { (*(render_fn_ptr as *mut Option<RenderFn>)).take().unwrap() };
-                    render_fn(line_slice);
-                }
-
-                (self.process_line_fn)(
-                    self.user_data,
-                    line,
-                    range.start,
-                    range.end,
-                    cpp_render_line_callback::<RenderFn>,
-                    render_fn_ptr,
-                );
-            }
-        }
-
         let renderer = &*(r as *const SoftwareRenderer);
+        let processor = LineByLineProcessor { process_line_fn, user_data };
+        renderer.render_by_line(processor)
+    }
 
-        let processor = Rgb565Processor { process_line_fn, user_data };
-
+    #[no_mangle]
+    pub unsafe extern "C" fn slint_software_renderer_render_by_line_rgb8(
+        r: SoftwareRendererOpaque,
+        process_line_fn: extern "C" fn(
+            *mut core::ffi::c_void,
+            usize,
+            usize,
+            usize,
+            extern "C" fn(*const core::ffi::c_void, *mut Rgb8Pixel, usize),
+            *const core::ffi::c_void,
+        ),
+        user_data: *mut core::ffi::c_void,
+    ) -> PhysicalRegion {
+        let renderer = &*(r as *const SoftwareRenderer);
+        let processor = LineByLineProcessor { process_line_fn, user_data };
         renderer.render_by_line(processor)
     }
 

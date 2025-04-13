@@ -20,18 +20,18 @@ in detail.
 
  * [Python 3](https://python.org/)
  * [pip](https://pypi.org/project/pip/)
- * [Pipenv](https://pipenv.pypa.io/en/latest/installation.html#installing-pipenv)
+ * [uv](https://docs.astral.sh/uv/)
 
 ## Installation
 
-Slint can be installed with `pip` from the [Python Package Index](https://pypi.org):
+Slint can be installed with `pip` or `uv` from the [Python Package Index](https://pypi.org):
 
 ```
-pip install slint
+uv add slint
 ```
 
 The installation will use binaries provided vi macOS, Windows, and Linux for various architectures. If your target platform is not covered by binaries,
-`pip` will automatically build Slint from source. If that happens, you need common software development tools on your machine, as well as [Rust](https://www.rust-lang.org/learn/get-started).
+`uv` will automatically build Slint from source. If that happens, you need common software development tools on your machine, as well as [Rust](https://www.rust-lang.org/learn/get-started).
 
 ### Building from Source
 
@@ -41,14 +41,14 @@ If you want to just play with this, you can try running our Python port of the [
 
 ```bash
 cd demos/printerdemo/python
-pipenv update
-pipenv run python main.py
+uv run main.py
 ```
 
 ## Quick Start
 
-1. Add Slint Python Package Index to your Python project: `pipenv install slint`
-2. Create a file called `app-window.slint`:
+1. Create a new project with `uv init`.
+2. Add Slint Python Package Index to your Python project: `uv add slint`
+3. Create a file called `app-window.slint`:
 
 ```slint
 import { Button, VerticalBox } from "std-widgets.slint";
@@ -70,7 +70,7 @@ export component AppWindow inherits Window {
 }
 ```
 
-1. Create a file called `main.py`:
+4. Create a file called `main.py`:
 
 ```python
 import slint
@@ -85,7 +85,7 @@ app = App()
 app.run()
 ```
 
-4. Run it with `pipenv run python main.py`
+5. Run it with `uv run main.py`
 
 ## API Overview
 
@@ -144,13 +144,17 @@ print(main_window.counter)
 ### Accessing Globals
 
 [Global Singletons](https://slint.dev/docs/slint/src/language/syntax/globals#global-singletons) are accessible in
-Python as properties in the component instance:
+Python as properties in the component instance.
+
+For example, this Slint code declares a `PrinterJobQueue` singleton:
 
 ```slint,ignore
 export global PrinterJobQueue {
     in-out property <int> job-count;
 }
 ```
+
+Access it as a property on the component instance by its name:
 
 ```python
 print("job count:", instance.PrinterJobQueue.job_count)
@@ -241,7 +245,7 @@ subclasses of `slint.Model`.
 
 Use the `slint.ListModel` class to construct a model from an iterable.
 
-```js
+```python
 component.model = slint.ListModel([1, 2, 3]);
 component.model.append(4)
 del component.model[0]
@@ -296,3 +300,7 @@ data = slint.loader.app.MyData(name = "Simon")
 data.age = 10
 main_window.data = data
 ```
+
+## Third-Party Licenses
+
+For a list of the third-party licenses of all dependencies, see the separate [Third-Party Licenses page](thirdparty.html).

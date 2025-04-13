@@ -18,6 +18,7 @@ pub mod rename_component;
 pub mod test;
 #[cfg(any(test, feature = "preview-engine"))]
 pub mod text_edit;
+pub mod token_info;
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,7 +106,7 @@ pub struct ElementRcNode {
 
 impl std::cmp::PartialEq for ElementRcNode {
     fn eq(&self, other: &Self) -> bool {
-        self.path_and_offset() == other.path_and_offset()
+        self.path_and_offset() == other.path_and_offset() && self.debug_index == other.debug_index
     }
 }
 
@@ -176,14 +177,11 @@ impl ElementRcNode {
     /// Run with all the debug information on the node
     pub fn with_element_debug<R>(
         &self,
-        func: impl Fn(
-            &i_slint_compiler::parser::syntax_nodes::Element,
-            &Option<i_slint_compiler::layout::Layout>,
-        ) -> R,
+        func: impl Fn(&i_slint_compiler::object_tree::ElementDebugInfo) -> R,
     ) -> R {
         let elem = self.element.borrow();
-        let d = &elem.debug.get(self.debug_index).unwrap();
-        func(&d.node, &d.layout)
+        let d = elem.debug.get(self.debug_index).unwrap();
+        func(d)
     }
 
     /// Run with the `Element` node
@@ -285,7 +283,7 @@ impl ElementRcNode {
 
     pub fn contains_offset(&self, offset: TextSize) -> bool {
         self.with_element_node(|node| {
-            node.parent().map_or(false, |n| n.text_range().contains(offset))
+            node.parent().is_some_and(|n| n.text_range().contains(offset))
         })
     }
 }
@@ -521,8 +519,6 @@ impl PropertyChange {
 #[allow(unused)]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub enum PreviewToLspMessage {
-    /// Show a status message in the editor
-    Status { message: String, health: crate::lsp_ext::Health },
     /// Report diagnostics to editor.
     Diagnostics { uri: Url, version: SourceFileVersion, diagnostics: Vec<lsp_types::Diagnostic> },
     /// Show a document in the editor.
@@ -582,22 +578,6 @@ impl ComponentInformation {
 
 #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
 pub mod lsp_to_editor {
-    pub fn send_status_notification(
-        sender: &crate::ServerNotifier,
-        message: &str,
-        health: crate::lsp_ext::Health,
-    ) {
-        sender
-            .send_notification::<crate::lsp_ext::ServerStatusNotification>(
-                crate::lsp_ext::ServerStatusParams {
-                    health,
-                    quiescent: false,
-                    message: Some(message.into()),
-                },
-            )
-            .unwrap_or_else(|e| eprintln!("Error sending notification: {:?}", e));
-    }
-
     pub fn notify_lsp_diagnostics(
         sender: &crate::ServerNotifier,
         uri: lsp_types::Url,

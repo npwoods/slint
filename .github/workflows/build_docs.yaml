@@ -29,9 +29,9 @@ jobs:
             RELEASE_INPUT: ${{ inputs.release }}
         steps:
             - uses: actions/checkout@v4
-            - uses: pnpm/action-setup@v4.0.0
+            - uses: pnpm/action-setup@v4.1.0
               with:
-                version: 9.11.0
+                version: 10.3.0
             - name: Set up rgb crate rustdoc link
               run: |
                   rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
@@ -54,6 +54,7 @@ jobs:
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-about
+                  version: "=0.6.6"
             - name: Upgrade pip and install pipenv
               run: |
                   sudo apt-get install python3-pip pipenv
@@ -104,12 +105,15 @@ jobs:
                 if [ "$RELEASE_INPUT" != "true" ]; then
                     base_url="https://snapshots.slint.dev"
                     base_path="/master/docs/slint/"
+                    slint_download_version=nightly
                 else
                     base_url="https://releases.slint.dev"
                     base_path="/${{ steps.version.outputs.VERSION }}/docs/slint/"
+                    slint_download_version=v${{ steps.version.outputs.VERSION }}
                 fi
                 sed -i "s|BASE_URL = \".*\"|BASE_URL = \"$base_url\"|" docs/astro/src/utils/site-config.ts
                 sed -i "s|BASE_PATH = \".*\"|BASE_PATH = \"$base_path\"|" docs/astro/src/utils/site-config.ts
+                sed -i "s|SLINT_DOWNLOAD_VERSION = \".*\"| SLINT_DOWNLOAD_VERSION = \"$slint_download_version\"|" docs/astro/src/utils/site-config.ts
             - name: "Slint Language Documentation"
               run: cargo xtask slintdocs
             - name: Spellcheck
@@ -127,7 +131,7 @@ jobs:
               run: npx github-actions-ctrf playwright-report/ctrf-report.json
             - name: Upload test results
               if: always()
-              uses: actions/upload-artifact@v3
+              uses: actions/upload-artifact@v4
               with:
                 name: playwright-test-report
                 path: docs/astro/playwright-report/
@@ -136,6 +140,16 @@ jobs:
             - name: "Node docs"
               run: pnpm run docs
               working-directory: api/node
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+
+            - name: Setup headless display
+              uses: pyvista/setup-headless-display-action@v3
+
+            - name: "Python docs"
+              run: uv run build_docs.py
+              working-directory: api/python
 
             - name: Generate a token
               if: ${{ github.ref == 'refs/heads/master' }}
@@ -178,10 +192,11 @@ jobs:
                       target/cppdocs/html
                       docs/astro/dist
                       api/node/docs
+                      api/python/docs
                       docs/site
             - name: "Check for docs warnings in internal crates"
-              run: cargo doc --workspace --no-deps --all-features --exclude slint-node --exclude pyslint --exclude mcu-board-support --exclude printerdemo_mcu --exclude carousel --exclude test-* --exclude plotter --exclude uefi-demo --exclude ffmpeg --exclude gstreamer-player --exclude slint-cpp --exclude slint-python
+              run: cargo doc --workspace --no-deps --all-features --exclude slint-node --exclude pyslint --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude carousel --exclude test-* --exclude plotter --exclude uefi-demo --exclude ffmpeg --exclude gstreamer-player --exclude slint-cpp --exclude slint-python
             - name: Clean cache # Don't cache docs to avoid them including removed classes being published
               run: |
-                  rm -rf target/doc target/cppdocs api/node/docs
+                  rm -rf target/doc target/cppdocs api/node/docs api/python/docs
 

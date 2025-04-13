@@ -5,6 +5,10 @@ export component GroupBox {
     in property title <=> native.title;
     in property enabled <=> native.enabled;
 
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    accessible-enabled: root.enabled;
+
     native := NativeGroupBox {
         GridLayout {
             padding-left: native.native-padding-left;

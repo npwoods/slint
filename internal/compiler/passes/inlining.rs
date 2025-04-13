@@ -43,8 +43,9 @@ pub fn inline(doc: &Document, inline_selection: InlineSelection, diag: &mut Buil
                     InlineSelection::InlineOnlyRequiredComponents => {
                         component_requires_inlining(&c)
                             || element_require_inlining(elem)
-                            // We always inline the root in case the element that instantiate this component needs full inlining
-                            || Rc::ptr_eq(elem, &component.root_element)
+                            // We always inline the root in case the element that instantiate this component needs full inlining,
+                            // except when the root is a repeater component, which are never inlined.
+                            || component.parent_element.upgrade().is_none() && Rc::ptr_eq(elem, &component.root_element)
                             // We always inline other roots as a component can't be both a sub component and a root
                             || roots.contains(&ByAddress(c.clone()))
                     }
@@ -130,14 +131,16 @@ fn inline_element(
             let children = std::mem::take(&mut elem_mut.children);
             let old_count = children.len();
             if let Some(insertion_element) = mapping.get(&element_key(insertion_element.clone())) {
-                if !Rc::ptr_eq(elem, insertion_element) {
-                    debug_assert!(std::rc::Weak::ptr_eq(
-                        &insertion_element.borrow().enclosing_component,
-                        &elem_mut.enclosing_component,
-                    ));
-                    insertion_element.borrow_mut().children.splice(index..index, children);
-                } else {
-                    new_children.splice(index..index, children);
+                if old_count > 0 {
+                    if !Rc::ptr_eq(elem, insertion_element) {
+                        debug_assert!(std::rc::Weak::ptr_eq(
+                            &insertion_element.borrow().enclosing_component,
+                            &elem_mut.enclosing_component,
+                        ));
+                        insertion_element.borrow_mut().children.splice(index..index, children);
+                    } else {
+                        new_children.splice(index..index, children);
+                    }
                 }
                 let mut cip = root_component.child_insertion_point.borrow_mut();
                 if let Some(cip) = cip.as_mut() {
@@ -147,7 +150,7 @@ fn inline_element(
                 } else if Rc::ptr_eq(elem, &root_component.root_element) {
                     *cip = Some((insertion_element.clone(), *index + old_count, cip_node.clone()));
                 };
-            } else {
+            } else if old_count > 0 {
                 // @children was into a PopupWindow
                 debug_assert!(inlined_component.popup_windows.borrow().iter().any(|p| Rc::ptr_eq(
                     &p.component,
@@ -402,7 +405,9 @@ fn duplicate_sub_component(
         init_code: component_to_duplicate.init_code.clone(),
         popup_windows: Default::default(),
         timers: component_to_duplicate.timers.clone(),
+        menu_item_tree: Default::default(),
         exported_global_names: component_to_duplicate.exported_global_names.clone(),
+        used: component_to_duplicate.used.clone(),
         private_properties: Default::default(),
         inherits_popup_window: core::cell::Cell::new(false),
     };
@@ -430,6 +435,16 @@ fn duplicate_sub_component(
         fixup_reference(&mut t.running, mapping);
         fixup_reference(&mut t.triggered, mapping);
     }
+    *new_component.menu_item_tree.borrow_mut() = component_to_duplicate
+        .menu_item_tree
+        .borrow()
+        .iter()
+        .map(|it| {
+            let new_parent =
+                mapping.get(&element_key(it.parent_element.upgrade().unwrap())).unwrap().clone();
+            duplicate_sub_component(it, &new_parent, mapping, priority_delta)
+        })
+        .collect();
     new_component
         .root_constraints
         .borrow_mut()
@@ -617,6 +632,12 @@ fn element_require_inlining(elem: &ElementRc) -> bool {
         // the generators assume that the children list is complete, which sub-components may break
         return true;
     }
+
+    // Popup windows need to be inlined for root.close() to work properly.
+    if super::lower_popups::is_popup_window(elem) {
+        return true;
+    }
+
     for (prop, binding) in &elem.borrow().bindings {
         if prop == "clip" {
             // otherwise the children of the clipped items won't get moved as child of the Clip element

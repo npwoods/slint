@@ -162,7 +162,7 @@ impl i_slint_core::platform::Platform for Backend {
                 .seat
                 .borrow_mut()
                 .open_device(&device)
-                .map_err(|e| format!("Error opening device: {e}"))?;
+                .map_err(|e| format!("Error opening device {}: {e}", device.display()))?;
 
             // For polling for drm::control::Event::PageFlip we need a blocking FD. Would be better to do this non-blocking
             let fd = device.as_fd().as_raw_fd();
@@ -185,7 +185,7 @@ impl i_slint_core::platform::Platform for Backend {
                 .write(true)
                 .open(device)
                 .map(|file| file.into())
-                .map_err(|e| format!("Error opening device: {e}"))?;
+                .map_err(|e| format!("Error opening device {}: {e}", device.display()))?;
 
             Ok(Rc::new(device))
         };
@@ -261,7 +261,6 @@ impl i_slint_core::platform::Platform for Backend {
             }
 
             if let Some(adapter) = self.window.borrow().as_ref() {
-                adapter.register_event_loop(event_loop.handle())?;
                 adapter.clone().render_if_needed(mouse_position_property.as_ref())?;
             };
 

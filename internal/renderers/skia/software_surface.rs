@@ -86,16 +86,13 @@ impl RenderBuffer for SoftbufferRenderBuffer {
             let damage_rects = dirty_region
                 .iter()
                 .map(|logical| {
-                    let physical_rect: PhysicalRect = logical.to_rect() * scale_factor;
+                    let physical_rect: PhysicalRect =
+                        (logical.to_rect() * scale_factor).round_out();
                     softbuffer::Rect {
                         x: physical_rect.min_x().ceil() as _,
                         y: physical_rect.min_y().ceil() as _,
-                        width: ((physical_rect.width().round() as i32).max(1) as u32)
-                            .try_into()
-                            .unwrap(),
-                        height: ((physical_rect.height().round() as i32).max(1) as u32)
-                            .try_into()
-                            .unwrap(),
+                        width: ((physical_rect.width() as i32).max(1) as u32).try_into().unwrap(),
+                        height: ((physical_rect.height() as i32).max(1) as u32).try_into().unwrap(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -126,7 +123,7 @@ impl super::Surface for SoftwareSurface {
 
         let surface =
             softbuffer::Surface::new(&_context, window_handle).map_err(|softbuffer_error| {
-                format!("Error creating softbuffer surface: {}", softbuffer_error)
+                format!("Error creating softbuffer surface: {softbuffer_error}")
             })?;
 
         let surface_access =
@@ -173,7 +170,7 @@ impl super::Surface for SoftwareSurface {
                     None,
                 )
                 .ok_or_else(|| {
-                    format!("Error wrapping target buffer for rendering into with Skia")
+                    "Error wrapping target buffer for rendering into with Skia".to_string()
                 })?;
 
                 let dirty_region = callback(surface_borrow.canvas(), None, age);
@@ -190,10 +187,34 @@ impl super::Surface for SoftwareSurface {
     fn bits_per_pixel(&self) -> Result<u8, i_slint_core::platform::PlatformError> {
         Ok(24)
     }
+
+    fn use_partial_rendering(&self) -> bool {
+        true
+    }
 }
 
 impl<T: RenderBuffer + 'static> From<T> for SoftwareSurface {
     fn from(render_buffer: T) -> Self {
         Self { render_buffer: Box::new(render_buffer) }
+    }
+}
+
+impl<T: RenderBuffer + 'static> RenderBuffer for Rc<T> {
+    fn with_buffer(
+        &self,
+        window: &Window,
+        size: PhysicalWindowSize,
+        render_callback: &mut dyn FnMut(
+            NonZeroU32,
+            NonZeroU32,
+            skia_safe::ColorType,
+            u8,
+            &mut [u8],
+        ) -> Result<
+            Option<DirtyRegion>,
+            i_slint_core::platform::PlatformError,
+        >,
+    ) -> Result<(), i_slint_core::platform::PlatformError> {
+        self.as_ref().with_buffer(window, size, render_callback)
     }
 }

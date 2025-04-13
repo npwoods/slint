@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import { loadFile, loadSource, CompileError } from "../dist/index.js";
 
-const dirname = path.dirname(fileURLToPath(import.meta.url));
+const dirname = path.dirname(
+    fileURLToPath(import.meta.url).replace("build", "__test__"),
+);
 
 // loadFile api
 test("loadFile", (t) => {
@@ -271,7 +273,7 @@ test("loadFile enum", (t) => {
 
 test("file loader", (t) => {
     const testSource = `export component Test {
-       in-out property <string> text: "Hello World"; 
+       in-out property <string> text: "Hello World";
     }`;
     const demo = loadFile(
         path.join(dirname, "resources/test-fileloader.slint"),

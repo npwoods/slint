@@ -25,7 +25,6 @@ use crate::rtti::*;
 use crate::window::WindowAdapter;
 use crate::Callback;
 use crate::Property;
-#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use const_field_offset::FieldOffsets;
@@ -36,7 +35,6 @@ use core::time::Duration;
 use euclid::num::Ceil;
 use euclid::num::Zero;
 use i_slint_core_macros::*;
-#[cfg(not(feature = "std"))]
 #[allow(unused)]
 use num_traits::Float;
 
@@ -148,6 +146,19 @@ impl Item for Flickable {
         );
         RenderingResult::ContinueRenderingChildren
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        true
+    }
 }
 
 impl ItemConsts for Flickable {
@@ -234,7 +245,7 @@ impl FlickableData {
             }
             MouseEvent::Moved { position } => {
                 let do_intercept = inner.capture_events
-                    || inner.pressed_time.map_or(false, |pressed_time| {
+                    || inner.pressed_time.is_some_and(|pressed_time| {
                         if crate::animations::current_tick() - pressed_time > DURATION_THRESHOLD {
                             return false;
                         }

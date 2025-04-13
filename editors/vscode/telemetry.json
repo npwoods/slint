@@ -5,7 +5,7 @@
                 "classification": "EndUserPseudonymizedInformation",
                 "purpose": "FeatureInsight",
                 "comment": "The programming languages used in the project"
-            }			
+            }
 		},
         "lsp-panic": {
             "version": {
@@ -51,7 +51,7 @@
             "purpose": "FeatureInsight",
             "comment": "The platform/OS the extension is running on"
         },
-        "commmon.language": {
+        "common.language": {
             "classification": "SystemMetaData",
             "purpose": "FeatureInsight",
             "comment": "The user's language as reported by VS Code"

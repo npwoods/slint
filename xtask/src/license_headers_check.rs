@@ -147,7 +147,7 @@ impl<'a> SourceFileWithTags<'a> {
         &self.source[tag_loc.start..tag_loc.end]
     }
 
-    fn tag_matches(&self, expected_tag: &LicenseHeader, license: &str) -> bool {
+    fn has_license_header(&self, expected_tag: &LicenseHeader) -> bool {
         let tag_loc = match &self.tag_location {
             Some(loc) => loc,
             None => return false,
@@ -158,8 +158,10 @@ impl<'a> SourceFileWithTags<'a> {
             .trim_end_matches(self.tag_style.overall_end);
         let mut tag_entries = found_tag.split(self.tag_style.line_break);
         let Some(_copyright_entry) = tag_entries.next() else { return false };
-        let Some(license_entry) = tag_entries.next() else { return false };
-        expected_tag.to_string(self.tag_style, license) == license_entry
+        // Require _some_ license ...
+        let Some(_) = tag_entries.next() else { return false };
+        // ... as well as the SPDX license line at the start
+        expected_tag.0 == SPDX_LICENSE_LINE
     }
 
     fn replace_tag(&self, replacement: &LicenseHeader, license: &str) -> String {
@@ -199,7 +201,7 @@ impl<'a> SourceFileWithTags<'a> {
         let new_header = if next_char == Some(&b'\n') || next_char.is_none() {
             new_header
         } else {
-            format!("{}\n", new_header)
+            format!("{new_header}\n")
         };
 
         match loc {
@@ -436,11 +438,12 @@ lazy_static! {
         ("^\\.clang-format$", LicenseLocation::NoLicense),
         ("^\\.github/.*\\.md$", LicenseLocation::NoLicense),
         ("^\\.mailmap$", LicenseLocation::NoLicense),
-        ("^\\.reuse/dep5$", LicenseLocation::NoLicense), // .reuse files have no license headers
+        ("^\\.mise/tasks/", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("^api/cpp/docs/conf\\.py$", LicenseLocation::NoLicense),
         ("^docs/reference/Pipfile$", LicenseLocation::NoLicense),
         ("^docs/reference/conf\\.py$", LicenseLocation::NoLicense),
         ("^editors/vscode/src/snippets\\.ts$", LicenseLocation::NoLicense), // liberal license
+        ("^editors/vscode/tests/grammar/.*\\.slint$", LicenseLocation::NoLicense), // License header breaks these tests
         ("^editors/tree-sitter-slint/binding\\.gyp$", LicenseLocation::NoLicense), // liberal license
         ("^editors/tree-sitter-slint/test-to-corpus\\.py$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("^Cargo\\.lock$", LicenseLocation::NoLicense),
@@ -464,6 +467,7 @@ lazy_static! {
         ("(^|/)pnpm-lock\\.yaml$", LicenseLocation::NoLicense),
         ("(^|/)biome\\.json$", LicenseLocation::NoLicense),
         ("(^|/)package-lock\\.json$", LicenseLocation::NoLicense),
+        ("(^|/)py.typed$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
 
         // Path prefix matches:
         ("^editors/tree-sitter-slint/corpus/", LicenseLocation::NoLicense), // liberal license
@@ -486,9 +490,11 @@ lazy_static! {
         ("\\.css$", LicenseLocation::NoLicense),
         ("\\.gitattributes$", LicenseLocation::NoLicense),
         ("\\.gitignore$", LicenseLocation::NoLicense),
+        ("\\.vscodeignore$", LicenseLocation::NoLicense),
         ("\\.dockerignore$", LicenseLocation::NoLicense),
         ("\\.dockerignore$", LicenseLocation::NoLicense),
         ("\\.prettierignore$", LicenseLocation::NoLicense),
+        ("\\.bazelignore$", LicenseLocation::NoLicense),
         ("\\.npmignore$", LicenseLocation::NoLicense),
         ("\\.h$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         ("\\.html$", LicenseLocation::NoLicense),
@@ -521,6 +527,7 @@ lazy_static! {
         ("\\.tmPreferences$", LicenseLocation::NoLicense),
         ("\\.toml$", LicenseLocation::NoLicense),
         ("\\.ts$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
+        ("\\.tsx$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
         ("\\.ttf$", LicenseLocation::NoLicense),
         ("\\.txt$", LicenseLocation::NoLicense),
         ("\\.ui$", LicenseLocation::NoLicense),
@@ -529,7 +536,14 @@ lazy_static! {
         ("\\.yaml$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("\\.yml$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("\\.py$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
+        ("\\.pyi$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
         ("\\.proto$", LicenseLocation::Tag(LicenseTagStyle::c_style_comment_style())),
+        ("\\.bazelrc$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
+        ("MODULE.bazel$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
+        ("BUILD.bazel$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
+        ("MODULE.bazel.lock$", LicenseLocation::NoLicense),
+        ("\\.patch$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())), // Doesn't really need a # prefix, but better than nothing
+        ("\\.bazelversion$", LicenseLocation::NoLicense),
     ]
     .iter()
     .map(|(re, ty)| (regex::Regex::new(re).unwrap(), *ty))
@@ -565,7 +579,7 @@ const MIT_OR_APACHE2_LICENSE: &str = "MIT OR Apache-2.0";
 // Copyright prefix is enforced by the tag scanning (tag_start).
 pub struct LicenseHeader<'a>(&'a str);
 
-impl<'a> LicenseHeader<'a> {
+impl LicenseHeader<'_> {
     fn to_string(&self, style: &LicenseTagStyle, license: &str) -> String {
         let mut result = [style.line_prefix, style.line_indentation, self.0].concat();
 
@@ -592,27 +606,45 @@ const EXPECTED_REPOSITORY: &str = "https://github.com/slint-ui/slint";
 
 fn collect_files() -> Result<Vec<PathBuf>> {
     let root = super::root_dir();
-    let ls_files_output = super::run_command(
-        "git",
-        &["ls-files", "-z"],
-        std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
-    )?
-    .stdout;
+
     let mut files = Vec::new();
-    for path in ls_files_output.split(|ch| *ch == 0) {
+    let (ls_files_output, split_char) = if root.join(".jj").exists() {
+        (
+            super::run_command(
+                "jj",
+                &["file", "list"],
+                std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
+            )?
+            .stdout,
+            b'\n',
+        )
+    } else {
+        (
+            super::run_command(
+                "git",
+                &["ls-files", "-z"],
+                std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
+            )?
+            .stdout,
+            b'\0',
+        )
+    };
+
+    for path in ls_files_output.split(|ch| *ch == split_char) {
         if path.is_empty() {
             continue;
         }
         let path = PathBuf::from_str(
             std::str::from_utf8(path)
-                .context("Error decoding git ls-files command output as utf-8")?,
+                .context("Error decoding file list command output from VCS as utf-8")?,
         )
-        .context("Failed to decide path output in git ls-files")?;
+        .context("Failed to decide path output in VCS file list")?;
 
         if !path.is_dir() {
             files.push(root.join(path));
         }
     }
+
     Ok(files)
 }
 
@@ -626,7 +658,7 @@ impl CargoDependency {
     fn new(encoded_value: &toml_edit::Value) -> Option<Self> {
         match encoded_value {
             toml_edit::Value::String(s) => {
-                return Some(Self::Full { version: s.value().clone(), path: String::new() })
+                Some(Self::Full { version: s.value().clone(), path: String::new() })
             }
             toml_edit::Value::Float(_) => None,
             toml_edit::Value::Datetime(_) => None,
@@ -832,7 +864,7 @@ impl LicenseHeaderCheck {
             if result.is_err() {
                 seen_errors = true;
                 if self.show_all {
-                    eprintln!("Error: {:?}", result);
+                    eprintln!("Error: {result:?}");
                 } else {
                     return result.map_err(|e| e.into());
                 }
@@ -859,7 +891,7 @@ impl LicenseHeaderCheck {
             } else {
                 Err(anyhow!("Missing tag"))
             }
-        } else if source.tag_matches(&EXPECTED_HEADER, license) {
+        } else if source.has_license_header(&EXPECTED_HEADER) {
             Ok(())
         } else if self.fix_it {
             eprintln!("Fixing up {path:?} as instructed. It has a wrong license header.");
@@ -1004,7 +1036,7 @@ impl LicenseHeaderCheck {
             }
             LicenseLocation::NoLicense => {
                 if self.verbose {
-                    println!("Skipping {} as configured", path_str);
+                    println!("Skipping {path_str} as configured");
                 }
                 Ok(())
             }

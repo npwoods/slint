@@ -6,8 +6,11 @@
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![deny(unsafe_code)]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
+
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 #[cfg(all(not(feature = "std"), feature = "unsafe-single-threaded"))]
 pub(crate) mod unsafe_single_threaded;
@@ -17,6 +20,8 @@ compile_error!(
 );
 #[cfg(all(not(feature = "std"), feature = "unsafe-single-threaded"))]
 use crate::unsafe_single_threaded::thread_local;
+#[cfg(feature = "std")]
+use std::thread_local;
 
 pub mod accessibility;
 pub mod animations;
@@ -34,6 +39,7 @@ pub mod item_tree;
 pub mod items;
 pub mod layout;
 pub mod lengths;
+pub mod menus;
 pub mod model;
 pub mod platform;
 pub mod properties;

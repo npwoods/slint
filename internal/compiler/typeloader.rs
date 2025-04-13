@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
+use crate::expression_tree::Callable;
 use crate::object_tree::{self, Document, ExportedName, Exports};
 use crate::parser::{syntax_nodes, NodeOrToken, SyntaxKind, SyntaxToken};
 use crate::typeregister::TypeRegister;
@@ -286,6 +287,8 @@ impl Snapshotter {
             imports: document.imports.clone(),
             exports,
             embedded_file_resources: document.embedded_file_resources.clone(),
+            #[cfg(feature = "bundle-translations")]
+            translation_builder: document.translation_builder.clone(),
             used_types: RefCell::new(self.snapshot_used_sub_types(&document.used_types.borrow())),
             popup_menu_impl: document.popup_menu_impl.as_ref().map(|p| {
                 Weak::upgrade(&self.use_component(p))
@@ -342,7 +345,13 @@ impl Snapshotter {
             let root_constraints = RefCell::new(
                 self.snapshot_layout_constraints(&component.root_constraints.borrow()),
             );
-
+            let menu_item_tree = component
+                .menu_item_tree
+                .borrow()
+                .iter()
+                .map(|it| self.create_component(it))
+                .collect::<Vec<_>>()
+                .into();
             object_tree::Component {
                 node: component.node.clone(),
                 id: component.id.clone(),
@@ -350,12 +359,14 @@ impl Snapshotter {
                 exported_global_names: RefCell::new(
                     component.exported_global_names.borrow().clone(),
                 ),
+                used: component.used.clone(),
                 init_code: RefCell::new(component.init_code.borrow().clone()),
                 inherits_popup_window: std::cell::Cell::new(component.inherits_popup_window.get()),
                 optimized_elements,
                 parent_element,
                 popup_windows,
                 timers,
+                menu_item_tree,
                 private_properties: RefCell::new(component.private_properties.borrow().clone()),
                 root_constraints,
                 root_element,
@@ -674,18 +685,7 @@ impl Snapshotter {
     ) -> expression_tree::Expression {
         use expression_tree::Expression;
         match expr {
-            Expression::CallbackReference(nr, node_or_token) => {
-                Expression::CallbackReference(nr.snapshot(self), node_or_token.clone())
-            }
             Expression::PropertyReference(nr) => Expression::PropertyReference(nr.snapshot(self)),
-            Expression::FunctionReference(nr, node_or_token) => {
-                Expression::FunctionReference(nr.snapshot(self), node_or_token.clone())
-            }
-            Expression::MemberFunction { base, base_node, member } => Expression::MemberFunction {
-                base: Box::new(self.snapshot_expression(base)),
-                base_node: base_node.clone(),
-                member: Box::new(self.snapshot_expression(member)),
-            },
             Expression::ElementReference(el) => {
                 Expression::ElementReference(if let Some(el) = el.upgrade() {
                     Rc::downgrade(&el)
@@ -727,7 +727,11 @@ impl Snapshotter {
             }
             Expression::FunctionCall { function, arguments, source_location } => {
                 Expression::FunctionCall {
-                    function: Box::new(self.snapshot_expression(function)),
+                    function: match function {
+                        Callable::Callback(nr) => Callable::Callback(nr.snapshot(self)),
+                        Callable::Function(nr) => Callable::Function(nr.snapshot(self)),
+                        Callable::Builtin(b) => Callable::Builtin(b.clone()),
+                    },
                     arguments: arguments.iter().map(|e| self.snapshot_expression(e)).collect(),
                     source_location: source_location.clone(),
                 }
@@ -868,12 +872,12 @@ impl TypeLoader {
         known_styles.push("native");
         if !known_styles.contains(&style.as_ref())
             && myself
-                .find_file_in_include_path(None, &format!("{}/std-widgets.slint", style))
+                .find_file_in_include_path(None, &format!("{style}/std-widgets.slint"))
                 .is_none()
         {
             diag.push_diagnostic_with_span(
                 format!(
-                    "Style {} in not known. Use one of the builtin styles [{}] or make sure your custom style is found in the include directories",
+                    "Style {} is not known. Use one of the builtin styles [{}] or make sure your custom style is found in the include directories",
                     &style,
                     known_styles.join(", ")
                 ),
@@ -1129,7 +1133,7 @@ impl TypeLoader {
                     if !file_to_import.ends_with(file_name)
                         && len >= file_name.len()
                         && file_name.eq_ignore_ascii_case(
-                            &file_to_import.get(len - file_name.len()..).unwrap_or(""),
+                            file_to_import.get(len - file_name.len()..).unwrap_or(""),
                         )
                     {
                         if import_token.as_ref().and_then(|x| x.source_file()).is_some() {
@@ -1455,7 +1459,7 @@ impl TypeLoader {
                 itertools::Either::Right(ty) => registry_to_populate
                     .borrow_mut()
                     .insert_type_with_name(ty, import_name.internal_name),
-            }
+            };
         }
     }
 
@@ -1501,7 +1505,7 @@ impl TypeLoader {
             ))
             .chain(
                 (file_to_import == "std-widgets.slint"
-                    || referencing_file.map_or(false, |x| x.starts_with("builtin:/")))
+                    || referencing_file.is_some_and(|x| x.starts_with("builtin:/")))
                 .then(|| format!("builtin:/{}", self.style).into()),
             )
             .find_map(|include_dir| {
@@ -1645,7 +1649,7 @@ fn get_native_style(all_loaded_files: &mut std::collections::BTreeSet<PathBuf>) 
 /// Because from a proc_macro, we don't actually know the path of the current file, and this
 /// is why we must be relative to CARGO_MANIFEST_DIR.
 pub fn base_directory(referencing_file: &Path) -> PathBuf {
-    if referencing_file.extension().map_or(false, |e| e == "rs") {
+    if referencing_file.extension().is_some_and(|e| e == "rs") {
         // For .rs file, this is a rust macro, and rust macro locates the file relative to the CARGO_MANIFEST_DIR which is the directory that has a Cargo.toml file.
         let mut candidate = referencing_file;
         loop {
@@ -1921,7 +1925,7 @@ fn test_unknown_style() {
     assert!(build_diagnostics.has_errors());
     let diags = build_diagnostics.to_string_vec();
     assert_eq!(diags.len(), 1);
-    assert!(diags[0].starts_with("Style FooBar in not known. Use one of the builtin styles ["));
+    assert!(diags[0].starts_with("Style FooBar is not known. Use one of the builtin styles ["));
 }
 
 #[test]

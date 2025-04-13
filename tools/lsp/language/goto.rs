@@ -1,8 +1,10 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use crate::common;
-use crate::language::token_info::{token_info, TokenInfo};
+use crate::common::{
+    self,
+    token_info::{token_info, TokenInfo},
+};
 use crate::util;
 use i_slint_compiler::langtype::{ElementType, Type};
 use i_slint_compiler::parser::{SyntaxNode, SyntaxToken};
@@ -42,7 +44,7 @@ pub fn goto_definition(
         }
         TokenInfo::EnumerationValue(v) => {
             // FIXME: this goes to the enum definition instead of the value definition.
-            goto_node(&*v.enumeration.node.as_ref()?)
+            goto_node(v.enumeration.node.as_ref()?)
         }
         TokenInfo::FileName(f) | TokenInfo::Image(f) => {
             if let Some(doc) = document_cache.get_document_by_path(&f) {
@@ -232,16 +234,18 @@ fn test_goto_definition_multi_files() {
     "#,
         url1 = url1.to_file_path().unwrap().display()
     );
-    let diags = spin_on::spin_on(crate::language::reload_document_impl(
+    let (extra_files, diag) = spin_on::spin_on(crate::language::reload_document_impl(
         None,
         source2.clone(),
         url2.clone(),
         Some(43),
         &mut dc,
     ));
-    for (u, ds) in diags {
+    let diag = crate::language::convert_diagnostics(&extra_files, diag);
+    for (u, ds) in diag {
         assert_eq!(ds, vec![], "errors in {u}");
     }
+
     let doc2 = dc.get_document(&url2).unwrap().node.clone().unwrap();
 
     let offset: TextSize = (source2.find("h := Hello").unwrap() as u32).into();

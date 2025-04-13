@@ -7,12 +7,10 @@ use std::collections::HashMap;
 
 use super::PreviewState;
 use crate::common::{PreviewToLspMessage, SourceFileVersion};
-use crate::lsp_ext::Health;
 use crate::ServerNotifier;
-use once_cell::sync::Lazy;
 use slint_interpreter::ComponentHandle;
 use std::future::Future;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex};
 
 #[derive(PartialEq, Debug)]
 enum RequestedGuiEventLoopState {
@@ -29,9 +27,9 @@ enum RequestedGuiEventLoopState {
     InitializationError(String),
 }
 
-static GUI_EVENT_LOOP_NOTIFIER: Lazy<Condvar> = Lazy::new(Condvar::new);
-static GUI_EVENT_LOOP_STATE_REQUEST: Lazy<Mutex<RequestedGuiEventLoopState>> =
-    Lazy::new(|| Mutex::new(RequestedGuiEventLoopState::Uninitialized));
+static GUI_EVENT_LOOP_NOTIFIER: LazyLock<Condvar> = LazyLock::new(Condvar::new);
+static GUI_EVENT_LOOP_STATE_REQUEST: LazyLock<Mutex<RequestedGuiEventLoopState>> =
+    LazyLock::new(|| Mutex::new(RequestedGuiEventLoopState::Uninitialized));
 
 thread_local! {static CLI_ARGS: std::cell::OnceCell<crate::Cli> = Default::default();}
 
@@ -54,11 +52,11 @@ pub fn run_in_ui_thread<F: Future<Output = ()> + 'static>(
             return Err(err.clone());
         }
     }
+
     i_slint_core::api::invoke_from_event_loop(move || {
         slint::spawn_local(create_future()).unwrap();
     })
-    .unwrap();
-    Ok(())
+    .map_err(|e| e.to_string())
 }
 
 /// This is the main entry for the Slint event loop. It runs on the main thread,
@@ -220,6 +218,19 @@ fn close_ui_impl(preview_state: &mut PreviewState) {
     }
 }
 
+#[cfg(target_vendor = "apple")]
+fn toggle_always_on_top() {
+    i_slint_core::api::invoke_from_event_loop(move || {
+        super::PREVIEW_STATE.with(move |preview_state| {
+            let preview_state = preview_state.borrow_mut();
+            let Some(ui) = preview_state.ui.as_ref() else { return };
+            let api = ui.global::<crate::preview::ui::Api>();
+            api.set_always_on_top(!api.get_always_on_top());
+        });
+    })
+    .unwrap(); // TODO: Handle Error
+}
+
 static SERVER_NOTIFIER: Mutex<Option<ServerNotifier>> = Mutex::new(None);
 
 /// Give the UI thread a handle to send message back to the LSP thread
@@ -238,14 +249,6 @@ pub fn notify_diagnostics(
         crate::common::lsp_to_editor::notify_lsp_diagnostics(&sender, url, version, diagnostics)?;
     }
     Some(())
-}
-
-pub fn send_status(message: &str, health: Health) {
-    let Some(sender) = SERVER_NOTIFIER.lock().unwrap().clone() else {
-        return;
-    };
-
-    crate::common::lsp_to_editor::send_status_notification(&sender, message, health)
 }
 
 pub fn ask_editor_to_show_document(file: &str, selection: lsp_types::Range, take_focus: bool) {
@@ -271,15 +274,11 @@ pub fn send_message_to_lsp(message: PreviewToLspMessage) {
 // be kept alive for the duration of the event loop, as otherwise muda crashes.
 #[cfg(target_vendor = "apple")]
 fn init_apple_platform(
-) -> Result<(muda::MenuItem, muda::MenuItem), i_slint_core::api::PlatformError> {
-    use i_slint_backend_winit::winit;
-    use muda::{accelerator, Menu, MenuItem, PredefinedMenuItem, Submenu};
-    use winit::platform::macos::EventLoopBuilderExtMacOS;
-    let mut builder = winit::event_loop::EventLoop::with_user_event();
-    builder.with_default_menu(false);
+) -> Result<(muda::MenuItem, muda::MenuItem, muda::CheckMenuItem), i_slint_core::api::PlatformError>
+{
+    use muda::{accelerator, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-    let backend =
-        i_slint_backend_winit::Backend::builder().with_event_loop_builder(builder).build()?;
+    let backend = i_slint_backend_winit::Backend::builder().with_default_menu_bar(false).build()?;
 
     slint::platform::set_platform(Box::new(backend)).map_err(|set_platform_err| {
         i_slint_core::api::PlatformError::from(set_platform_err.to_string())
@@ -302,12 +301,15 @@ fn init_apple_platform(
             accelerator::Code::KeyR,
         )),
     );
+    let keep_on_top_menu_item = CheckMenuItem::new(format!("Keep on Top"), true, false, None);
 
     let menu_bar = Menu::new();
     menu_bar.init_for_nsapp();
     let app_m = Submenu::new("App", true);
+    let window_m = Submenu::new("&Window", true);
     menu_bar
         .append(&app_m)
+        .and_then(|_| menu_bar.append(&window_m))
         .and_then(|_| {
             app_m.append_items(&[
                 &PredefinedMenuItem::services(None),
@@ -319,20 +321,24 @@ fn init_apple_platform(
                 &close_app_menu_item,
             ])
         })
+        .and_then(|_| window_m.append_items(&[&keep_on_top_menu_item]))
         .map_err(|menu_bar_err| {
             i_slint_core::api::PlatformError::Other(menu_bar_err.to_string())
         })?;
 
     let close_id = close_app_menu_item.id().clone();
     let reload_id = reload_menu_item.id().clone();
+    let keep_on_top_id = keep_on_top_menu_item.id().clone();
 
     muda::MenuEvent::set_event_handler(Some(move |menu_event: muda::MenuEvent| {
         if menu_event.id == close_id {
             close_ui();
         } else if menu_event.id == reload_id {
             super::reload_preview();
+        } else if menu_event.id == keep_on_top_id {
+            toggle_always_on_top();
         }
     }));
 
-    Ok((close_app_menu_item, reload_menu_item))
+    Ok((close_app_menu_item, reload_menu_item, keep_on_top_menu_item))
 }

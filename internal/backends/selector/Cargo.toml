@@ -26,9 +26,21 @@ backend-qt = ["i-slint-backend-qt/enable"]
 
 renderer-femtovg = ["i-slint-backend-winit?/renderer-femtovg", "i-slint-backend-linuxkms?/renderer-femtovg"]
 renderer-skia = ["i-slint-backend-winit?/renderer-skia", "i-slint-backend-linuxkms?/renderer-skia"]
-renderer-skia-opengl = ["i-slint-backend-winit?/renderer-skia-opengl", "i-slint-backend-linuxkms?/renderer-skia-opengl", "i-slint-renderer-skia/opengl"]
-renderer-skia-vulkan = ["i-slint-backend-winit?/renderer-skia-vulkan", "i-slint-backend-linuxkms?/renderer-skia-vulkan", "i-slint-renderer-skia/vulkan"]
-renderer-software = ["i-slint-backend-winit?/renderer-software", "i-slint-backend-linuxkms?/renderer-software", "i-slint-core/software-renderer"]
+renderer-skia-opengl = [
+  "i-slint-backend-winit?/renderer-skia-opengl",
+  "i-slint-backend-linuxkms?/renderer-skia-opengl",
+  "i-slint-renderer-skia/opengl",
+]
+renderer-skia-vulkan = [
+  "i-slint-backend-winit?/renderer-skia-vulkan",
+  "i-slint-backend-linuxkms?/renderer-skia-vulkan",
+  "i-slint-renderer-skia/vulkan",
+]
+renderer-software = [
+  "i-slint-backend-winit?/renderer-software",
+  "i-slint-backend-linuxkms?/renderer-software",
+  "i-slint-core/software-renderer",
+]
 
 rtti = ["i-slint-core/rtti", "i-slint-backend-qt?/rtti"]
 accessibility = ["i-slint-backend-winit?/accessibility"]
@@ -47,7 +59,7 @@ i-slint-backend-testing = { workspace = true, optional = true }
 i-slint-core-macros = { workspace = true }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-i-slint-backend-winit = { workspace = true, features = ["default"], optional = true }
+i-slint-backend-winit = { workspace = true, features = ["default", "muda"], optional = true }
 i-slint-renderer-skia = { workspace = true, optional = true }
 
 [target.'cfg(not(target_os = "wasm"))'.dependencies]

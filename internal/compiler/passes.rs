@@ -25,6 +25,7 @@ mod flickable;
 mod focus_handling;
 pub mod generate_item_indices;
 pub mod infer_aliases_types;
+mod inject_debug_hooks;
 mod inlining;
 mod lower_absolute_coordinates;
 mod lower_accessibility;
@@ -56,6 +57,16 @@ use crate::expression_tree::Expression;
 use crate::namedreference::NamedReference;
 use smol_str::SmolStr;
 
+pub fn ignore_debug_hooks(expr: &Expression) -> &Expression {
+    let mut expr = expr;
+    loop {
+        match expr {
+            Expression::DebugHook { expression, .. } => expr = expression.as_ref(),
+            _ => return expr,
+        }
+    }
+}
+
 pub async fn run_passes(
     doc: &mut crate::object_tree::Document,
     type_loader: &mut crate::typeloader::TypeLoader,
@@ -81,6 +92,7 @@ pub async fn run_passes(
     };
 
     let global_type_registry = type_loader.global_type_registry.clone();
+
     run_import_passes(doc, type_loader, diag);
     check_public_api::check_public_api(doc, &type_loader.compiler_config, diag);
 
@@ -121,6 +133,9 @@ pub async fn run_passes(
     for root_component in doc.exported_roots() {
         focus_handling::call_focus_on_init(&root_component);
         ensure_window::ensure_window(&root_component, &doc.local_registry, &style_metrics, diag);
+    }
+    if let Some(popup_menu_impl) = &doc.popup_menu_impl {
+        focus_handling::call_focus_on_init(popup_menu_impl);
     }
 
     doc.visit_all_used_components(|component| {
@@ -195,7 +210,6 @@ pub async fn run_passes(
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {
-        deduplicate_property_read::deduplicate_property_read(component);
         // Don't perform the empty rectangle removal when debug info is requested, because the resulting
         // item tree ends up with a hierarchy where certain items have children that aren't child elements
         // but siblings or sibling children. We need a new data structure to perform a correct element tree
@@ -214,6 +228,7 @@ pub async fn run_passes(
             // binding loop causes panics in const_propagation
             const_propagation::const_propagation(component);
         }
+        deduplicate_property_read::deduplicate_property_read(component);
         if !component.is_global() {
             resolve_native_classes::resolve_native_classes(component);
         }
@@ -240,6 +255,24 @@ pub async fn run_passes(
     )
     .await;
 
+    #[cfg(feature = "bundle-translations")]
+    if let Some(path) = &type_loader.compiler_config.translation_path_bundle {
+        match crate::translations::TranslationsBuilder::load_translations(
+            path,
+            type_loader.compiler_config.translation_domain.as_deref().unwrap_or(""),
+        ) {
+            Ok(builder) => {
+                doc.translation_builder = Some(builder);
+            }
+            Err(err) => {
+                diag.push_error(
+                    format!("Cannot load bundled translation: {err}"),
+                    doc.node.as_ref().expect("Unexpected empty document"),
+                );
+            }
+        }
+    }
+
     match type_loader.compiler_config.embed_resources {
         #[cfg(feature = "software-renderer")]
         crate::EmbedResourcesKind::EmbedTextures => {
@@ -257,10 +290,15 @@ pub async fn run_passes(
                 embed_glyphs::scan_string_literals(component, &mut characters_seen);
             });
 
+            // This is not perfect, as this includes translations that may not be used.
+            #[cfg(feature = "bundle-translations")]
+            if let Some(translation_builder) = doc.translation_builder.as_ref() {
+                translation_builder.collect_characters_seen(&mut characters_seen);
+            }
+
             embed_glyphs::embed_glyphs(
                 doc,
                 &type_loader.compiler_config,
-                type_loader.compiler_config.const_scale_factor,
                 font_pixel_sizes,
                 characters_seen,
                 std::iter::once(&*doc).chain(type_loader.all_documents()),
@@ -287,6 +325,7 @@ pub fn run_import_passes(
     type_loader: &crate::typeloader::TypeLoader,
     diag: &mut crate::diagnostics::BuildDiagnostics,
 ) {
+    inject_debug_hooks::inject_debug_hooks(doc, type_loader);
     infer_aliases_types::resolve_aliases(doc, diag);
     resolving::resolve_expressions(doc, type_loader, diag);
     purity_check::purity_check(doc, diag);

@@ -3,17 +3,16 @@
 
 import pytest
 from slint import slint as native
-from slint.slint import ValueType, PyImage
+from slint.slint import Image, Color, Brush
 import os
-
-Color = native.PyColor
-Brush = native.PyBrush
+from pathlib import Path
 
 
-def test_property_access():
+def test_property_access() -> None:
     compiler = native.Compiler()
 
-    compdef = compiler.build_from_source("""
+    compdef = compiler.build_from_source(
+        """
         export global TestGlobal {
             in property <string> theglobalprop: "Hey";
             callback globallogic();
@@ -43,11 +42,13 @@ def test_property_access():
 
             callback test-callback();
         }
-    """, os.path.join(os.path.dirname(__file__), "main.slint")).component("Test")
-    assert compdef != None
+    """,
+        Path(__file__).parent / "main.slint",
+    ).component("Test")
+    assert compdef is not None
 
     instance = compdef.create()
-    assert instance != None
+    assert instance is not None
 
     with pytest.raises(ValueError, match="no such property"):
         instance.set_property("nonexistent", 42)
@@ -70,40 +71,50 @@ def test_property_access():
     with pytest.raises(ValueError, match="wrong type"):
         instance.set_property("floatprop", "Blah")
 
-    assert instance.get_property("boolprop") == True
+    assert instance.get_property("boolprop")
     instance.set_property("boolprop", False)
-    assert instance.get_property("boolprop") == False
+    assert not instance.get_property("boolprop")
     with pytest.raises(ValueError, match="wrong type"):
         instance.set_property("boolprop", 0)
 
     structval = instance.get_property("structprop")
     assert isinstance(structval, native.PyStruct)
     assert structval.title == "builtin"
-    assert structval.finished == True
-    assert structval.dash_prop == True
+    assert structval.finished
+    assert structval.dash_prop
     instance.set_property(
-        "structprop", {'title': 'new', 'finished': False, 'dash_prop': False})
+        "structprop", {"title": "new", "finished": False, "dash_prop": False}
+    )
     structval = instance.get_property("structprop")
     assert structval.title == "new"
-    assert structval.finished == False
-    assert structval.dash_prop == False
+    assert not structval.finished
+    assert not structval.dash_prop
 
     imageval = instance.get_property("imageprop")
     assert imageval.width == 320
     assert imageval.height == 480
-    assert "cat.jpg" in imageval.path
+    assert "cat.jpg" in imageval.path.name
 
     with pytest.raises(RuntimeError, match="The image cannot be loaded"):
-        PyImage.load_from_path("non-existent.png")
+        Image.load_from_path("non-existent.png")
 
-    instance.set_property("imageprop", PyImage.load_from_path(os.path.join(
-        os.path.dirname(__file__), "../../../examples/iot-dashboard/images/humidity.png")))
+    instance.set_property(
+        "imageprop",
+        Image.load_from_path(
+            os.path.join(
+                os.path.dirname(__file__),
+                "../../../examples/iot-dashboard/images/humidity.png",
+            )
+        ),
+    )
     imageval = instance.get_property("imageprop")
     assert imageval.size == (36, 36)
-    assert "humidity.png" in imageval.path
+    assert "humidity.png" in str(imageval.path)
 
-    with pytest.raises(TypeError, match="'int' object cannot be converted to 'PyString'"):
-        instance.set_property("structprop", {42: 'wrong'})
+    with pytest.raises(
+        TypeError, match="'int' object cannot be converted to 'PyString'"
+    ):
+        instance.set_property("structprop", {42: "wrong"})
 
     brushval = instance.get_property("brushprop")
     assert str(brushval.color) == "argb(255, 255, 0, 255)"
@@ -127,10 +138,11 @@ def test_property_access():
     assert instance.get_global_property("TestGlobal", "theglobalprop") == "Ok"
 
 
-def test_callbacks():
+def test_callbacks() -> None:
     compiler = native.Compiler()
 
-    compdef = compiler.build_from_source("""
+    compdef = compiler.build_from_source(
+        """
         export global TestGlobal {
             callback globallogic(string) -> string;
             globallogic(value) => {
@@ -145,16 +157,17 @@ def test_callbacks():
             }
             callback void-callback();
         }
-    """, "").component("Test")
-    assert compdef != None
+    """,
+        Path(""),
+    ).component("Test")
+    assert compdef is not None
 
     instance = compdef.create()
-    assert instance != None
+    assert instance is not None
 
     assert instance.invoke("test-callback", "foo") == "local foo"
 
-    assert instance.invoke_global(
-        "TestGlobal", "globallogic", "foo") == "global foo"
+    assert instance.invoke_global("TestGlobal", "globallogic", "foo") == "global foo"
 
     with pytest.raises(RuntimeError, match="no such callback"):
         instance.set_callback("non-existent", lambda x: x)
@@ -166,9 +179,12 @@ def test_callbacks():
         instance.set_global_callback("TestGlobal", "non-existent", lambda x: x)
 
     instance.set_global_callback(
-        "TestGlobal", "globallogic", lambda x: "python global " + x)
-    assert instance.invoke_global(
-        "TestGlobal", "globallogic", "foo") == "python global foo"
+        "TestGlobal", "globallogic", lambda x: "python global " + x
+    )
+    assert (
+        instance.invoke_global("TestGlobal", "globallogic", "foo")
+        == "python global foo"
+    )
 
     instance.set_callback("void-callback", lambda: None)
     instance.invoke("void-callback")
@@ -176,9 +192,8 @@ def test_callbacks():
 
 if __name__ == "__main__":
     import slint
-    module = slint.load_file(
-        "../../demos/printerdemo/ui/printerdemo.slint")
+
+    module = slint.load_file(Path("../../demos/printerdemo/ui/printerdemo.slint"))
     instance = module.MainWindow()
-    instance.PrinterQueue.start_job = lambda title: print(
-        f"new print job {title}")
+    instance.PrinterQueue.start_job = lambda title: print(f"new print job {title}")
     instance.run()

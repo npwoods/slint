@@ -17,11 +17,11 @@ In your Cargo.toml:
 build = "build.rs"
 
 [dependencies]
-slint = "1.9.0"
+slint = "1.10.0"
 ...
 
 [build-dependencies]
-slint-build = "1.9.0"
+slint-build = "1.10.0"
 ```
 
 In the `build.rs` file:
@@ -189,20 +189,38 @@ impl CompilerConfiguration {
         config.translation_path_bundle = Some(path.into());
         Self { config }
     }
+
+    /// Configures the compiler to use Signed Distance Field (SDF) encoding for fonts.
+    ///
+    /// This flag only takes effect when `embed_resources` is set to [`EmbedResourcesKind::EmbedForSoftwareRenderer`],
+    /// and requires the `sdf-fonts` cargo feature to be enabled.
+    ///
+    /// [SDF](https://en.wikipedia.org/wiki/Signed_distance_function) reduces the binary size by
+    /// using an alternative representation for fonts, trading off some rendering quality
+    /// for a smaller binary footprint.
+    /// Rendering is slower and may result in slightly inferior visual output.
+    /// Use this on systems with limited flash memory.
+    #[cfg(feature = "sdf-fonts")]
+    #[must_use]
+    pub fn with_sdf_fonts(self, enable: bool) -> Self {
+        let mut config = self.config;
+        config.use_sdf_fonts = enable;
+        Self { config }
+    }
 }
 
 /// Error returned by the `compile` function
-#[derive(thiserror::Error, Debug)]
+#[derive(derive_more::Error, derive_more::Display, Debug)]
 #[non_exhaustive]
 pub enum CompileError {
     /// Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo.
-    #[error("Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo.")]
+    #[display("Cannot read environment variable CARGO_MANIFEST_DIR or OUT_DIR. The build script need to be run via cargo.")]
     NotRunViaCargo,
     /// Parse error. The error are printed in the stderr, and also are in the vector
-    #[error("{0:?}")]
-    CompileError(Vec<String>),
+    #[display("{_0:?}")]
+    CompileError(#[error(not(source))] Vec<String>),
     /// Cannot write the generated file
-    #[error("Cannot write the generated file: {0}")]
+    #[display("Cannot write the generated file: {_0}")]
     SaveError(std::io::Error),
 }
 
@@ -477,7 +495,7 @@ pub fn compile_with_output_path(
         }
     });
 
-    write!(code_formatter, "{}", generated).map_err(CompileError::SaveError)?;
+    write!(code_formatter, "{generated}").map_err(CompileError::SaveError)?;
     dependencies.push(input_slint_file_path.as_ref().to_path_buf());
 
     for resource in doc.embedded_file_resources.borrow().keys() {
@@ -502,7 +520,7 @@ pub fn print_rustc_flags() -> std::io::Result<()> {
             toml.get("link_args").and_then(toml_edit::Item::as_array).into_iter().flatten()
         {
             if let Some(option) = link_arg.as_str() {
-                println!("cargo:rustc-link-arg={}", option);
+                println!("cargo:rustc-link-arg={option}");
             }
         }
 

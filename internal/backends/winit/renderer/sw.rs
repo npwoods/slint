@@ -118,7 +118,7 @@ impl super::WinitCompatibleRenderer for WinitSoftwareRenderer {
                 buffer: &'a mut [u32],
                 line: Vec<i_slint_core::software_renderer::Rgb565Pixel>,
             }
-            impl<'a> i_slint_core::software_renderer::LineBufferProvider for FrameBuffer<'a> {
+            impl i_slint_core::software_renderer::LineBufferProvider for FrameBuffer<'_> {
                 type TargetPixel = i_slint_core::software_renderer::Rgb565Pixel;
                 fn process_line(
                     &mut self,
@@ -172,22 +172,23 @@ impl super::WinitCompatibleRenderer for WinitSoftwareRenderer {
 
     fn resume(
         &self,
+        event_loop: &dyn crate::event_loop::EventLoopInterface,
         window_attributes: winit::window::WindowAttributes,
         _requested_graphics_api: Option<RequestedGraphicsAPI>,
     ) -> Result<Rc<winit::window::Window>, PlatformError> {
-        let winit_window = crate::event_loop::with_window_target(|event_loop| {
+        let winit_window =
             event_loop.create_window(window_attributes).map_err(|winit_os_error| {
-                format!("Error creating native window for software rendering: {}", winit_os_error)
-                    .into()
-            })
-        })?;
+                PlatformError::from(format!(
+                    "Error creating native window for software rendering: {winit_os_error}"
+                ))
+            })?;
         let winit_window = Rc::new(winit_window);
 
         let context = softbuffer::Context::new(winit_window.clone())
             .map_err(|e| format!("Error creating softbuffer context: {e}"))?;
 
         let surface = softbuffer::Surface::new(&context, winit_window.clone()).map_err(
-            |softbuffer_error| format!("Error creating softbuffer surface: {}", softbuffer_error),
+            |softbuffer_error| format!("Error creating softbuffer surface: {softbuffer_error}"),
         )?;
 
         *self._context.borrow_mut() = Some(context);

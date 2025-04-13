@@ -64,6 +64,7 @@ jobs:
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-about
+                  version: "=0.6.6"
             - name: Build
               run: cargo build --verbose --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
             - name: Create artifact directory
@@ -86,7 +87,7 @@ jobs:
                       pkg
 
     build_linux:
-        runs-on: ubuntu-20.04
+        runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v4
             - uses: ./.github/actions/install-linux-dependencies
@@ -98,6 +99,7 @@ jobs:
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-about
+                  version: "=0.6.6"
             - name: Build
               run: cargo build --verbose --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
             - name: Create artifact directory
@@ -115,7 +117,7 @@ jobs:
                   path: slint-${{ github.event.inputs.program || inputs.program }}-linux.tar.gz
 
     build_linux_arm:
-      runs-on: ubuntu-20.04
+      runs-on: ubuntu-22.04
       strategy:
         matrix:
             target:
@@ -132,6 +134,7 @@ jobs:
           - uses: baptiste0928/cargo-install@v3
             with:
                 crate: cargo-about
+                version: "=0.6.6"
           - name: Build
             run: cross build --target=${{ matrix.target }} --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
           - name: Create artifact directory
@@ -158,13 +161,10 @@ jobs:
             - uses: ./.github/actions/setup-rust
               with:
                   target: aarch64-apple-darwin
-            # Pin Python version until https://github.com/slint-ui/slint/issues/6615 is fixed.
-            - uses: actions/setup-python@v5
-              with:
-                python-version: '3.12'
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-about
+                  version: "=0.6.6"
             - name: Build x86_64
               run: cargo build --verbose --target x86_64-apple-darwin --no-default-features --features ${{ github.event.inputs.features || inputs.features }} --release -p slint-${{ github.event.inputs.program || inputs.program }}
             - name: Build aarch64

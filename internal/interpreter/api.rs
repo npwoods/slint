@@ -184,22 +184,22 @@ impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Void => write!(f, "Value::Void"),
-            Value::Number(n) => write!(f, "Value::Number({:?})", n),
-            Value::String(s) => write!(f, "Value::String({:?})", s),
-            Value::Bool(b) => write!(f, "Value::Bool({:?})", b),
-            Value::Image(i) => write!(f, "Value::Image({:?})", i),
+            Value::Number(n) => write!(f, "Value::Number({n:?})"),
+            Value::String(s) => write!(f, "Value::String({s:?})"),
+            Value::Bool(b) => write!(f, "Value::Bool({b:?})"),
+            Value::Image(i) => write!(f, "Value::Image({i:?})"),
             Value::Model(m) => {
                 write!(f, "Value::Model(")?;
                 f.debug_list().entries(m.iter()).finish()?;
                 write!(f, "])")
             }
-            Value::Struct(s) => write!(f, "Value::Struct({:?})", s),
-            Value::Brush(b) => write!(f, "Value::Brush({:?})", b),
-            Value::PathData(e) => write!(f, "Value::PathElements({:?})", e),
-            Value::EasingCurve(c) => write!(f, "Value::EasingCurve({:?})", c),
-            Value::EnumerationValue(n, v) => write!(f, "Value::EnumerationValue({:?}, {:?})", n, v),
-            Value::LayoutCache(v) => write!(f, "Value::LayoutCache({:?})", v),
-            Value::ComponentFactory(factory) => write!(f, "Value::ComponentFactory({:?})", factory),
+            Value::Struct(s) => write!(f, "Value::Struct({s:?})"),
+            Value::Brush(b) => write!(f, "Value::Brush({b:?})"),
+            Value::PathData(e) => write!(f, "Value::PathElements({e:?})"),
+            Value::EasingCurve(c) => write!(f, "Value::EasingCurve({c:?})"),
+            Value::EnumerationValue(n, v) => write!(f, "Value::EnumerationValue({n:?}, {v:?})"),
+            Value::LayoutCache(v) => write!(f, "Value::LayoutCache({v:?})"),
+            Value::ComponentFactory(factory) => write!(f, "Value::ComponentFactory({factory:?})"),
         }
     }
 }
@@ -474,7 +474,7 @@ fn value_model_conversion() {
     assert_eq!(int_model.row_count(), 2);
     assert_eq!(int_model.iter().collect::<Vec<_>>(), vec![42, 12]);
 
-    let Value::Model(m3) = int_model.clone().try_into().unwrap() else { panic!("not a model?") };
+    let Value::Model(m3) = int_model.clone().into() else { panic!("not a model?") };
     assert_eq!(m3.row_count(), 2);
     assert_eq!(m3.iter().collect::<Vec<_>>(), vec![Value::Number(42.), Value::Number(12.)]);
 
@@ -498,7 +498,7 @@ pub(crate) fn normalize_identifier(ident: &str) -> Cow<'_, str> {
 
 pub(crate) fn normalize_identifier_smolstr(ident: &str) -> SmolStr {
     if ident.contains('_') {
-        ident.replace_smolstr("_", "-").into()
+        ident.replace_smolstr("_", "-")
     } else {
         ident.into()
     }
@@ -526,7 +526,7 @@ pub(crate) fn normalize_identifier_smolstr(ident: &str) -> SmolStr {
 /// assert_eq!(s.get_field("foo").cloned().unwrap().try_into(), Ok(45u32));
 /// ```
 #[derive(Clone, PartialEq, Debug, Default)]
-pub struct Struct(HashMap<String, Value>);
+pub struct Struct(pub(crate) HashMap<String, Value>);
 impl Struct {
     /// Get the value for a given struct field
     pub fn get_field(&self, name: &str) -> Option<&Value> {
@@ -964,9 +964,10 @@ impl ComponentDefinition {
     /// Creates a new instance of the component and returns a shared handle to it.
     pub fn create(&self) -> Result<ComponentInstance, PlatformError> {
         generativity::make_guard!(guard);
-        Ok(ComponentInstance {
-            inner: self.inner.unerase(guard).clone().create(Default::default())?,
-        })
+        let instance = self.inner.unerase(guard).clone().create(Default::default())?;
+        // Make sure the window adapter is created so call to `window()` do not panic later.
+        instance.window_adapter_ref()?;
+        Ok(ComponentInstance { inner: instance })
     }
 
     /// Creates a new instance of the component and returns a shared handle to it.
@@ -979,22 +980,6 @@ impl ComponentDefinition {
                 parent_item_tree: ctx.parent_item_tree,
                 parent_item_tree_index: ctx.parent_item_tree_index,
             })?,
-        })
-    }
-
-    /// Instantiate the component for wasm using the given canvas id
-    #[cfg(target_arch = "wasm32")]
-    pub fn create_with_canvas_id(
-        &self,
-        canvas_id: &str,
-    ) -> Result<ComponentInstance, PlatformError> {
-        generativity::make_guard!(guard);
-        Ok(ComponentInstance {
-            inner: self
-                .inner
-                .unerase(guard)
-                .clone()
-                .create(WindowOptions::CreateWithCanvasId(canvas_id.into()))?,
         })
     }
 
@@ -1020,11 +1005,16 @@ impl ComponentDefinition {
     #[cfg(feature = "internal")]
     pub fn properties_and_callbacks(
         &self,
-    ) -> impl Iterator<Item = (String, i_slint_compiler::langtype::Type)> + '_ {
+    ) -> impl Iterator<
+        Item = (
+            String,
+            (i_slint_compiler::langtype::Type, i_slint_compiler::object_tree::PropertyVisibility),
+        ),
+    > + '_ {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
-        self.inner.unerase(guard).properties().map(|(s, t)| (s.to_string(), t))
+        self.inner.unerase(guard).properties().map(|(s, t, v)| (s.to_string(), (t, v)))
     }
 
     /// Returns an iterator over all publicly declared properties. Each iterator item is a tuple of property name
@@ -1033,7 +1023,7 @@ impl ComponentDefinition {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
-        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type)| {
+        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type, _)| {
             if prop_type.is_property_type() {
                 Some((prop_name.to_string(), prop_type.into()))
             } else {
@@ -1047,7 +1037,7 @@ impl ComponentDefinition {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
-        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type)| {
+        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type, _)| {
             if matches!(prop_type, LangType::Callback { .. }) {
                 Some(prop_name.to_string())
             } else {
@@ -1061,7 +1051,7 @@ impl ComponentDefinition {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
-        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type)| {
+        self.inner.unerase(guard).properties().filter_map(|(prop_name, prop_type, _)| {
             if matches!(prop_type, LangType::Function { .. }) {
                 Some(prop_name.to_string())
             } else {
@@ -1089,14 +1079,24 @@ impl ComponentDefinition {
     pub fn global_properties_and_callbacks(
         &self,
         global_name: &str,
-    ) -> Option<impl Iterator<Item = (String, i_slint_compiler::langtype::Type)> + '_> {
+    ) -> Option<
+        impl Iterator<
+                Item = (
+                    String,
+                    (
+                        i_slint_compiler::langtype::Type,
+                        i_slint_compiler::object_tree::PropertyVisibility,
+                    ),
+                ),
+            > + '_,
+    > {
         // We create here a 'static guard, because unfortunately the returned type would be restricted to the guard lifetime
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner
             .unerase(guard)
             .global_properties(global_name)
-            .map(|o| o.map(|(s, t)| (s.to_string(), t)))
+            .map(|o| o.map(|(s, t, v)| (s.to_string(), (t, v))))
     }
 
     /// List of publicly declared properties in the exported global singleton specified by its name.
@@ -1108,7 +1108,7 @@ impl ComponentDefinition {
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner.unerase(guard).global_properties(global_name).map(|iter| {
-            iter.filter_map(|(prop_name, prop_type)| {
+            iter.filter_map(|(prop_name, prop_type, _)| {
                 if prop_type.is_property_type() {
                     Some((prop_name.to_string(), prop_type.into()))
                 } else {
@@ -1124,7 +1124,7 @@ impl ComponentDefinition {
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner.unerase(guard).global_properties(global_name).map(|iter| {
-            iter.filter_map(|(prop_name, prop_type)| {
+            iter.filter_map(|(prop_name, prop_type, _)| {
                 if matches!(prop_type, LangType::Callback { .. }) {
                     Some(prop_name.to_string())
                 } else {
@@ -1140,7 +1140,7 @@ impl ComponentDefinition {
         // which is not required, but this is safe because there is only one instance of the unerased type
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner.unerase(guard).global_properties(global_name).map(|iter| {
-            iter.filter_map(|(prop_name, prop_type)| {
+            iter.filter_map(|(prop_name, prop_type, _)| {
                 if matches!(prop_type, LangType::Function { .. }) {
                     Some(prop_name.to_string())
                 } else {
@@ -1169,7 +1169,7 @@ impl ComponentDefinition {
     /// Return the `TypeLoader` used when parsing the code in the interpreter.
     ///
     /// WARNING: this is not part of the public API
-    #[cfg(feature = "highlight")]
+    #[cfg(feature = "internal-highlight")]
     pub fn type_loader(&self) -> std::rc::Rc<i_slint_compiler::typeloader::TypeLoader> {
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner.unerase(guard).type_loader.get().unwrap().clone()
@@ -1182,7 +1182,7 @@ impl ComponentDefinition {
     /// so this is a fairly expensive function!
     ///
     /// WARNING: this is not part of the public API
-    #[cfg(feature = "highlight")]
+    #[cfg(feature = "internal-highlight")]
     pub fn raw_type_loader(&self) -> Option<i_slint_compiler::typeloader::TypeLoader> {
         let guard = unsafe { generativity::Guard::new(generativity::Id::new()) };
         self.inner
@@ -1259,7 +1259,7 @@ impl ComponentInstance {
             .borrow()
             .property_declarations
             .get(name.as_ref())
-            .map_or(true, |d| !d.expose_in_public_api)
+            .is_none_or(|d| !d.expose_in_public_api)
         {
             return Err(GetPropertyError::NoSuchProperty);
         }
@@ -1492,7 +1492,7 @@ impl ComponentInstance {
     /// Find all positions of the components which are pointed by a given source location.
     ///
     /// WARNING: this is not part of the public API
-    #[cfg(feature = "highlight")]
+    #[cfg(feature = "internal-highlight")]
     pub fn component_positions(
         &self,
         path: &Path,
@@ -1504,18 +1504,22 @@ impl ComponentInstance {
     /// Find the position of the `element`.
     ///
     /// WARNING: this is not part of the public API
-    #[cfg(feature = "highlight")]
+    #[cfg(feature = "internal-highlight")]
     pub fn element_positions(
         &self,
         element: &i_slint_compiler::object_tree::ElementRc,
     ) -> Vec<i_slint_core::lengths::LogicalRect> {
-        crate::highlight::element_positions(&self.inner, element)
+        crate::highlight::element_positions(
+            &self.inner,
+            element,
+            crate::highlight::ElementPositionFilter::IncludeClipped,
+        )
     }
 
     /// Find the the `element` that was defined at the text position.
     ///
     /// WARNING: this is not part of the public API
-    #[cfg(feature = "highlight")]
+    #[cfg(feature = "internal-highlight")]
     pub fn element_node_at_source_code_position(
         &self,
         path: &Path,
@@ -1580,48 +1584,48 @@ impl From<ComponentInstance>
 }
 
 /// Error returned by [`ComponentInstance::get_property`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::Error, derive_more::Display)]
 #[non_exhaustive]
 pub enum GetPropertyError {
     /// There is no property with the given name
-    #[error("no such property")]
+    #[display("no such property")]
     NoSuchProperty,
 }
 
 /// Error returned by [`ComponentInstance::set_property`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::Error, derive_more::Display)]
 #[non_exhaustive]
 pub enum SetPropertyError {
     /// There is no property with the given name.
-    #[error("no such property")]
+    #[display("no such property")]
     NoSuchProperty,
     /// The property exists but does not have a type matching the dynamic value.
     ///
     /// This happens for example when assigning a source struct value to a target
     /// struct property, where the source doesn't have all the fields the target struct
     /// requires.
-    #[error("wrong type")]
+    #[display("wrong type")]
     WrongType,
     /// Attempt to set an output property.
-    #[error("access denied")]
+    #[display("access denied")]
     AccessDenied,
 }
 
 /// Error returned by [`ComponentInstance::set_callback`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::Error, derive_more::Display)]
 #[non_exhaustive]
 pub enum SetCallbackError {
     /// There is no callback with the given name
-    #[error("no such callback")]
+    #[display("no such callback")]
     NoSuchCallback,
 }
 
 /// Error returned by [`ComponentInstance::invoke`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::Error, derive_more::Display)]
 #[non_exhaustive]
 pub enum InvokeError {
     /// There is no callback or function with the given name
-    #[error("no such callback or function")]
+    #[display("no such callback or function")]
     NoSuchCallable,
 }
 
@@ -1638,15 +1642,6 @@ pub fn run_event_loop() -> Result<(), PlatformError> {
 pub fn spawn_local<F: Future + 'static>(fut: F) -> Result<JoinHandle<F::Output>, EventLoopError> {
     i_slint_backend_selector::with_global_context(|ctx| ctx.spawn_local(fut))
         .map_err(|_| EventLoopError::NoEventLoopProvider)?
-}
-
-#[cfg(all(feature = "internal", target_arch = "wasm32"))]
-/// Spawn the event loop.
-///
-/// Like [`run_event_loop()`], but returns immediately as the loop is running within
-/// the browser's runtime
-pub fn spawn_event_loop() -> Result<(), PlatformError> {
-    i_slint_backend_selector::with_platform(|_| i_slint_backend_winit::spawn_event_loop())
 }
 
 /// This module contains a few functions used by the tests
@@ -2048,7 +2043,7 @@ fn component_definition_model_properties() {
                 assert_eq!(m.row_data(i).unwrap(), Value::Number(*v));
             }
         } else {
-            panic!("{:?} not a model", val);
+            panic!("{val:?} not a model");
         }
     }
 
@@ -2161,7 +2156,7 @@ fn test_multi_components() {
     assert!(result.component("xyz").is_none());
 }
 
-#[cfg(all(test, feature = "highlight"))]
+#[cfg(all(test, feature = "internal-highlight"))]
 fn compile(code: &str) -> (ComponentInstance, PathBuf) {
     i_slint_backend_testing::init_no_event_loop();
     let mut compiler = Compiler::default();
@@ -2183,7 +2178,7 @@ fn compile(code: &str) -> (ComponentInstance, PathBuf) {
     (instance, path)
 }
 
-#[cfg(feature = "highlight")]
+#[cfg(feature = "internal-highlight")]
 #[test]
 fn test_element_node_at_source_code_position() {
     let code = r#"
@@ -2199,7 +2194,7 @@ export component Foo2 inherits Window  {
 
     let (handle, path) = compile(code);
 
-    for i in 0..code.as_bytes().len() as u32 {
+    for i in 0..code.len() as u32 {
         let elements = handle.element_node_at_source_code_position(&path, i);
         eprintln!("{i}: {}", code.as_bytes()[i as usize] as char);
         match i {

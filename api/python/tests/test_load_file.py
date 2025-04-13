@@ -3,14 +3,24 @@
 
 import pytest
 from slint import load_file, CompileError
-import os
+from pathlib import Path
 
 
-def test_load_file(caplog):
-    module = load_file(os.path.join(os.path.dirname(
-        __spec__.origin), "test-load-file.slint"), quiet=False)
+def base_dir() -> Path:
+    origin = __spec__.origin
+    assert origin is not None
+    base_dir = Path(origin).parent
+    assert base_dir is not None
+    return base_dir
 
-    assert "The property 'color' has been deprecated. Please use 'background' instead" in caplog.text
+
+def test_load_file(caplog: pytest.LogCaptureFixture) -> None:
+    module = load_file(base_dir() / "test-load-file.slint", quiet=False)
+
+    assert (
+        "The property 'color' has been deprecated. Please use 'background' instead"
+        in caplog.text
+    )
 
     assert len(list(module.__dict__.keys())) == 6
     assert "App" in module.__dict__
@@ -35,14 +45,13 @@ def test_load_file(caplog):
     assert module.MyDiag is module.Diag
 
 
-def test_load_file_fail():
+def test_load_file_fail() -> None:
     with pytest.raises(CompileError, match="Could not compile non-existent.slint"):
         load_file("non-existent.slint")
 
 
-def test_load_file_wrapper():
-    module = load_file(os.path.join(os.path.dirname(
-        __spec__.origin), "test-load-file.slint"), quiet=False)
+def test_load_file_wrapper() -> None:
+    module = load_file(base_dir() / "test-load-file.slint", quiet=False)
 
     instance = module.App()
 
@@ -64,11 +73,10 @@ def test_load_file_wrapper():
     del instance
 
 
-def test_constructor_kwargs():
-    module = load_file(os.path.join(os.path.dirname(
-        __spec__.origin), "test-load-file.slint"), quiet=False)
+def test_constructor_kwargs() -> None:
+    module = load_file(base_dir() / "test-load-file.slint", quiet=False)
 
-    def early_say_hello(arg):
+    def early_say_hello(arg: str) -> str:
         return "early:" + arg
 
     instance = module.App(hello="Set early", say_hello=early_say_hello)

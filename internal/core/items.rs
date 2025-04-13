@@ -20,23 +20,26 @@ When adding an item or a property, it needs to be kept in sync with different pl
 #![allow(non_upper_case_globals)]
 #![allow(missing_docs)] // because documenting each property of items is redundant
 
-use crate::graphics::{Brush, Color, Point};
+use crate::graphics::{Brush, Color};
 use crate::input::{
     FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, KeyEventResult,
     KeyEventType, MouseEvent,
 };
-use crate::item_rendering::{CachedRenderingData, RenderBorderRectangle};
+use crate::item_rendering::{CachedRenderingData, RenderBorderRectangle, RenderRectangle};
 pub use crate::item_tree::ItemRc;
 use crate::layout::LayoutInfo;
 use crate::lengths::{
-    LogicalBorderRadius, LogicalLength, LogicalSize, LogicalVector, PointLengths, RectLengths,
+    LogicalBorderRadius, LogicalLength, LogicalRect, LogicalSize, LogicalVector, PointLengths,
+    RectLengths,
 };
 #[cfg(feature = "rtti")]
 use crate::rtti::*;
-use crate::window::{WindowAdapter, WindowAdapterRc};
+use crate::window::{WindowAdapter, WindowAdapterRc, WindowInner};
 use crate::{Callback, Coord, Property, SharedString};
 use alloc::rc::Rc;
 use const_field_offset::FieldOffsets;
+use core::cell::Cell;
+use core::num::NonZeroU32;
 use core::pin::Pin;
 use i_slint_core_macros::*;
 use vtable::*;
@@ -53,6 +56,7 @@ mod image;
 pub use self::image::*;
 #[cfg(feature = "std")]
 mod path;
+pub use crate::menus::MenuItem;
 #[cfg(feature = "std")]
 pub use path::*;
 
@@ -65,7 +69,7 @@ pub type VoidArg = ();
 pub type KeyEventArg = (KeyEvent,);
 type PointerEventArg = (PointerEvent,);
 type PointerScrollEventArg = (PointerScrollEvent,);
-type PointArg = (Point,);
+type PointArg = (crate::api::LogicalPosition,);
 type MenuEntryArg = (MenuEntry,);
 type MenuEntryModel = crate::model::ModelRc<MenuEntry>;
 
@@ -167,6 +171,15 @@ pub struct ItemVTable {
         self_rc: &ItemRc,
         size: LogicalSize,
     ) -> RenderingResult,
+
+    pub bounding_rect: extern "C" fn(
+        core::pin::Pin<VRef<ItemVTable>>,
+        window_adapter: &WindowAdapterRc,
+        self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect,
+
+    pub clips_children: extern "C" fn(core::pin::Pin<VRef<ItemVTable>>) -> bool,
 }
 
 /// Alias for `vtable::VRef<ItemVTable>` which represent a pointer to a `dyn Item` with
@@ -235,6 +248,20 @@ impl Item for Empty {
         _size: LogicalSize,
     ) -> RenderingResult {
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        mut geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry.size = LogicalSize::zero();
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -311,8 +338,27 @@ impl Item for Rectangle {
         self_rc: &ItemRc,
         size: LogicalSize,
     ) -> RenderingResult {
-        (*backend).draw_rectangle(self, self_rc, size);
+        (*backend).draw_rectangle(self, self_rc, size, &self.cached_rendering_data);
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
+}
+
+impl RenderRectangle for Rectangle {
+    fn background(self: Pin<&Self>) -> Brush {
+        self.background()
     }
 }
 
@@ -394,6 +440,19 @@ impl Item for BasicBorderRectangle {
     ) -> RenderingResult {
         (*backend).draw_border_rectangle(self, self_rc, size, &self.cached_rendering_data);
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -494,6 +553,19 @@ impl Item for BorderRectangle {
     ) -> RenderingResult {
         (*backend).draw_border_rectangle(self, self_rc, size, &self.cached_rendering_data);
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -620,6 +692,19 @@ impl Item for Clip {
     ) -> RenderingResult {
         (*backend).visit_clip(self, self_rc, size)
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        self.clip()
+    }
 }
 
 impl Clip {
@@ -706,6 +791,19 @@ impl Item for Opacity {
         size: LogicalSize,
     ) -> RenderingResult {
         backend.visit_opacity(self, self_rc, size)
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -811,6 +909,19 @@ impl Item for Layer {
     ) -> RenderingResult {
         backend.visit_layer(self, self_rc, size)
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
 }
 
 impl ItemConsts for Layer {
@@ -894,6 +1005,19 @@ impl Item for Rotate {
         (*backend).rotate(self.rotation_angle());
         (*backend).translate(-origin);
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 
@@ -1015,11 +1139,31 @@ impl Item for WindowItem {
 
     fn render(
         self: Pin<&Self>,
-        _backend: &mut ItemRendererRef,
-        _self_rc: &ItemRc,
-        _size: LogicalSize,
+        backend: &mut ItemRendererRef,
+        self_rc: &ItemRc,
+        size: LogicalSize,
     ) -> RenderingResult {
+        backend.draw_window_background(self, self_rc, size, &self.cached_rendering_data);
         RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
+}
+
+impl RenderRectangle for WindowItem {
+    fn background(self: Pin<&Self>) -> Brush {
+        self.background()
     }
 }
 
@@ -1061,7 +1205,7 @@ declare_item_vtable! {
     fn slint_get_WindowItemVTable() -> WindowItemVTable for WindowItem
 }
 
-/// The implementation of the `Window` element
+/// The implementation used for `ContextMenuArea` and `ContextMenuInternal` elements
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
@@ -1069,7 +1213,11 @@ pub struct ContextMenu {
     //pub entries: Property<crate::model::ModelRc<MenuEntry>>,
     pub sub_menu: Callback<MenuEntryArg, MenuEntryModel>,
     pub activated: Callback<MenuEntryArg>,
+    pub show: Callback<PointArg>,
     pub cached_rendering_data: CachedRenderingData,
+    pub popup_id: Cell<Option<NonZeroU32>>,
+    #[cfg(target_os = "android")]
+    long_press_timer: Cell<Option<crate::timers::Timer>>,
 }
 
 impl Item for ContextMenu {
@@ -1089,25 +1237,66 @@ impl Item for ContextMenu {
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> InputEventFilterResult {
-        InputEventFilterResult::ForwardAndIgnore
+        InputEventFilterResult::ForwardEvent
     }
 
     fn input_event(
         self: Pin<&Self>,
-        _event: MouseEvent,
+        event: MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> InputEventResult {
-        InputEventResult::EventIgnored
+        match event {
+            MouseEvent::Pressed { position, button: PointerEventButton::Right, .. } => {
+                self.show.call(&(crate::api::LogicalPosition::from_euclid(position),));
+                InputEventResult::EventAccepted
+            }
+            #[cfg(target_os = "android")]
+            MouseEvent::Pressed { position, button: PointerEventButton::Left, .. } => {
+                let timer = crate::timers::Timer::default();
+                let self_weak = _self_rc.downgrade();
+                timer.start(
+                    crate::timers::TimerMode::SingleShot,
+                    WindowInner::from_pub(_window_adapter.window())
+                        .ctx
+                        .platform()
+                        .long_press_interval(crate::InternalToken),
+                    move || {
+                        let Some(self_rc) = self_weak.upgrade() else { return };
+                        let Some(self_) = self_rc.downcast::<ContextMenu>() else { return };
+                        self_.show.call(&(crate::api::LogicalPosition::from_euclid(position),));
+                    },
+                );
+                self.long_press_timer.set(Some(timer));
+                InputEventResult::GrabMouse
+            }
+            #[cfg(target_os = "android")]
+            MouseEvent::Released { .. } | MouseEvent::Exit => {
+                if let Some(timer) = self.long_press_timer.take() {
+                    timer.stop();
+                }
+                InputEventResult::EventIgnored
+            }
+            #[cfg(target_os = "android")]
+            MouseEvent::Moved { .. } => InputEventResult::EventAccepted,
+            _ => InputEventResult::EventIgnored,
+        }
     }
 
     fn key_event(
         self: Pin<&Self>,
-        _: &KeyEvent,
+        event: &KeyEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
     ) -> KeyEventResult {
-        KeyEventResult::EventIgnored
+        if event.event_type == KeyEventType::KeyPressed
+            && event.text.starts_with(crate::input::key_codes::Menu)
+        {
+            self.show.call(&(Default::default(),));
+            KeyEventResult::EventAccepted
+        } else {
+            KeyEventResult::EventIgnored
+        }
     }
 
     fn focus_event(
@@ -1127,9 +1316,37 @@ impl Item for ContextMenu {
     ) -> RenderingResult {
         RenderingResult::ContinueRenderingChildren
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
 }
 
-impl ContextMenu {}
+impl ContextMenu {
+    pub fn close(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, _: &ItemRc) {
+        if let Some(id) = self.popup_id.take() {
+            WindowInner::from_pub(window_adapter.window()).close_popup(id);
+        }
+    }
+
+    pub fn is_open(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, _: &ItemRc) -> bool {
+        self.popup_id.get().is_some_and(|id| {
+            WindowInner::from_pub(window_adapter.window())
+                .active_popups()
+                .iter()
+                .any(|p| p.popup_id == id)
+        })
+    }
+}
 
 impl ItemConsts for ContextMenu {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<Self, CachedRenderingData> =
@@ -1138,6 +1355,32 @@ impl ItemConsts for ContextMenu {
 
 declare_item_vtable! {
     fn slint_get_ContextMenuVTable() -> ContextMenuVTable for ContextMenu
+}
+
+#[cfg(feature = "ffi")]
+#[no_mangle]
+pub unsafe extern "C" fn slint_contextmenu_close(
+    s: Pin<&ContextMenu>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) {
+    let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+    let self_rc = ItemRc::new(self_component.clone(), self_index);
+    s.close(window_adapter, &self_rc);
+}
+
+#[cfg(feature = "ffi")]
+#[no_mangle]
+pub unsafe extern "C" fn slint_contextmenu_is_open(
+    s: Pin<&ContextMenu>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) -> bool {
+    let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+    let self_rc = ItemRc::new(self_component.clone(), self_index);
+    s.is_open(window_adapter, &self_rc)
 }
 
 /// The implementation of the `BoxShadow` element
@@ -1210,6 +1453,21 @@ impl Item for BoxShadow {
         (*backend).draw_box_shadow(self, self_rc, size);
         RenderingResult::ContinueRenderingChildren
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+            .outer_rect(euclid::SideOffsets2D::from_length_all_same(self.blur()))
+            .translate(LogicalVector::from_lengths(self.offset_x(), self.offset_y()))
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
 }
 
 impl ItemConsts for BoxShadow {
@@ -1248,6 +1506,10 @@ declare_item_vtable! {
 #[cfg(feature = "std")]
 declare_item_vtable! {
     fn slint_get_PathVTable() -> PathVTable for Path
+}
+
+declare_item_vtable! {
+    fn slint_get_MenuItemVTable() -> MenuItemVTable for MenuItem
 }
 
 macro_rules! declare_enums {

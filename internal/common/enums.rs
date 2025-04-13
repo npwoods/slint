@@ -350,6 +350,10 @@ macro_rules! for_each_enums {
                 Checkbox,
                 /// The element is a `ComboBox` or behaves like one.
                 Combobox,
+                /// The element is a `GroupBox` or behaves like one.
+                Groupbox,
+                /// The element is an `Image` or behaves like one. This is automatically applied to `Image` elements.
+                Image,
                 /// The element is a `ListView` or behaves like one.
                 List,
                 /// The element is a `Slider` or behaves like one.
@@ -360,7 +364,9 @@ macro_rules! for_each_enums {
                 Tab,
                 /// The element is similar to the tab bar in a `TabWidget`.
                 TabList,
-                /// The role for a `Text` element. It's automatically applied.
+                /// The element is a container for tab content.
+                TabPanel,
+                /// The role for a `Text` element. This is automatically applied to `Text` elements.
                 Text,
                 /// The role for a `TableView` or behaves like one.
                 Table,
@@ -368,8 +374,8 @@ macro_rules! for_each_enums {
                 Tree,
                 /// The element is a `ProgressIndicator` or behaves like one.
                 ProgressIndicator,
-                /// The role for widget with editable text such as a
-                /// `LineEdit` or a `TextEdit`
+                /// The role for widget with editable text such as a `LineEdit` or a `TextEdit`.
+                /// This is automatically applied to `TextInput` elements.
                 TextInput,
                 /// The element is a `Switch` or behaves like one.
                 Switch,
@@ -442,6 +448,16 @@ macro_rules! for_each_enums {
 
                 /// Does not close the `PopupWindow` automatically when user clicks.
                 NoAutoClose,
+            }
+
+            /// This enum describes the appearance of the ends of stroked paths.
+            enum LineCap {
+                /// The stroke ends with a flat edge that is perpendicular to the path.
+                Butt,
+                /// The stroke ends with a rounded edge.
+                Round,
+                /// The stroke ends with a square projection beyond the path.
+                Square,
             }
         ];
     };

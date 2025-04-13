@@ -6,6 +6,7 @@ export { ScrollView } from "scrollview.slint";
 export { ListItem } from "components.slint";
 export { LineEdit } from "lineedit.slint";
 import { CupertinoPalette } from "styling.slint";
+export { MenuBarItem, MenuBar, MenuFrame, MenuItem } from "menu.slint";
 
 export global StyleMetrics  {
     out property <length> layout-spacing: 10px;
@@ -21,6 +22,7 @@ export global StyleMetrics  {
 }
 
 export global Palette {
+    out property <string> style-name: "cupertino";
     out property <brush> background: CupertinoPalette.background;
     out property <brush> foreground: CupertinoPalette.foreground;
     out property <brush> alternate-background: CupertinoPalette.alternate-background;

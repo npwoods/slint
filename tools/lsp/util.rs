@@ -34,10 +34,8 @@ pub fn node_to_url_and_lsp_range(node: &SyntaxNode) -> Option<(lsp_types::Url, l
 }
 
 /// Map a `node` to the `Range` of characters covered by the `node`
-///
-/// This will exclude trailing whitespaces.
 pub fn node_to_lsp_range(node: &SyntaxNode) -> lsp_types::Range {
-    let range = node_range_without_trailing_ws(node);
+    let range = node.text_range();
     text_range_to_lsp_range(&node.source_file, range)
 }
 
@@ -133,7 +131,7 @@ pub fn lookup_current_element_type(mut node: SyntaxNode, tr: &TypeRegister) -> O
 
     let parent = node.parent()?;
     if parent.kind() == SyntaxKind::Component
-        && parent.child_text(SyntaxKind::Identifier).map_or(false, |x| x == "global")
+        && parent.child_text(SyntaxKind::Identifier).is_some_and(|x| x == "global")
     {
         return Some(ElementType::Global);
     }
@@ -204,7 +202,7 @@ pub fn with_property_lookup_ctx<R>(
         loop {
             scope.push(it.clone());
             if let Some(c) = it.clone().borrow().children.iter().find(|c| {
-                c.borrow().debug.first().map_or(false, |n| n.node.text_range().contains(offset))
+                c.borrow().debug.first().is_some_and(|n| n.node.text_range().contains(offset))
             }) {
                 it = c.clone();
             } else {
@@ -241,7 +239,7 @@ pub fn with_property_lookup_ctx<R>(
 
     if let Some(cb) = element
         .CallbackConnection()
-        .find(|p| i_slint_compiler::parser::identifier_text(p).map_or(false, |x| x == prop_name))
+        .find(|p| i_slint_compiler::parser::identifier_text(p).is_some_and(|x| x == prop_name))
     {
         lookup_context.arguments = cb
             .DeclaredIdentifier()
@@ -249,7 +247,7 @@ pub fn with_property_lookup_ctx<R>(
             .collect();
     } else if let Some(f) = element.Function().find(|p| {
         i_slint_compiler::parser::identifier_text(&p.DeclaredIdentifier())
-            .map_or(false, |x| x == prop_name)
+            .is_some_and(|x| x == prop_name)
     }) {
         lookup_context.arguments = f
             .ArgumentDeclaration()

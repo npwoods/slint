@@ -10,7 +10,6 @@ compile_error!("Feature preview-engine and preview-builtin need to be enabled to
 mod common;
 mod fmt;
 mod language;
-pub mod lsp_ext;
 #[cfg(feature = "preview-engine")]
 mod preview;
 pub mod util;
@@ -40,6 +39,13 @@ use std::sync::{atomic, Arc, Mutex};
 use std::task::{Poll, Waker};
 
 use crate::common::document_cache::CompilerConfiguration;
+
+#[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Clone, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -230,8 +236,7 @@ fn main() {
     if let Ok(panic_log_file) = std::env::var("SLINT_LSP_PANIC_LOG") {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ =
-                std::path::Path::new(&panic_log_file).parent().map(|x| std::fs::create_dir_all(x));
+            let _ = std::path::Path::new(&panic_log_file).parent().map(std::fs::create_dir_all);
             if let Ok(mut file) = std::fs::File::create(&panic_log_file) {
                 let _ = writeln!(
                     file,
@@ -245,6 +250,7 @@ fn main() {
                 } else {
                     writeln!(file, "unknown location")
                 };
+                let _ = writeln!(file, "{:?}", std::backtrace::Backtrace::force_capture());
                 let _ = writeln!(file, "{info}");
             }
             default_hook(info);
@@ -269,7 +275,7 @@ fn main() {
                 let threads = match run_lsp_server(args) {
                     Ok(threads) => threads,
                     Err(error) => {
-                        eprintln!("Error running LSP server: {}", error);
+                        eprintln!("Error running LSP server: {error}");
                         return;
                     }
                 };
@@ -537,13 +543,6 @@ async fn handle_preview_to_lsp_message(
 ) -> Result<()> {
     use crate::common::PreviewToLspMessage as M;
     match message {
-        M::Status { message, health } => {
-            crate::common::lsp_to_editor::send_status_notification(
-                &ctx.server_notifier,
-                &message,
-                health,
-            );
-        }
         M::Diagnostics { uri, version, diagnostics } => {
             crate::common::lsp_to_editor::notify_lsp_diagnostics(
                 &ctx.server_notifier,

@@ -224,8 +224,8 @@ impl PartialEq for SharedImageBuffer {
 
 #[repr(u8)]
 #[derive(Clone, PartialEq, Debug, Copy)]
-/// The pixel format of a StaticTexture
-pub enum PixelFormat {
+/// The pixel format used for textures.
+pub enum TexturePixelFormat {
     /// red, green, blue. 24bits.
     Rgb,
     /// Red, green, blue, alpha. 32bits.
@@ -241,15 +241,15 @@ pub enum PixelFormat {
     SignedDistanceField,
 }
 
-impl PixelFormat {
+impl TexturePixelFormat {
     /// The number of bytes in a pixel
     pub fn bpp(self) -> usize {
         match self {
-            PixelFormat::Rgb => 3,
-            PixelFormat::Rgba => 4,
-            PixelFormat::RgbaPremultiplied => 4,
-            PixelFormat::AlphaMap => 1,
-            PixelFormat::SignedDistanceField => 1,
+            TexturePixelFormat::Rgb => 3,
+            TexturePixelFormat::Rgba => 4,
+            TexturePixelFormat::RgbaPremultiplied => 4,
+            TexturePixelFormat::AlphaMap => 1,
+            TexturePixelFormat::SignedDistanceField => 1,
         }
     }
 }
@@ -261,17 +261,16 @@ pub struct StaticTexture {
     /// The position and size of the texture within the image
     pub rect: IntRect,
     /// The pixel format of this texture
-    pub format: PixelFormat,
+    pub format: TexturePixelFormat,
     /// The color, for the alpha map ones
     pub color: crate::Color,
     /// index in the data array
     pub index: usize,
 }
 
+/// A texture is stored in read-only memory and may be composed of sub-textures.
 #[repr(C)]
 #[derive(Clone, PartialEq, Debug)]
-/// A texture is stored in read-only memory and may be composed of sub-textures.
-
 pub struct StaticTextures {
     /// The total size of the image (this might not be the size of the full image
     /// as some transparent part are not part of any texture)
@@ -421,7 +420,7 @@ impl ImageInner {
                 // Ignore error when rendering a 0x0 image, that's just an empty image
                 Err(resvg::usvg::Error::InvalidSize) => None,
                 Err(err) => {
-                    eprintln!("Error rendering SVG: {err}");
+                    std::eprintln!("Error rendering SVG: {err}");
                     None
                 }
             },
@@ -436,7 +435,7 @@ impl ImageInner {
                         let slice = &mut slice[(rect.min_y() + y) * stride..][rect.x_range()];
                         let source = &ts.data[t.index + y * rect.width() * t.format.bpp()..];
                         match t.format {
-                            PixelFormat::Rgb => {
+                            TexturePixelFormat::Rgb => {
                                 let mut iter = source.chunks_exact(3).map(|p| Rgba8Pixel {
                                     r: p[0],
                                     g: p[1],
@@ -445,7 +444,7 @@ impl ImageInner {
                                 });
                                 slice.fill_with(|| iter.next().unwrap());
                             }
-                            PixelFormat::RgbaPremultiplied => {
+                            TexturePixelFormat::RgbaPremultiplied => {
                                 let mut iter = source.chunks_exact(4).map(|p| Rgba8Pixel {
                                     r: p[0],
                                     g: p[1],
@@ -454,7 +453,7 @@ impl ImageInner {
                                 });
                                 slice.fill_with(|| iter.next().unwrap());
                             }
-                            PixelFormat::Rgba => {
+                            TexturePixelFormat::Rgba => {
                                 let mut iter = source.chunks_exact(4).map(|p| {
                                     let a = p[3];
                                     Rgba8Pixel {
@@ -466,7 +465,7 @@ impl ImageInner {
                                 });
                                 slice.fill_with(|| iter.next().unwrap());
                             }
-                            PixelFormat::AlphaMap => {
+                            TexturePixelFormat::AlphaMap => {
                                 let col = t.color.to_argb_u8();
                                 let mut iter = source.iter().map(|p| {
                                     let a = *p as u32 * col.alpha as u32;
@@ -479,7 +478,7 @@ impl ImageInner {
                                 });
                                 slice.fill_with(|| iter.next().unwrap());
                             }
-                            PixelFormat::SignedDistanceField => {
+                            TexturePixelFormat::SignedDistanceField => {
                                 todo!("converting from a signed distance field to an image")
                             }
                         };
@@ -663,7 +662,12 @@ pub struct Image(ImageInner);
 
 impl Image {
     #[cfg(feature = "image-decoders")]
-    /// Load an Image from a path to a file containing an image
+    /// Load an Image from a path to a file containing an image.
+    ///
+    /// Supported formats are SVG, PNG and JPEG.
+    /// Enable support for additional formats supported by the [`image` crate](https://crates.io/crates/image) (
+    /// AVIF, BMP, DDS, Farbfeld, GIF, HDR, ICO, JPEG, EXR, PNG, PNM, QOI, TGA, TIFF, WebP)
+    /// by enabling the `image-default-formats` cargo feature.
     pub fn load_from_path(path: &std::path::Path) -> Result<Self, LoadImageError> {
         self::cache::IMAGE_CACHE.with(|global_cache| {
             let path: SharedString = path.to_str().ok_or(LoadImageError(()))?.into();
@@ -1317,7 +1321,7 @@ pub(crate) mod ffi {
 
     #[no_mangle]
     pub unsafe extern "C" fn slint_image_compare_equal(image1: &Image, image2: &Image) -> bool {
-        return image1.eq(image2);
+        image1.eq(image2)
     }
 
     /// Call [`Image::set_nine_slice_edges`]
@@ -1339,7 +1343,7 @@ pub(crate) mod ffi {
         width: &mut u32,
         height: &mut u32,
     ) -> bool {
-        image.to_rgb8().map_or(false, |pixel_buffer| {
+        image.to_rgb8().is_some_and(|pixel_buffer| {
             *data = pixel_buffer.data.clone();
             *width = pixel_buffer.width();
             *height = pixel_buffer.height();
@@ -1354,7 +1358,7 @@ pub(crate) mod ffi {
         width: &mut u32,
         height: &mut u32,
     ) -> bool {
-        image.to_rgba8().map_or(false, |pixel_buffer| {
+        image.to_rgba8().is_some_and(|pixel_buffer| {
             *data = pixel_buffer.data.clone();
             *width = pixel_buffer.width();
             *height = pixel_buffer.height();
@@ -1369,7 +1373,7 @@ pub(crate) mod ffi {
         width: &mut u32,
         height: &mut u32,
     ) -> bool {
-        image.to_rgba8_premultiplied().map_or(false, |pixel_buffer| {
+        image.to_rgba8_premultiplied().is_some_and(|pixel_buffer| {
             *data = pixel_buffer.data.clone();
             *width = pixel_buffer.width();
             *height = pixel_buffer.height();

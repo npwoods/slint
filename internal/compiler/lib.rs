@@ -34,6 +34,8 @@ pub mod namedreference;
 pub mod object_tree;
 pub mod parser;
 pub mod pathutils;
+#[cfg(feature = "bundle-translations")]
+pub mod translations;
 pub mod typeloader;
 pub mod typeregister;
 
@@ -68,8 +70,9 @@ pub enum ComponentSelection {
     /// and if no component is exported, the last component is selected
     #[default]
     ExportedWindows,
-    /// The Last component (legacy for the viewer / interpreter)
 
+    /// The Last component (legacy for the viewer / interpreter)
+    ///
     /// Only the last exported component is generated, regardless if this is a Window or not,
     /// (and it will be transformed in a Window)
     LastExported,
@@ -94,6 +97,9 @@ pub struct CompilerConfiguration {
     /// Indicate whether to embed resources such as images in the generated output or whether
     /// to retain references to the resources on the file system.
     pub embed_resources: EmbedResourcesKind,
+    /// Whether to use SDF when pre-rendering fonts.
+    #[cfg(all(feature = "software-renderer", feature = "sdf-fonts"))]
+    pub use_sdf_fonts: bool,
     /// The compiler will look in these paths for components used in the file to compile.
     pub include_paths: Vec<std::path::PathBuf>,
     /// The compiler will look in these paths for library imports.
@@ -141,6 +147,9 @@ pub struct CompilerConfiguration {
 
     /// Generate debug information for elements (ids, type names)
     pub debug_info: bool,
+
+    /// Generate debug hooks to inspect/override properties.
+    pub debug_hooks: Option<std::hash::RandomState>,
 
     pub components_to_generate: ComponentSelection,
 
@@ -220,9 +229,12 @@ impl CompilerConfiguration {
             translation_domain: None,
             cpp_namespace,
             debug_info,
+            debug_hooks: None,
             components_to_generate: ComponentSelection::ExportedWindows,
             #[cfg(feature = "software-renderer")]
             font_cache: Default::default(),
+            #[cfg(all(feature = "software-renderer", feature = "sdf-fonts"))]
+            use_sdf_fonts: false,
             #[cfg(feature = "bundle-translations")]
             translation_path_bundle: std::env::var("SLINT_BUNDLE_TRANSLATIONS")
                 .ok()

@@ -193,6 +193,41 @@ impl DocumentCache {
         self.type_loader.get_document(&path)
     }
 
+    fn uses_widgets_impl(&self, doc_path: PathBuf, dedup: &mut HashSet<PathBuf>) -> bool {
+        if dedup.contains(&doc_path) {
+            return false;
+        }
+
+        if doc_path.starts_with("builtin:/") && doc_path.ends_with("std-widgets.slint") {
+            return true;
+        }
+
+        let Some(doc) = self.get_document_by_path(&doc_path) else {
+            return false;
+        };
+
+        dedup.insert(doc_path.to_path_buf());
+
+        for import in doc.imports.iter().map(|i| PathBuf::from(&i.file)) {
+            if self.uses_widgets_impl(import, dedup) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Returns true if doc_url uses (possibly indirectly) widgets from "std-widgets.slint"
+    pub fn uses_widgets(&self, doc_url: &Url) -> bool {
+        let Some(doc_path) = uri_to_file(doc_url) else {
+            return false;
+        };
+
+        let mut dedup = HashSet::new();
+
+        self.uses_widgets_impl(doc_path, &mut dedup)
+    }
+
     pub fn get_document_by_path<'a>(&'a self, path: &'_ Path) -> Option<&'a Document> {
         self.type_loader.get_document(path)
     }
@@ -231,6 +266,14 @@ impl DocumentCache {
         self.type_loader.global_type_registry.borrow()
     }
 
+    fn invalidate_everything(&mut self) {
+        let all_files = self.type_loader.all_files().cloned().collect::<Vec<_>>();
+
+        for path in all_files {
+            self.type_loader.invalidate_document(&path);
+        }
+    }
+
     pub async fn reconfigure(
         &mut self,
         style: Option<String>,
@@ -256,6 +299,8 @@ impl DocumentCache {
         if let Some(lp) = library_paths {
             self.type_loader.compiler_config.library_paths = lp;
         }
+
+        self.invalidate_everything();
 
         self.preload_builtins().await;
 
@@ -326,7 +371,7 @@ impl DocumentCache {
                 .borrow()
                 .debug
                 .iter()
-                .position(|n| n.node.parent().map_or(false, |n| n.text_range().contains(offset)))
+                .position(|n| n.node.parent().is_some_and(|n| n.text_range().contains(offset)))
         }
 
         for component in &document.inner_components {

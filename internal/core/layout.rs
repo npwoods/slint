@@ -311,14 +311,15 @@ mod grid_internal {
         spacing: Coord,
         size: Option<Coord>,
     ) -> Vec<LayoutData> {
-        let mut num = 0;
+        let mut num = 0usize;
         for cell in data {
-            num = num.max(cell.col_or_row + cell.span);
+            num = num.max(cell.col_or_row as usize + cell.span.max(1) as usize);
         }
         if num < 1 {
             return Default::default();
         }
-        let mut layout_data = alloc::vec![grid_internal::LayoutData { stretch: 1., ..Default::default() }; num as usize];
+        let mut layout_data =
+            alloc::vec![grid_internal::LayoutData { stretch: 1., ..Default::default() }; num];
         let mut has_spans = false;
         for cell in data {
             let constraint = &cell.constraint;
@@ -683,7 +684,7 @@ pub fn reorder_dialog_button_layout(cells: &mut [GridLayoutCellData], roles: &[D
         std::env::var("XDG_CURRENT_DESKTOP")
             .ok()
             .and_then(|v| v.as_bytes().first().copied())
-            .map_or(false, |x| x.to_ascii_uppercase() == b'K')
+            .is_some_and(|x| x.eq_ignore_ascii_case(&b'K'))
     }
     #[cfg(not(feature = "std"))]
     let is_kde = || true;

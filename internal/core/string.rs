@@ -7,10 +7,12 @@
 #![warn(missing_docs)]
 
 use crate::SharedVector;
-#[cfg(not(feature = "std"))]
 use alloc::string::String;
 use core::fmt::{Debug, Display, Write};
 use core::ops::Deref;
+#[cfg(not(feature = "std"))]
+#[allow(unused)]
+use num_traits::Float;
 
 /// This macro is the same as [`std::format!`], but it returns a [`SharedString`] instead.
 ///
@@ -306,8 +308,40 @@ where
     }
 }
 
+/// Convert a f62 to a SharedString
+pub fn shared_string_from_number(n: f64) -> SharedString {
+    // Number from which the increment of f32 is 1, so that we print enough precision to be able to represent all integers
+    if n < 16777216. {
+        crate::format!("{}", n as f32)
+    } else {
+        crate::format!("{}", n)
+    }
+}
+
+/// Convert a f64 to a SharedString with a fixed number of digits after the decimal point
+pub fn shared_string_from_number_fixed(n: f64, digits: usize) -> SharedString {
+    crate::format!("{number:.digits$}", number = n, digits = digits)
+}
+
+/// Convert a f64 to a SharedString following a similar logic as JavaScript's Number.toPrecision()
+pub fn shared_string_from_number_precision(n: f64, precision: usize) -> SharedString {
+    let exponent = f64::log10(n.abs()).floor() as isize;
+    if precision == 0 {
+        shared_string_from_number(n)
+    } else if exponent < -6 || (exponent >= 0 && exponent as usize >= precision) {
+        crate::format!(
+            "{number:.digits$e}",
+            number = n,
+            digits = precision.saturating_add_signed(-1)
+        )
+    } else {
+        shared_string_from_number_fixed(n, precision.saturating_add_signed(-(exponent + 1)))
+    }
+}
+
 #[test]
 fn simple_test() {
+    use std::string::ToString;
     let x = SharedString::from("hello world!");
     assert_eq!(x, "hello world!");
     assert_ne!(x, "hello world?");
@@ -332,7 +366,7 @@ fn simple_test() {
 fn threading() {
     let shared_cst = SharedString::from("Hello there!");
     let shared_mtx = std::sync::Arc::new(std::sync::Mutex::new(SharedString::from("Shared:")));
-    let mut handles = vec![];
+    let mut handles = std::vec![];
     for _ in 0..20 {
         let cst = shared_cst.clone();
         let mtx = shared_mtx.clone();
@@ -417,7 +451,7 @@ pub(crate) mod ffi {
     /// The resulting structure must be passed to slint_shared_string_drop
     #[no_mangle]
     pub unsafe extern "C" fn slint_shared_string_from_number(out: *mut SharedString, n: f64) {
-        let str = crate::format!("{}", n as f32);
+        let str = shared_string_from_number(n);
         core::ptr::write(out, str);
     }
 
@@ -447,6 +481,129 @@ pub(crate) mod ffi {
             );
             assert_eq!(s.assume_init(), "1235.828");
         }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn slint_shared_string_from_number_fixed(
+        out: &mut SharedString,
+        n: f64,
+        digits: usize,
+    ) {
+        *out = shared_string_from_number_fixed(n, digits);
+    }
+
+    #[test]
+    fn test_slint_shared_string_from_number_fixed() {
+        let mut s = SharedString::default();
+
+        let num = 12345.6789;
+
+        slint_shared_string_from_number_fixed(&mut s, num, 0);
+        assert_eq!(s.as_str(), "12346");
+
+        slint_shared_string_from_number_fixed(&mut s, num, 1);
+        assert_eq!(s.as_str(), "12345.7");
+
+        slint_shared_string_from_number_fixed(&mut s, num, 6);
+        assert_eq!(s.as_str(), "12345.678900");
+
+        let num = -12345.6789;
+
+        slint_shared_string_from_number_fixed(&mut s, num, 0);
+        assert_eq!(s.as_str(), "-12346");
+
+        slint_shared_string_from_number_fixed(&mut s, num, 1);
+        assert_eq!(s.as_str(), "-12345.7");
+
+        slint_shared_string_from_number_fixed(&mut s, num, 6);
+        assert_eq!(s.as_str(), "-12345.678900");
+
+        slint_shared_string_from_number_fixed(&mut s, 1.23E+20_f64, 2);
+        assert_eq!(s.as_str(), "123000000000000000000.00");
+
+        slint_shared_string_from_number_fixed(&mut s, 1.23E-10_f64, 2);
+        assert_eq!(s.as_str(), "0.00");
+
+        slint_shared_string_from_number_fixed(&mut s, 2.34, 1);
+        assert_eq!(s.as_str(), "2.3");
+
+        slint_shared_string_from_number_fixed(&mut s, 2.35, 1);
+        assert_eq!(s.as_str(), "2.4");
+
+        slint_shared_string_from_number_fixed(&mut s, 2.55, 1);
+        assert_eq!(s.as_str(), "2.5");
+    }
+
+    #[no_mangle]
+    pub extern "C" fn slint_shared_string_from_number_precision(
+        out: &mut SharedString,
+        n: f64,
+        precision: usize,
+    ) {
+        *out = shared_string_from_number_precision(n, precision);
+    }
+
+    #[test]
+    fn test_slint_shared_string_from_number_precision() {
+        let mut s = SharedString::default();
+
+        let num = 5.123456;
+
+        slint_shared_string_from_number_precision(&mut s, num, 0);
+        assert_eq!(s.as_str(), "5.123456");
+
+        slint_shared_string_from_number_precision(&mut s, num, 5);
+        assert_eq!(s.as_str(), "5.1235");
+
+        slint_shared_string_from_number_precision(&mut s, num, 2);
+        assert_eq!(s.as_str(), "5.1");
+
+        slint_shared_string_from_number_precision(&mut s, num, 1);
+        assert_eq!(s.as_str(), "5");
+
+        let num = 0.000123;
+
+        slint_shared_string_from_number_precision(&mut s, num, 0);
+        assert_eq!(s.as_str(), "0.000123");
+
+        slint_shared_string_from_number_precision(&mut s, num, 5);
+        assert_eq!(s.as_str(), "0.00012300");
+
+        slint_shared_string_from_number_precision(&mut s, num, 2);
+        assert_eq!(s.as_str(), "0.00012");
+
+        slint_shared_string_from_number_precision(&mut s, num, 1);
+        assert_eq!(s.as_str(), "0.0001");
+
+        let num = 1234.5;
+
+        slint_shared_string_from_number_precision(&mut s, num, 1);
+        assert_eq!(s.as_str(), "1e3");
+
+        slint_shared_string_from_number_precision(&mut s, num, 2);
+        assert_eq!(s.as_str(), "1.2e3");
+
+        slint_shared_string_from_number_precision(&mut s, num, 6);
+        assert_eq!(s.as_str(), "1234.50");
+
+        let num = -1234.5;
+
+        slint_shared_string_from_number_precision(&mut s, num, 1);
+        assert_eq!(s.as_str(), "-1e3");
+
+        slint_shared_string_from_number_precision(&mut s, num, 2);
+        assert_eq!(s.as_str(), "-1.2e3");
+
+        slint_shared_string_from_number_precision(&mut s, num, 6);
+        assert_eq!(s.as_str(), "-1234.50");
+
+        let num = 0.00000012345;
+
+        slint_shared_string_from_number_precision(&mut s, num, 1);
+        assert_eq!(s.as_str(), "1e-7");
+
+        slint_shared_string_from_number_precision(&mut s, num, 10);
+        assert_eq!(s.as_str(), "1.234500000e-7");
     }
 
     /// Append some bytes to an existing shared string

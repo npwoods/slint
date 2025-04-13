@@ -315,6 +315,19 @@ impl Item for NativeTabWidget {
                 style->drawPrimitive(QStyle::PE_FrameTabBarBase, &optTabBase, painter->get(), widget);*/
         });
     }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
 }
 
 impl ItemConsts for NativeTabWidget {
@@ -527,6 +540,19 @@ impl Item for NativeTab {
             option.features |= QStyleOptionTab::HasFrame;
             qApp->style()->drawControl(QStyle::CE_TabBarTab, &option, painter->get(), widget);
         });
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
     }
 }
 

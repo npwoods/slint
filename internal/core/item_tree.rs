@@ -10,7 +10,7 @@ use crate::accessibility::{
 };
 use crate::items::{AccessibleRole, ItemRef, ItemVTable};
 use crate::layout::{LayoutInfo, Orientation};
-use crate::lengths::{LogicalPoint, LogicalRect};
+use crate::lengths::{ItemTransform, LogicalPoint, LogicalRect};
 use crate::slice::Slice;
 use crate::window::WindowAdapterRc;
 use crate::SharedString;
@@ -330,8 +330,13 @@ impl ItemRc {
     /// false for `Clip` elements with the `clip` property evaluating to true.
     pub fn is_visible(&self) -> bool {
         let (clip, geometry) = self.absolute_clip_rect_and_geometry();
-        let intersection = geometry.intersection(&clip).unwrap_or_default();
-        !intersection.is_empty() || (geometry.is_empty() && clip.contains(geometry.center()))
+        let clip = clip.to_box2d();
+        let geometry = geometry.to_box2d();
+        !clip.is_empty()
+            && clip.max.x >= geometry.min.x
+            && clip.max.y >= geometry.min.y
+            && clip.min.x <= geometry.max.x
+            && clip.min.y <= geometry.max.y
     }
 
     /// Returns the clip rect that applies to this item (in window coordinates) as well as the
@@ -350,7 +355,7 @@ impl ItemRc {
         let geometry = self.geometry().translate(parent_geometry.origin.to_vector());
 
         let item = self.borrow();
-        if crate::item_rendering::is_clipping_item(item) {
+        if item.as_ref().clips_children() {
             clip = geometry.intersection(&clip).unwrap_or_default();
         }
 
@@ -431,6 +436,14 @@ impl ItemRc {
     pub fn geometry(&self) -> LogicalRect {
         let comp_ref_pin = vtable::VRc::borrow_pin(&self.item_tree);
         comp_ref_pin.as_ref().item_geometry(self.index)
+    }
+
+    pub fn bounding_rect(
+        &self,
+        geometry: &LogicalRect,
+        window_adapter: &WindowAdapterRc,
+    ) -> LogicalRect {
+        self.borrow().as_ref().bounding_rect(window_adapter, self, *geometry)
     }
 
     /// Returns an absolute position of `p` in the parent item coordinate system
@@ -779,6 +792,23 @@ impl ItemRc {
         mut visitor: impl FnMut(&ItemRc) -> ControlFlow<R>,
     ) -> Option<R> {
         self.visit_descendants_impl(&mut visitor)
+    }
+
+    /// Returns the transform to apply to children to map them into the local coordinate space of this item.
+    /// Typically this is None, but rotation for example may return Some.
+    pub fn children_transform(&self) -> Option<ItemTransform> {
+        self.downcast::<crate::items::Rotate>().map(|rotate_item| {
+            let origin = euclid::Vector2D::<f32, crate::lengths::LogicalPx>::from_lengths(
+                rotate_item.as_pin_ref().rotation_origin_x().cast(),
+                rotate_item.as_pin_ref().rotation_origin_y().cast(),
+            );
+            ItemTransform::translation(-origin.x, -origin.y)
+                .cast()
+                .then_rotate(euclid::Angle {
+                    radians: rotate_item.as_pin_ref().rotation_angle().to_radians(),
+                })
+                .then_translate(origin)
+        })
     }
 }
 
@@ -1202,6 +1232,7 @@ pub(crate) mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
 
     struct TestItemTree {
         parent_component: Option<ItemTreeRc>,

@@ -358,6 +358,7 @@ export class EditorWidget extends Widget {
     #layout: BoxLayout;
     #tab_map: Map<string, EditorPaneWidget> = new Map();
     #tab_panel: TabPanel | null = null;
+    #open_files: [monaco.IDisposable] = [];
 
     #client: MonacoLanguageClient | null = null;
 
@@ -464,6 +465,11 @@ export class EditorWidget extends Widget {
 
         this.#tab_map.clear();
         this.#extra_file_urls = {};
+
+        for (const d of this.#open_files) {
+            d.dispose();
+        }
+        this.#open_files = [];
     }
 
     private open_hello_world(): monaco.Uri {
@@ -476,9 +482,12 @@ export class EditorWidget extends Widget {
     }
 
     private open_file_with_content(uri: monaco.Uri, content: string) {
-        FILESYSTEM_PROVIDER.registerFile(
-            new RegisteredMemoryFile(uri, content),
+        this.#open_files.push(
+            FILESYSTEM_PROVIDER.registerFile(
+                new RegisteredMemoryFile(uri, content),
+            ),
         );
+
         monaco.editor
             .createModelReference(uri)
             .then((model_ref) => this.open_model_ref(model_ref));
@@ -555,6 +564,7 @@ export class EditorWidget extends Widget {
         }
 
         this.clear_editors();
+
         return Promise.resolve(
             (await this.open_tab_from_url(monaco.Uri.parse(uri)))[0],
         );
@@ -581,10 +591,17 @@ export class EditorWidget extends Widget {
         return [
             ["", "Hello World!"],
             ["examples/gallery/gallery.slint", "Gallery"],
+            ["demos/home-automation/ui/demo-debug.slint", "Home Automation"],
+            ["demos/usecases/ui/app.slint", "Use Cases Demo"],
             ["demos/printerdemo/ui/printerdemo.slint", "Printer Demo"],
             ["demos/energy-monitor/ui/desktop_window.slint", "Energy Monitor"],
             ["examples/todo/ui/todo.slint", "Todo Demo"],
             ["examples/iot-dashboard/main.slint", "IOT Dashboard"],
+            ["examples/fancy-switches/demo.slint", "Fancy Switches"],
+            ["examples/dial/dial.slint", "Fanncy Dial"],
+            ["examples/orbit-animation/demo.slint", "Fancy Animations"],
+            ["examples/repeater/demo.slint", "Fancy Repeater"],
+            ["examples/sprite-sheet/demo.slint", "Spritesheet Demo"],
         ];
     }
 

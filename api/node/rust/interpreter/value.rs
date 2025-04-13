@@ -198,8 +198,7 @@ pub fn to_value(env: &Env, unknown: JsUnknown, typ: &Type) -> Result<Value> {
                     let expected_size: usize = (width as usize) * (height as usize) * BPP;
                     if actual_size != expected_size {
                         return Err(napi::Error::from_reason(format!(
-                            "data property does not have the correct size; expected {} (width) * {} (height) * {} = {}; got {}",
-                            width, height, BPP, actual_size, expected_size
+                            "data property does not have the correct size; expected {width} (width) * {height} (height) * {BPP} = {actual_size}; got {expected_size}"
                         )));
                     }
 
@@ -244,8 +243,7 @@ pub fn to_value(env: &Env, unknown: JsUnknown, typ: &Type) -> Result<Value> {
                     vec.push(to_value(
                         env,
                         array.get(i)?.ok_or(napi::Error::from_reason(format!(
-                            "Cannot access array element at index {}",
-                            i
+                            "Cannot access array element at index {i}"
                         )))?,
                         a,
                     )?);
@@ -255,7 +253,7 @@ pub fn to_value(env: &Env, unknown: JsUnknown, typ: &Type) -> Result<Value> {
                 )))))
             } else {
                 let rust_model =
-                    unknown.coerce_to_object().and_then(|obj| js_into_rust_model(env, &obj, &a))?;
+                    unknown.coerce_to_object().and_then(|obj| js_into_rust_model(env, &obj, a))?;
                 Ok(Value::Model(rust_model))
             }
         }
@@ -308,10 +306,10 @@ fn brush_from_color(rgb_color: Object) -> Result<Value> {
         return Err(Error::from_reason("A channel of Color cannot be negative"));
     }
 
-    return Ok(Value::Brush(Brush::SolidColor(Color::from_argb_u8(
+    Ok(Value::Brush(Brush::SolidColor(Color::from_argb_u8(
         alpha as u8,
         red as u8,
         green as u8,
         blue as u8,
-    ))));
+    ))))
 }

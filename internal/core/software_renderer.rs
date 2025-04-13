@@ -18,11 +18,10 @@ pub use self::minimal_software_window::MinimalSoftwareWindow;
 use self::scene::*;
 use crate::api::PlatformError;
 use crate::graphics::rendering_metrics_collector::{RefreshMode, RenderingMetricsCollector};
-use crate::graphics::{
-    BorderRadius, PixelFormat, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer,
-};
+use crate::graphics::{BorderRadius, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer};
 use crate::item_rendering::{
     CachedRenderingData, DirtyRegion, PartialRenderingState, RenderBorderRectangle, RenderImage,
+    RenderRectangle,
 };
 use crate::items::{ItemRc, TextOverflow, TextWrap};
 use crate::lengths::{
@@ -34,7 +33,6 @@ use crate::textlayout::{AbstractFont, FontMetrics, TextParagraphLayout};
 use crate::window::{WindowAdapter, WindowInner};
 use crate::{Brush, Color, Coord, ImageInner, StaticTextures};
 use alloc::rc::{Rc, Weak};
-#[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
@@ -82,7 +80,7 @@ impl RenderingRotation {
         matches!(self, Self::Rotate90 | Self::Rotate180)
     }
     /// Angle of the rotation in degrees
-    fn angle(self) -> f32 {
+    pub fn angle(self) -> f32 {
         match self {
             RenderingRotation::NoRotation => 0.,
             RenderingRotation::Rotate90 => 90.,
@@ -325,7 +323,7 @@ fn region_line_ranges(
             line_ranges.retain_mut(|it| {
                 if let Some(r) = &mut tmp {
                     if it.end < r.start {
-                        return true;
+                        true
                     } else if it.start <= r.start {
                         if it.end >= r.end {
                             tmp = None;
@@ -346,25 +344,49 @@ fn region_line_ranges(
                         return true;
                     }
                 } else {
-                    return true;
+                    true
                 }
             });
             if let Some(r) = tmp {
                 line_ranges.push(r);
             }
             continue;
-        } else {
-            if geom.min.y >= line {
-                match &mut next_validity {
-                    Some(val) => *val = geom.min.y.min(*val),
-                    None => next_validity = Some(geom.min.y),
-                }
+        } else if geom.min.y >= line {
+            match &mut next_validity {
+                Some(val) => *val = geom.min.y.min(*val),
+                None => next_validity = Some(geom.min.y),
             }
         }
     }
     // check that current items are properly sorted
     debug_assert!(line_ranges.windows(2).all(|x| x[0].end < x[1].start));
     next_validity
+}
+
+mod target_pixel_buffer;
+
+#[cfg(feature = "experimental")]
+pub use target_pixel_buffer::{CompositionMode, TargetPixelBuffer, Texture, TexturePixelFormat};
+
+#[cfg(not(feature = "experimental"))]
+use target_pixel_buffer::{CompositionMode, TexturePixelFormat};
+
+struct TargetPixelSlice<'a, T> {
+    data: &'a mut [T],
+    pixel_stride: usize,
+}
+
+impl<'a, T: TargetPixel> target_pixel_buffer::TargetPixelBuffer for TargetPixelSlice<'a, T> {
+    type TargetPixel = T;
+
+    fn line_slice(&mut self, line_number: usize) -> &mut [Self::TargetPixel] {
+        let offset = line_number * self.pixel_stride;
+        &mut self.data[offset..offset + self.pixel_stride]
+    }
+
+    fn num_lines(&self) -> usize {
+        self.data.len() / self.pixel_stride
+    }
 }
 
 /// A Renderer that do the rendering in software
@@ -377,6 +399,10 @@ fn region_line_ranges(
 ///     is only useful if the device does not have enough memory to render the whole window
 ///     in one single buffer
 pub struct SoftwareRenderer {
+    repaint_buffer_type: Cell<RepaintBufferType>,
+    /// This is the area which was dirty on the previous frame.
+    /// Only used if repaint_buffer_type == RepaintBufferType::SwappedBuffers
+    prev_frame_dirty: Cell<DirtyRegion>,
     partial_rendering_state: PartialRenderingState,
     maybe_window_adapter: RefCell<Option<Weak<dyn crate::window::WindowAdapter>>>,
     rotation: Cell<RenderingRotation>,
@@ -387,9 +413,11 @@ impl Default for SoftwareRenderer {
     fn default() -> Self {
         Self {
             partial_rendering_state: Default::default(),
+            prev_frame_dirty: Default::default(),
             maybe_window_adapter: Default::default(),
             rotation: Default::default(),
             rendering_metrics_collector: RenderingMetricsCollector::new("software"),
+            repaint_buffer_type: Default::default(),
         }
     }
 }
@@ -405,7 +433,7 @@ impl SoftwareRenderer {
     /// The `repaint_buffer_type` parameter specify what kind of buffer are passed to [`Self::render`]
     pub fn new_with_repaint_buffer_type(repaint_buffer_type: RepaintBufferType) -> Self {
         let self_ = Self::default();
-        self_.partial_rendering_state.set_repaint_buffer_type(repaint_buffer_type);
+        self_.repaint_buffer_type.set(repaint_buffer_type);
         self_
     }
 
@@ -413,12 +441,14 @@ impl SoftwareRenderer {
     ///
     /// This may clear the internal caches
     pub fn set_repaint_buffer_type(&self, repaint_buffer_type: RepaintBufferType) {
-        self.partial_rendering_state.set_repaint_buffer_type(repaint_buffer_type);
+        if self.repaint_buffer_type.replace(repaint_buffer_type) != repaint_buffer_type {
+            self.partial_rendering_state.clear_cache();
+        }
     }
 
     /// Returns the kind of buffer that must be passed to  [`Self::render`]
     pub fn repaint_buffer_type(&self) -> RepaintBufferType {
-        self.partial_rendering_state.repaint_buffer_type()
+        self.repaint_buffer_type.get()
     }
 
     /// Set how the window need to be rotated in the buffer.
@@ -448,6 +478,34 @@ impl SoftwareRenderer {
     /// Returns the physical dirty region for this frame, excluding the extra_draw_region,
     /// in the window frame of reference. It is affected by the screen rotation.
     pub fn render(&self, buffer: &mut [impl TargetPixel], pixel_stride: usize) -> PhysicalRegion {
+        self.render_buffer_impl(&mut TargetPixelSlice { data: buffer, pixel_stride })
+    }
+
+    /// Render the window to the given frame buffer.
+    ///
+    /// The renderer uses a cache internally and will only render the part of the window
+    /// which are dirty. The `extra_draw_region` is an extra region which will also
+    /// be rendered. (eg: the previous dirty region in case of double buffering)
+    /// This function returns the region that was rendered.
+    ///
+    /// The buffer's line slices need to be wide enough to if the `width` of the screen and the line count the `height`,
+    /// or the `height` and `width` swapped if the screen is rotated by 90°.
+    ///
+    /// Returns the physical dirty region for this frame, excluding the extra_draw_region,
+    /// in the window frame of reference. It is affected by the screen rotation.
+    #[cfg(feature = "experimental")]
+    pub fn render_into_buffer(&self, buffer: &mut impl TargetPixelBuffer) -> PhysicalRegion {
+        self.render_buffer_impl(buffer)
+    }
+
+    fn render_buffer_impl(
+        &self,
+        buffer: &mut impl target_pixel_buffer::TargetPixelBuffer,
+    ) -> PhysicalRegion {
+        let pixels_per_line = buffer.line_slice(0).len();
+        let num_lines = buffer.num_lines();
+        let buffer_pixel_count = num_lines * pixels_per_line;
+
         let Some(window) = self.maybe_window_adapter.borrow().as_ref().and_then(|w| w.upgrade())
         else {
             return Default::default();
@@ -465,43 +523,54 @@ impl SoftwareRenderer {
                 window_item.background(),
             )
         } else if rotation.is_transpose() {
-            (euclid::size2((buffer.len() / pixel_stride) as _, pixel_stride as _), Brush::default())
+            (euclid::size2(num_lines as _, pixels_per_line as _), Brush::default())
         } else {
-            (euclid::size2(pixel_stride as _, (buffer.len() / pixel_stride) as _), Brush::default())
+            (euclid::size2(pixels_per_line as _, num_lines as _), Brush::default())
         };
         if size.is_empty() {
             return Default::default();
         }
         assert!(
             if rotation.is_transpose() {
-                pixel_stride >= size.height as usize && buffer.len() >= (size.width as usize * pixel_stride + size.height as usize) - pixel_stride
+                pixels_per_line >= size.height as usize && buffer_pixel_count >= (size.width as usize * pixels_per_line + size.height as usize) - pixels_per_line
             } else {
-                pixel_stride >= size.width as usize && buffer.len() >= (size.height as usize * pixel_stride + size.width as usize) - pixel_stride
+                pixels_per_line >= size.width as usize && buffer_pixel_count >= (size.height as usize * pixels_per_line + size.width as usize) - pixels_per_line
             },
-            "buffer of size {} with stride {pixel_stride} is too small to handle a window of size {size:?}", buffer.len()
+            "buffer of size {} with {pixels_per_line} pixels per line is too small to handle a window of size {size:?}", buffer_pixel_count
         );
         let buffer_renderer = SceneBuilder::new(
             size,
             factor,
             window_inner,
-            RenderToBuffer {
-                buffer,
-                stride: pixel_stride,
-                dirty_range_cache: vec![],
-                dirty_region: Default::default(),
-            },
+            RenderToBuffer { buffer, dirty_range_cache: vec![], dirty_region: Default::default() },
             rotation,
         );
         let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer);
+        let window_adapter = renderer.window_adapter.clone();
 
         window_inner
             .draw_contents(|components| {
                 let logical_size = (size.cast() / factor).cast();
-                self.partial_rendering_state.apply_dirty_region(
+
+                let dirty_region_of_existing_buffer = match self.repaint_buffer_type.get() {
+                    RepaintBufferType::NewBuffer => {
+                        Some(LogicalRect::from_size(logical_size).into())
+                    }
+                    RepaintBufferType::ReusedBuffer => None,
+                    RepaintBufferType::SwappedBuffers => Some(self.prev_frame_dirty.take()),
+                };
+
+                let dirty_region_for_this_frame = self.partial_rendering_state.apply_dirty_region(
                     &mut renderer,
                     components,
                     logical_size,
+                    dirty_region_of_existing_buffer,
                 );
+
+                if self.repaint_buffer_type.get() == RepaintBufferType::SwappedBuffers {
+                    self.prev_frame_dirty.set(dirty_region_for_this_frame);
+                }
+
                 let rotation = RotationInfo { orientation: rotation, screen_size: size };
                 let screen_rect = PhysicalRect::from_size(size);
                 let mut i = renderer.dirty_region.iter().filter_map(|r| {
@@ -519,32 +588,20 @@ impl SoftwareRenderer {
                 };
                 drop(i);
 
-                let mut bg = TargetPixel::background();
-                // TODO: gradient background
-                TargetPixel::blend(&mut bg, background.color().into());
-                let mut line = 0;
-                while let Some(next) = region_line_ranges(
-                    &dirty_region,
-                    line,
-                    &mut renderer.actual_renderer.processor.dirty_range_cache,
-                ) {
-                    for l in line..next {
-                        for r in &renderer.actual_renderer.processor.dirty_range_cache {
-                            renderer.actual_renderer.processor.buffer[l as usize * pixel_stride..]
-                                [r.start as usize..r.end as usize]
-                                .fill(bg);
-                        }
-                    }
-                    line = next;
-                }
-
                 renderer.actual_renderer.processor.dirty_region = dirty_region.clone();
+                renderer.actual_renderer.processor.process_rectangle_impl(
+                    screen_rect.transformed(rotation),
+                    // TODO: gradient background
+                    background.color().into(),
+                    CompositionMode::Source,
+                );
 
                 for (component, origin) in components {
                     crate::item_rendering::render_component_items(
                         component,
                         &mut renderer,
                         *origin,
+                        &window_adapter,
                     );
                 }
 
@@ -788,7 +845,7 @@ impl RendererSealed for SoftwareRenderer {
     fn register_font_from_memory(
         &self,
         data: &'static [u8],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
         self::fonts::systemfonts::register_font_from_memory(data)
     }
 
@@ -796,7 +853,7 @@ impl RendererSealed for SoftwareRenderer {
     fn register_font_from_path(
         &self,
         path: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
         self::fonts::systemfonts::register_font_from_path(path)
     }
 
@@ -969,15 +1026,30 @@ fn prepare_scene(
     );
     let mut renderer =
         software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene);
+    let window_adapter = renderer.window_adapter.clone();
 
     let mut dirty_region = PhysicalRegion::default();
     window.draw_contents(|components| {
         let logical_size = (size.cast() / factor).cast();
-        software_renderer.partial_rendering_state.apply_dirty_region(
-            &mut renderer,
-            components,
-            logical_size,
-        );
+
+        let dirty_region_of_existing_buffer = match software_renderer.repaint_buffer_type.get() {
+            RepaintBufferType::NewBuffer => Some(LogicalRect::from_size(logical_size).into()),
+            RepaintBufferType::ReusedBuffer => None,
+            RepaintBufferType::SwappedBuffers => Some(software_renderer.prev_frame_dirty.take()),
+        };
+
+        let dirty_region_for_this_frame =
+            software_renderer.partial_rendering_state.apply_dirty_region(
+                &mut renderer,
+                components,
+                logical_size,
+                dirty_region_of_existing_buffer,
+            );
+
+        if software_renderer.repaint_buffer_type.get() == RepaintBufferType::SwappedBuffers {
+            software_renderer.prev_frame_dirty.set(dirty_region_for_this_frame);
+        }
+
         let rotation =
             RotationInfo { orientation: software_renderer.rotation.get(), screen_size: size };
         let screen_rect = PhysicalRect::from_size(size);
@@ -997,7 +1069,12 @@ fn prepare_scene(
         drop(i);
 
         for (component, origin) in components {
-            crate::item_rendering::render_component_items(component, &mut renderer, *origin);
+            crate::item_rendering::render_component_items(
+                component,
+                &mut renderer,
+                *origin,
+                &window_adapter,
+            );
         }
     });
 
@@ -1039,18 +1116,35 @@ trait ProcessScene {
     fn process_gradient(&mut self, geometry: PhysicalRect, gradient: GradientCommand);
 }
 
-struct RenderToBuffer<'a, TargetPixel> {
-    buffer: &'a mut [TargetPixel],
-    stride: usize,
+struct RenderToBuffer<'a, TargetPixelBuffer> {
+    buffer: &'a mut TargetPixelBuffer,
     dirty_range_cache: Vec<core::ops::Range<i16>>,
     dirty_region: PhysicalRegion,
 }
 
-impl<'a, T: TargetPixel> RenderToBuffer<'a, T> {
+impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
     fn foreach_ranges(
         &mut self,
         geometry: &PhysicalRect,
-        mut f: impl FnMut(i16, &mut [T], i16, i16),
+        mut f: impl FnMut(i16, &mut [B::TargetPixel], i16, i16),
+    ) {
+        self.foreach_region(geometry, |buffer, rect, extra_left_clip, extra_right_clip| {
+            for l in rect.y_range() {
+                f(
+                    l,
+                    &mut buffer.line_slice(l as usize)
+                        [rect.min_x() as usize..rect.max_x() as usize],
+                    extra_left_clip,
+                    extra_right_clip,
+                );
+            }
+        });
+    }
+
+    fn foreach_region(
+        &mut self,
+        geometry: &PhysicalRect,
+        mut f: impl FnMut(&mut B, PhysicalRect, i16, i16),
     ) {
         let mut line = geometry.min_y();
         while let Some(mut next) =
@@ -1069,14 +1163,12 @@ impl<'a, T: TargetPixel> RenderToBuffer<'a, T> {
                 let extra_left_clip = begin - geometry.origin.x;
                 let extra_right_clip = geometry.origin.x + geometry.size.width - end;
 
-                for l in line..next {
-                    f(
-                        l,
-                        &mut self.buffer[l as usize * self.stride..][begin as usize..end as usize],
-                        extra_left_clip,
-                        extra_right_clip,
-                    );
-                }
+                let region = PhysicalRect {
+                    origin: PhysicalPoint::new(begin, line),
+                    size: PhysicalSize::new(end - begin, next - line),
+                };
+
+                f(&mut self.buffer, region, extra_left_clip, extra_right_clip);
             }
             if next == geometry.max_y() {
                 break;
@@ -1086,20 +1178,93 @@ impl<'a, T: TargetPixel> RenderToBuffer<'a, T> {
     }
 
     fn process_texture_impl(&mut self, geometry: PhysicalRect, texture: SceneTexture<'_>) {
-        self.foreach_ranges(&geometry, |line, buffer, extra_left_clip, extra_right_clip| {
-            draw_functions::draw_texture_line(
-                &geometry,
-                PhysicalLength::new(line),
-                &texture,
-                buffer,
-                extra_left_clip,
-                extra_right_clip,
-            );
+        self.foreach_region(&geometry, |buffer, rect, extra_left_clip, extra_right_clip| {
+            let tex_src_off_x = (texture.extra.off_x + Fixed::from_integer(extra_left_clip as u16))
+                * Fixed::from_fixed(texture.extra.dx);
+            let tex_src_off_y = (texture.extra.off_y
+                + Fixed::from_integer((rect.origin.y - geometry.origin.y) as u16))
+                * Fixed::from_fixed(texture.extra.dy);
+            if !buffer.draw_texture(
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+                target_pixel_buffer::Texture {
+                    bytes: texture.data,
+                    pixel_format: texture.format,
+                    pixel_stride: texture.pixel_stride,
+                    width: texture.source_size().width as u16,
+                    height: texture.source_size().height as u16,
+                    delta_x: texture.extra.dx.0,
+                    delta_y: texture.extra.dy.0,
+                    source_offset_x: tex_src_off_x.0,
+                    source_offset_y: tex_src_off_y.0,
+                },
+                texture.extra.colorize.as_argb_encoded(),
+                texture.extra.alpha,
+                texture.extra.rotation,
+                CompositionMode::default(),
+            ) {
+                let begin = rect.min_x();
+                let end = rect.max_x();
+                for l in rect.y_range() {
+                    draw_functions::draw_texture_line(
+                        &geometry,
+                        PhysicalLength::new(l),
+                        &texture,
+                        &mut buffer.line_slice(l as usize)[begin as usize..end as usize],
+                        extra_left_clip,
+                        extra_right_clip,
+                    );
+                }
+            }
         });
+    }
+
+    fn process_rectangle_impl(
+        &mut self,
+        geometry: PhysicalRect,
+        color: PremultipliedRgbaColor,
+        composition_mode: CompositionMode,
+    ) {
+        self.foreach_region(&geometry, |buffer, rect, _extra_left_clip, _extra_right_clip| {
+            if !buffer.fill_rectangle(
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+                color,
+                composition_mode,
+            ) {
+                let begin = rect.min_x();
+                let end = rect.max_x();
+
+                match composition_mode {
+                    CompositionMode::Source => {
+                        let mut fill_col = B::TargetPixel::background();
+                        B::TargetPixel::blend(&mut fill_col, color);
+                        for l in rect.y_range() {
+                            buffer.line_slice(l as usize)[begin as usize..end as usize]
+                                .fill(fill_col)
+                        }
+                    }
+                    CompositionMode::SourceOver => {
+                        for l in rect.y_range() {
+                            <B::TargetPixel>::blend_slice(
+                                &mut buffer.line_slice(l as usize)[begin as usize..end as usize],
+                                color,
+                            )
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
-impl<'a, T: TargetPixel> ProcessScene for RenderToBuffer<'a, T> {
+impl<T: TargetPixel, B: target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>> ProcessScene
+    for RenderToBuffer<'_, B>
+{
     fn process_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
         self.process_texture_impl(geometry, texture)
     }
@@ -1110,9 +1275,7 @@ impl<'a, T: TargetPixel> ProcessScene for RenderToBuffer<'a, T> {
     }
 
     fn process_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
-        self.foreach_ranges(&geometry, |_line, buffer, _extra_left_clip, _extra_right_clip| {
-            TargetPixel::blend_slice(buffer, color);
-        });
+        self.process_rectangle_impl(geometry, color, CompositionMode::default());
     }
 
     fn process_rounded_rectangle(&mut self, geometry: PhysicalRect, rr: RoundedRectangle) {
@@ -1336,7 +1499,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                     let bpp = t.format.bpp();
 
                     let color = if colorize.alpha() > 0 { colorize } else { t.color };
-                    let alpha = if colorize.alpha() > 0 || t.format == PixelFormat::AlphaMap {
+                    let alpha = if colorize.alpha() > 0 || t.format == TexturePixelFormat::AlphaMap
+                    {
                         color.alpha() as u16 * global_alpha_u16 / 255
                     } else {
                         global_alpha_u16
@@ -1510,7 +1674,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                     SceneTexture {
                                         data,
                                         pixel_stride,
-                                        format: PixelFormat::AlphaMap,
+                                        format: TexturePixelFormat::AlphaMap,
                                         extra: SceneTextureExtra {
                                             colorize: color,
                                             // color already is mixed with global alpha
@@ -1541,7 +1705,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                     SceneTexture {
                                         data,
                                         pixel_stride,
-                                        format: PixelFormat::SignedDistanceField,
+                                        format: TexturePixelFormat::SignedDistanceField,
                                         extra: SceneTextureExtra {
                                             colorize: color,
                                             // color already is mixed with global alpha
@@ -1617,13 +1781,14 @@ struct RenderState {
     clip: LogicalRect,
 }
 
-impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'a, T> {
+impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T> {
     #[allow(clippy::unnecessary_cast)] // Coord!
     fn draw_rectangle(
         &mut self,
-        rect: Pin<&crate::items::Rectangle>,
+        rect: Pin<&dyn RenderRectangle>,
         _: &ItemRc,
         size: LogicalSize,
+        _cache: &CachedRenderingData,
     ) {
         let geom = LogicalRect::from(size);
         if self.should_draw(&geom) {
@@ -1874,6 +2039,17 @@ impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'
                     .unwrap_or_else(err);
             }
         }
+    }
+
+    fn draw_window_background(
+        &mut self,
+        rect: Pin<&dyn RenderRectangle>,
+        _self_rc: &ItemRc,
+        _size: LogicalSize,
+        _cache: &CachedRenderingData,
+    ) {
+        // register a dependency for the partial renderer's dirty tracker. The actual rendering is done earlier in the software renderer.
+        let _ = rect.background();
     }
 
     fn draw_image(
@@ -2271,4 +2447,8 @@ impl<'a, T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'
     fn as_any(&mut self) -> Option<&mut dyn core::any::Any> {
         None
     }
+}
+
+impl<T: ProcessScene> crate::item_rendering::ItemRendererFeatures for SceneBuilder<'_, T> {
+    const SUPPORTS_TRANSFORMATIONS: bool = false;
 }

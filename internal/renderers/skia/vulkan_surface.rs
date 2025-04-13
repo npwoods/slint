@@ -69,7 +69,7 @@ impl VulkanSurface {
             let surface_capabilities = device
                 .physical_device()
                 .surface_capabilities(&surface, Default::default())
-                .map_err(|vke| format!("Error macthing Vulkan surface capabilities: {vke}"))?;
+                .map_err(|vke| format!("Error matching Vulkan surface capabilities: {vke}"))?;
             let image_format = vulkano::format::Format::B8G8R8A8_UNORM.into();
 
             Swapchain::new(
@@ -308,7 +308,7 @@ impl super::Surface for VulkanSurface {
             .try_into()
             .map_err(|_| format!("internal error: invalid swapchain image width {width}"))?;
         let height = swapchain.image_extent()[1];
-        let height: i32 = width
+        let height: i32 = height
             .try_into()
             .map_err(|_| format!("internal error: invalid swapchain image height {height}"))?;
 

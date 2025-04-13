@@ -12,7 +12,8 @@ use i_slint_core::graphics::euclid::{self};
 use i_slint_core::graphics::rendering_metrics_collector::RenderingMetrics;
 use i_slint_core::graphics::{IntRect, Point, Size};
 use i_slint_core::item_rendering::{
-    CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage, RenderText,
+    CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage,
+    RenderRectangle, RenderText,
 };
 use i_slint_core::items::{
     self, Clip, FillRule, ImageRendering, ImageTiling, ItemRc, Layer, Opacity, RenderingResult,
@@ -172,13 +173,20 @@ fn clip_path_for_rect_alike_item(
     rect_with_radius_to_path(clip_rect, radius)
 }
 
-impl<'a> GLItemRenderer<'a> {
+impl GLItemRenderer<'_> {
     pub fn global_alpha_transparent(&self) -> bool {
         self.state.last().unwrap().global_alpha == 0.0
     }
+}
 
-    /// Draws a `Rectangle` using the `GLItemRenderer`.
-    pub fn draw_rect(&mut self, size: LogicalSize, brush: Brush) {
+impl ItemRenderer for GLItemRenderer<'_> {
+    fn draw_rectangle(
+        &mut self,
+        rect: Pin<&dyn RenderRectangle>,
+        _: &ItemRc,
+        size: LogicalSize,
+        _cache: &CachedRenderingData,
+    ) {
         let geometry = PhysicalRect::from(size * self.scale_factor);
         if geometry.is_empty() {
             return;
@@ -188,7 +196,7 @@ impl<'a> GLItemRenderer<'a> {
         }
         // TODO: cache path in item to avoid re-tesselation
         let path = rect_to_path(geometry);
-        let paint = match self.brush_to_paint(brush, &path) {
+        let paint = match self.brush_to_paint(rect.background(), &path) {
             Some(paint) => paint,
             None => return,
         }
@@ -196,12 +204,6 @@ impl<'a> GLItemRenderer<'a> {
         // the extra stroke triangle strip around the edges
         .with_anti_alias(false);
         self.canvas.borrow_mut().fill_path(&path, &paint);
-    }
-}
-
-impl<'a> ItemRenderer for GLItemRenderer<'a> {
-    fn draw_rectangle(&mut self, rect: Pin<&items::Rectangle>, _: &ItemRc, size: LogicalSize) {
-        self.draw_rect(size, rect.background());
     }
 
     fn draw_border_rectangle(
@@ -282,6 +284,17 @@ impl<'a> ItemRenderer for GLItemRenderer<'a> {
                 &border_paint,
             );
         }
+    }
+
+    fn draw_window_background(
+        &mut self,
+        rect: Pin<&dyn RenderRectangle>,
+        _self_rc: &ItemRc,
+        _size: LogicalSize,
+        _cache: &CachedRenderingData,
+    ) {
+        // register a dependency for the partial renderer's dirty tracker. The actual rendering is done earlier in SkiaRenderer.
+        let _ = rect.background();
     }
 
     fn draw_image(
@@ -624,16 +637,25 @@ impl<'a> ItemRenderer for GLItemRenderer<'a> {
             }
         }
 
+        let anti_alias = path.anti_alias();
+
         let fill_paint = self.brush_to_paint(path.fill(), &femtovg_path).map(|mut fill_paint| {
             fill_paint.set_fill_rule(match path.fill_rule() {
                 FillRule::Nonzero => femtovg::FillRule::NonZero,
                 FillRule::Evenodd => femtovg::FillRule::EvenOdd,
             });
+            fill_paint.set_anti_alias(anti_alias);
             fill_paint
         });
 
         let border_paint = self.brush_to_paint(path.stroke(), &femtovg_path).map(|mut paint| {
             paint.set_line_width((path.stroke_width() * self.scale_factor).get());
+            paint.set_line_cap(match path.stroke_line_cap() {
+                items::LineCap::Butt => femtovg::LineCap::Butt,
+                items::LineCap::Round => femtovg::LineCap::Round,
+                items::LineCap::Square => femtovg::LineCap::Square,
+            });
+            paint.set_anti_alias(anti_alias);
             paint
         });
 
@@ -693,8 +715,7 @@ impl<'a> ItemRenderer for GLItemRenderer<'a> {
                     &self.canvas,
                     shadow_image_width,
                     shadow_image_height,
-                )
-                .expect("unable to create box shadow texture");
+                )?;
 
                 {
                     let mut canvas = self.canvas.borrow_mut();
@@ -756,7 +777,7 @@ impl<'a> ItemRenderer for GLItemRenderer<'a> {
                     canvas.set_render_target(self.current_render_target());
                 }
 
-                ItemGraphicsCacheEntry::Texture(shadow_image)
+                Some(ItemGraphicsCacheEntry::Texture(shadow_image))
             },
         );
 
@@ -1171,10 +1192,13 @@ impl<'a> GLItemRenderer<'a> {
                     current_render_target: layer_image.as_render_target(),
                 };
 
+                let window_adapter = self.window().window_adapter();
+
                 i_slint_core::item_rendering::render_item_children(
                     self,
                     item_rc.item_tree(),
                     item_rc.index() as isize,
+                    &window_adapter,
                 );
 
                 {
@@ -1540,7 +1564,7 @@ impl<'a> GLItemRenderer<'a> {
                     path_width / 2.,
                     path_height / 2.,
                     0.,
-                    (path_width + path_height) / 4.,
+                    0.5 * (path_width * path_width + path_height * path_height).sqrt(),
                     stops,
                 )
             }

@@ -208,11 +208,15 @@ pub mod re_exports {
     pub use i_slint_core::lengths::{
         logical_position_to_api, LogicalLength, LogicalPoint, LogicalRect,
     };
+    pub use i_slint_core::menus::{Menu, MenuFromItemTree, MenuVTable};
     pub use i_slint_core::model::*;
     pub use i_slint_core::properties::{
         set_state_binding, ChangeTracker, Property, PropertyTracker, StateInfo,
     };
     pub use i_slint_core::slice::Slice;
+    pub use i_slint_core::string::shared_string_from_number;
+    pub use i_slint_core::string::shared_string_from_number_fixed;
+    pub use i_slint_core::string::shared_string_from_number_precision;
     pub use i_slint_core::timers::{Timer, TimerMode};
     pub use i_slint_core::translations::{
         set_bundled_languages, translate_from_bundle, translate_from_bundle_with_plural,
@@ -220,15 +224,13 @@ pub mod re_exports {
     pub use i_slint_core::window::{
         InputMethodRequest, WindowAdapter, WindowAdapterRc, WindowInner,
     };
-    pub use i_slint_core::Color;
-    pub use i_slint_core::Coord;
-    pub use i_slint_core::ItemTreeVTable_static;
-    pub use i_slint_core::SharedString;
-    pub use i_slint_core::SharedVector;
+    pub use i_slint_core::{Color, Coord, SharedString, SharedVector};
+    pub use i_slint_core::{ItemTreeVTable_static, MenuVTable_static};
     pub use num_traits::float::Float;
     pub use num_traits::ops::euclid::Euclid;
     pub use once_cell::race::OnceBox;
     pub use once_cell::unsync::OnceCell;
     pub use pin_weak::rc::PinWeak;
+    pub use unicode_segmentation::UnicodeSegmentation;
     pub use vtable::{self, *};
 }

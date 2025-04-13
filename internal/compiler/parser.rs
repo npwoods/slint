@@ -541,7 +541,7 @@ mod parser_trait {
         /// Returns true if the token was consumed.
         fn expect(&mut self, kind: SyntaxKind) -> bool {
             if !self.test(kind) {
-                self.error(format!("Syntax error: expected {}", kind));
+                self.error(format!("Syntax error: expected {kind}"));
                 return false;
             }
             true
@@ -591,12 +591,12 @@ mod parser_trait {
     /// and finishes the node on Drop
     #[derive(derive_more::DerefMut)]
     pub struct Node<'a, P: Parser>(&'a mut P);
-    impl<'a, P: Parser> Drop for Node<'a, P> {
+    impl<P: Parser> Drop for Node<'_, P> {
         fn drop(&mut self) {
             self.0.finish_node_impl(NodeToken(()));
         }
     }
-    impl<'a, P: Parser> core::ops::Deref for Node<'a, P> {
+    impl<P: Parser> core::ops::Deref for Node<'_, P> {
         type Target = P;
         fn deref(&self) -> &Self::Target {
             self.0
@@ -825,6 +825,12 @@ impl SyntaxNode {
             .children_with_tokens()
             .find(|n| n.kind() == kind)
             .and_then(|x| x.as_token().map(|x| x.text().into()))
+    }
+    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode> {
+        let source_file = self.source_file.clone();
+        self.node
+            .descendants()
+            .map(move |node| SyntaxNode { node, source_file: source_file.clone() })
     }
     pub fn kind(&self) -> SyntaxKind {
         self.node.kind()
