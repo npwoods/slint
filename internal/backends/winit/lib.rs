@@ -646,6 +646,12 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
             + 'static,
     );
 
+    /// Creates a non Slint aware window with winit
+    fn create_winit_window(
+        &self,
+        window_attributes: winit::window::WindowAttributes,
+    ) -> Result<winit::window::Window, winit::error::OsError>;
+
     #[allow(missing_docs)]
     #[cfg(muda)]
     fn with_muda_menu<T>(&self, callback: impl FnOnce(&::muda::Menu) -> T) -> Option<T>;
@@ -687,13 +693,38 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         }
     }
 
+    /// Creates a non Slint aware window with winit
+    fn create_winit_window(
+        &self,
+        window_attributes: winit::window::WindowAttributes,
+    ) -> Result<winit::window::Window, winit::error::OsError> {
+        i_slint_core::window::WindowInner::from_pub(self)
+            .window_adapter()
+            .internal(i_slint_core::InternalToken)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<WinitWindowAdapter>()
+            .unwrap()
+            .shared_backend_data
+            .with_event_loop(|eli| Ok(eli.create_window(window_attributes)))
+            .unwrap()
+    }
+
     #[cfg(muda)]
     fn with_muda_menu<T>(&self, callback: impl FnOnce(&::muda::Menu) -> T) -> Option<T> {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
             .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
-            .and_then(|adapter| adapter.muda_adapter.borrow().as_ref().map(|x| callback(&x.menu)))
+            .and_then(|adapter| {
+                let winit_window_or_none = adapter.winit_window_or_none.borrow();
+                match &*winit_window_or_none {
+                    WinitWindowOrNone::HasWindow { muda_adapter, .. } => {
+                        muda_adapter.borrow().as_ref().map(|x| callback(&x.menu))
+                    }
+                    WinitWindowOrNone::None(_) => None,
+                }
+            })
     }
 }
 
