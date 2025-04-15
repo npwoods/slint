@@ -92,13 +92,12 @@ impl MudaAdapter {
                 Box::new(muda::CheckMenuItem::with_id(
                     id.clone(),
                     &entry.title,
-                    true, /*entry.enabled*/
+                    entry.enabled,
                     false,
                     None,
                 ))
             } else {
-                let sub_menu =
-                    muda::Submenu::with_id(id.clone(), &entry.title, true /*entry.enabled*/);
+                let sub_menu = muda::Submenu::with_id(id.clone(), &entry.title, entry.enabled);
                 if depth < 15 {
                     let mut sub_entries = Default::default();
                     menu.sub_menu(Some(entry), &mut sub_entries);

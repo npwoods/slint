@@ -19,6 +19,7 @@ use crate::preview::{self, preview_data, properties, SelectionNotification};
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_prelude::*;
 
+mod gradient;
 mod property_view;
 
 slint::include_modules!();
@@ -134,20 +135,11 @@ pub fn create_ui(style: String, experimental: bool) -> Result<PreviewUi, Platfor
     api.on_as_json_brush(as_json_brush);
     api.on_as_slint_brush(as_slint_brush);
     api.on_create_brush(create_brush);
-    api.on_add_gradient_stop(|model, value| {
-        let m = model.as_any().downcast_ref::<VecModel<_>>().unwrap();
-        m.push(value);
-        (m.row_count() - 1) as i32
-    });
-    api.on_remove_gradient_stop(|model, row| {
-        if row <= 0 {
-            return;
-        }
-        let row = row as usize;
-        if row < model.row_count() {
-            model.as_any().downcast_ref::<VecModel<GradientStop>>().unwrap().remove(row);
-        }
-    });
+    api.on_add_gradient_stop(gradient::add_gradient_stop);
+    api.on_remove_gradient_stop(gradient::remove_gradient_stop);
+    api.on_move_gradient_stop(gradient::move_gradient_stop);
+    api.on_suggest_gradient_stop_at_row(gradient::suggest_gradient_stop_at_row);
+    api.on_suggest_gradient_stop_at_position(gradient::suggest_gradient_stop_at_position);
 
     #[cfg(target_vendor = "apple")]
     api.set_control_key_name("command".into());
