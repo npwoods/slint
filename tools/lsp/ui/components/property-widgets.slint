@@ -1,14 +1,11 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// import { Button, CheckBox, ComboBox, LineEdit, Palette, Slider, TextEdit } from "std-widgets.slint";
-
 import { Api, BrushKind, ElementInformation, GradientStop, PreviewData, PreviewDataKind, PropertyContainer, PropertyInformation, PropertyValue, PropertyValueKind } from "../api.slint";
 import { StatusLineApi } from "../components/status-line.slint";
 import { EditorSpaceSettings } from "../components/styling.slint";
 
 import { BooleanWidget } from "./widgets/boolean-widget.slint";
-import { BrushWidget } from "./widgets/brush-widget.slint";
 import { CodeWidget } from "./widgets/code-widget.slint";
 import { EnumWidget } from "./widgets/enum-widget.slint";
 import { FloatWidget } from "./widgets/float-widget.slint";
@@ -18,6 +15,7 @@ import { MultiValueWidget } from "./widgets/multi-value-widget.slint";
 import { StringWidget } from "./widgets/string-widget.slint";
 import { WindowGlobal, WindowManager } from "../windowglobal.slint";
 import { InlineColorWidget } from "widgets/inline-brush-widget.slint";
+import { BrushPropertyType } from "../properties-state.slint";
 
 export component PropertyValueWidget inherits VerticalLayout {
     in-out property <PropertyValue> property-value;
@@ -62,13 +60,17 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-bool-binding(value);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
     }
 
-    if root.property-value.kind == PropertyValueKind.color: InlineColorWidget {
+    if root.property-value.kind == PropertyValueKind.color || root.property-value.kind == PropertyValueKind.brush: InlineColorWidget {
         enabled <=> root.enabled;
         property-name <=> root.property-name;
         property-value <=> root.property-value;
+        brush-property-type: root.property-value.kind == PropertyValueKind.color ? BrushPropertyType.color : BrushPropertyType.brush;
+        preview-data <=> root.preview-data;
 
         update-floating-editor() => {
             return root.set-current-item();
@@ -81,25 +83,6 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-color-binding(text);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
-
-        reset-action() => {
-            root.reset-action();
-        }
-        code-action() => {
-            root.code-action();
-        }
-    }
-
-    if root.property-value.kind == PropertyValueKind.brush: BrushWidget {
-        // enabled <=> root.enabled;
-        property-name <=> root.property-name;
-        property-value <=> root.property-value;
-        preview-data <=> root.preview-data;
-
-        // has-code-action: root.has-code-action;
-        // has-reset-action: root.has-reset-action;
-
         test-brush-binding(kind, angle, color, stops) => {
             return root.test-brush-binding(kind, angle, color, stops);
         }
@@ -107,7 +90,9 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-brush-binding(kind, angle, color, stops);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
 
         reset-action() => {
             root.reset-action();
@@ -115,6 +100,14 @@ export component PropertyValueWidget inherits VerticalLayout {
         code-action() => {
             root.code-action();
         }
+
+        init => {
+            // Floating editors need to know the current property details. Call the update if something changes.
+            if WindowManager.showing-color-picker && WindowManager.current-property-information.name == root.property-name {
+                self.update-floating-editor();
+            }
+        }
+
     }
 
     if root.property-value.kind == PropertyValueKind.code: CodeWidget {
@@ -122,7 +115,9 @@ export component PropertyValueWidget inherits VerticalLayout {
         property-name <=> root.property-name;
         property-value <=> root.property-value;
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
 
         reset-action() => {
             root.reset-action();
@@ -141,7 +136,9 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-enum-binding(text);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
     }
 
     if root.property-value.kind == PropertyValueKind.float: FloatWidget {
@@ -156,7 +153,9 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-float-binding(text, unit);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
     }
 
     if root.property-value.kind == PropertyValueKind.integer: IntegerWidget {
@@ -171,10 +170,12 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-code-binding(text);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
     }
 
-     if root.property-value.kind == PropertyValueKind.string: StringWidget {
+    if root.property-value.kind == PropertyValueKind.string: StringWidget {
         enabled <=> root.enabled;
         property-name <=> root.property-name;
         property-value: root.property-value;
@@ -190,7 +191,9 @@ export component PropertyValueWidget inherits VerticalLayout {
             root.set-string-binding(text, is_translated);
         }
 
-        update-display-string(value) => { root.update-display-string-impl(value); }
+        update-display-string(value) => {
+            root.update-display-string-impl(value);
+        }
 
         reset-action() => {
             root.reset-action();
@@ -370,7 +373,7 @@ export component PreviewDataPropertyValueWidget inherits VerticalLayout {
             self.test-string-binding(text, is_translated);
         }
         test-string-binding(text, is_translated) => {
-            return(root.set-code-binding(is_translated ? "\"\{text}\"" : text));
+            return (root.set-code-binding(is_translated ? "\"\{text}\"" : text));
         }
     }
     if root.preview-data.kind == PreviewDataKind.Table: MultiValueWidget {

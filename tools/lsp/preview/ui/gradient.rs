@@ -5,6 +5,8 @@ use slint::{Model, VecModel};
 
 use crate::preview::ui;
 
+use std::rc::Rc;
+
 fn find_index_for_position(model: &slint::ModelRc<ui::GradientStop>, position: f32) -> usize {
     let position = position.clamp(0.0, 1.0);
 
@@ -18,7 +20,7 @@ pub fn add_gradient_stop(model: slint::ModelRc<ui::GradientStop>, value: ui::Gra
     let insert_pos = find_index_for_position(&model, value.position);
     let m = model.as_any().downcast_ref::<VecModel<_>>().unwrap();
     m.insert(insert_pos, value);
-    (m.row_count() - 1) as i32
+    (insert_pos) as i32
 }
 
 pub fn remove_gradient_stop(model: slint::ModelRc<ui::GradientStop>, row: i32) {
@@ -37,7 +39,7 @@ pub fn move_gradient_stop(
     new_position: f32,
 ) -> i32 {
     let mut row_usize = row as usize;
-    if row <= 0 || row_usize >= model.row_count() {
+    if row < 0 || row_usize >= model.row_count() {
         return row;
     }
 
@@ -92,21 +94,19 @@ pub fn suggest_gradient_stop_at_row(
     model: slint::ModelRc<ui::GradientStop>,
     row: i32,
 ) -> ui::GradientStop {
-    if row < 0 {
-        return fallback_gradient_stop(0.0);
-    }
     let row_usize = row as usize;
-    if row_usize >= model.row_count() {
+    if row < 0 || row_usize > model.row_count() {
         return fallback_gradient_stop(0.0);
     }
 
     let (prev, next) = if row_usize == 0 {
         let first_stop = model.row_data(0).unwrap_or(fallback_gradient_stop(0.0));
-        (ui::GradientStop { position: 0.0, color: first_stop.color }, first_stop)
-    } else if row_usize == model.row_count() - 1 {
-        let last_stop = model.row_data(row_usize).unwrap_or(fallback_gradient_stop(1.0));
+        let very_first_stop = ui::GradientStop { position: 0.0, color: first_stop.color };
+        (very_first_stop.clone(), very_first_stop)
+    } else if row_usize == model.row_count() {
+        let last_stop = model.row_data(row_usize - 1).unwrap_or(fallback_gradient_stop(1.0));
         let very_last_stop = ui::GradientStop { position: 1.0, color: last_stop.color };
-        (last_stop, very_last_stop)
+        (very_last_stop.clone(), very_last_stop)
     } else {
         (
             model.row_data(row_usize - 1).expect("Index was tested to be valid"),
@@ -127,8 +127,10 @@ pub fn suggest_gradient_stop_at_position(
         return fallback_gradient_stop(position);
     }
 
-    let mut prev = fallback_gradient_stop(0.0);
-    let mut next = fallback_gradient_stop(1.0);
+    let mut prev = model.row_data(0).expect("Not empty");
+    prev.position = 0.0;
+    let mut next = model.row_data(model.row_count() - 1).expect("Not empty");
+    next.position = 1.0;
 
     for current in model.iter() {
         if current.position > position {
@@ -144,6 +146,13 @@ pub fn suggest_gradient_stop_at_position(
     let factor = (position - prev.position) / (next.position - prev.position);
 
     interpolate(prev, next, factor)
+}
+
+pub fn clone_gradient_stops(
+    model: slint::ModelRc<ui::GradientStop>,
+) -> slint::ModelRc<ui::GradientStop> {
+    let cloned_data = model.iter().collect::<Vec<_>>();
+    Rc::new(VecModel::from(cloned_data)).into()
 }
 
 #[cfg(test)]
@@ -552,6 +561,55 @@ mod tests {
                 position: 0.1445,
                 color: slint::Color::from_argb_encoded(0xff060606),
             }),
+        );
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 1.0,
+                color: slint::Color::from_argb_encoded(0xff010101)
+            })
+        );
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 1.0,
+                color: slint::Color::from_argb_encoded(0xff020202)
+            })
+        );
+        assert_eq!(it.next(), None);
+
+        let model = make_model();
+
+        assert_eq!(super::move_gradient_stop(model.clone(), 0, 0.05), 1);
+        let mut it = model.iter();
+
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 0.0,
+                color: slint::Color::from_argb_encoded(0xff040404)
+            })
+        );
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 0.05,
+                color: slint::Color::from_argb_encoded(0xff030303)
+            })
+        );
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 0.1445,
+                color: slint::Color::from_argb_encoded(0xff060606),
+            }),
+        );
+        assert_eq!(
+            it.next(),
+            Some(ui::GradientStop {
+                position: 0.5,
+                color: slint::Color::from_argb_encoded(0xff050505)
+            })
         );
         assert_eq!(
             it.next(),
