@@ -158,16 +158,6 @@ pub trait WindowAdapter {
     ) -> Result<raw_window_handle_06::DisplayHandle<'_>, raw_window_handle_06::HandleError> {
         Err(raw_window_handle_06::HandleError::NotSupported)
     }
-
-    /// HACK:  Creates a "raw" child window outside of Slint's purview
-    fn create_child_window(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-        Err(PlatformError::Other("Not supported".into()))
-    }
-
-    /// HACK:  Get Qt winId() (if using Qt backend)
-    fn qt_win_id(&self) -> Option<usize> {
-        None
-    }
 }
 
 /// Implementation details behind [`WindowAdapter`], but since this

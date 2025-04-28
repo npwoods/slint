@@ -687,11 +687,6 @@ impl Window {
     pub fn take_snapshot(&self) -> Result<SharedPixelBuffer<Rgba8Pixel>, PlatformError> {
         self.0.window_adapter().renderer().take_snapshot()
     }
-
-    /// HACK:  Creates a "raw" child window outside of Slint's purview
-    pub fn create_child_window(&self) -> Result<std::rc::Rc<dyn WindowAdapter>, PlatformError> {
-        self.0.window_adapter().create_child_window()
-    }
 }
 
 pub use crate::SharedString;

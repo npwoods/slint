@@ -2045,25 +2045,6 @@ impl WindowAdapter for QtWindow {
     fn internal(&self, _: i_slint_core::InternalToken) -> Option<&dyn WindowAdapterInternal> {
         Some(self)
     }
-
-    fn create_child_window(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-        let popup_window = QtWindow::new();
-
-        let popup_ptr = popup_window.widget_ptr();
-        let widget_ptr = self.widget_ptr();
-        cpp! {unsafe [widget_ptr as "QWidget*", popup_ptr as "QWidget*"] {
-            popup_ptr->setParent(widget_ptr, Qt::Widget);
-        }};
-        Ok(popup_window as _)
-    }
-
-    fn qt_win_id(&self) -> Option<usize> {
-        let widget_ptr = self.widget_ptr();
-        let win_id = cpp! { unsafe [widget_ptr as "QWidget*"] -> usize as "WId" {
-            return widget_ptr->winId();
-        }};
-        Some(win_id)
-    }
 }
 
 fn into_qsize(logical_size: i_slint_core::api::LogicalSize) -> qttypes::QSize {
