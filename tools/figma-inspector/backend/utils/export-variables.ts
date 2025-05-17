@@ -40,6 +40,7 @@ export function formatStructName(name: string): string {
         .replace(/,\s*/g, "-") // Replace commas (and following spaces) with hyphens
         .replace(/\+/g, "-") // Replace + with hyphens (add this line)
         .replace(/\:/g, "-") // Replace : with ""
+        .replace(/—/g, "-") // Replace em dash hyphens
         .replace(/([a-z])([A-Z])/g, "$1-$2") // Add hyphens between camelCase
         .replace(/\s+/g, "-") // Convert spaces to hyphens
         .replace(/--+/g, "-") // Normalize multiple consecutive hyphens to single
@@ -65,6 +66,7 @@ export function sanitizePropertyName(name: string): string {
         .replace(/&/g, "and") // Replace &
         .replace(/\(/g, "_") // Replace ( with _
         .replace(/\)/g, "_") // Replace ) with _
+        .replace(/—/g, "_") // Replace em dash with underscore
         .replace(/[^a-zA-Z0-9_]/g, "_") // Replace other invalid chars (including -, +, :, etc.) with _
         .replace(/__+/g, "_"); // Collapse multiple underscores
 
@@ -407,9 +409,6 @@ function createReferenceExpression(
                 ? `${slintPath}.${usedModeName}`
                 : slintPath;
 
-        console.log(
-            `[${currentIdentifier}] Detected cross-hierarchy reference to ${targetIdentifier}. Returning path: ${finalValue}`,
-        );
         return {
             value: finalValue,
             isCircular: false,
@@ -454,28 +453,45 @@ function createReferenceExpression(
         else {
             let finalValue: string;
             let finalComment: string | undefined = modeDataToUse.comment;
+            let importStatement: string | undefined = undefined;
 
             if (isCrossCollection) {
-                const slintPath = [
-                    targetCollection,
-                    ...targetPath.map((part) => sanitizePropertyName(part)),
-                ].join(".");
-                const baseExpr = slintPath;
-                const needsModeSuffix = targetModes.size > 1;
+                const targetCollectionDataForImport =
+                    collectionStructure.get(targetCollection);
+                const targetFormattedName =
+                    targetCollectionDataForImport?.formattedName;
 
-                // Assign the full path string to finalValue
-                finalValue =
-                    needsModeSuffix && usedModeName
-                        ? `${baseExpr}.${usedModeName}`
-                        : baseExpr;
+                if (!targetFormattedName) {
+                    exportInfo.warnings.add(
+                        `Could not find formatted name for target collection key: ${targetCollection} when generating import.`,
+                    );
+                    finalValue = modeDataToUse.value;
+                    finalComment = `Resolved same-collection reference to concrete value from ${targetIdentifier}`;
+                    importStatement = undefined;
+                } else {
+                    const slintPath = [
+                        targetFormattedName,
+                        ...targetPath.map((part) => sanitizePropertyName(part)),
+                    ].join(".");
+                    const baseExpr = slintPath;
+                    const needsModeSuffix = targetModes.size > 1;
+
+                    // Assign the full path string to finalValue
+                    finalValue =
+                        needsModeSuffix && usedModeName
+                            ? `${baseExpr}.${usedModeName}`
+                            : baseExpr;
+                    importStatement = `import { ${targetFormattedName} } from "./${targetFormattedName}.slint";\n`;
+                }
             } else {
                 finalValue = modeDataToUse.value;
                 finalComment = `Resolved same-collection reference to concrete value from ${targetIdentifier}`;
+                importStatement = undefined;
             }
 
             return {
                 value: finalValue,
-                importStatement: undefined,
+                importStatement: importStatement,
                 isCircular: false,
                 comment: finalComment,
             };
@@ -543,7 +559,7 @@ interface PropertyInstance {
 function generateStructsAndInstances(
     variableTree: VariableNode,
     collectionName: string,
-    collectionData: any, // Using any for now, but ideally define a proper interface
+    collectionData: CollectionData, // using strict type interface
 ): {
     structs: string;
     instances: string;
@@ -610,7 +626,7 @@ function generateStructsAndInstances(
                     name: sanitizedChildName,
                     type:
                         collectionData.modes.size > 1
-                            ? `mode${collectionData.modes.size}_${slintType}`
+                            ? `${collectionData.formattedName}_mode${collectionData.modes.size}_${slintType}`
                             : slintType,
                     isMultiMode: collectionData.modes.size > 1,
                 });
@@ -902,7 +918,7 @@ function generateStructsAndInstances(
             }
             // Root level property
             const slintType = instance.isMultiMode
-                ? `mode${collectionData.modes.size}_${instance.type}`
+                ? `${collectionData.formattedName}_mode${collectionData.modes.size}_${instance.type}`
                 : instance.type;
 
             if (instance.children && instance.children.size > 0) {
@@ -922,7 +938,7 @@ function generateStructsAndInstances(
             } else if (instance.modeData) {
                 const isRoot = indent === "    ";
                 const slintType = instance.isMultiMode
-                    ? `mode${collectionData.modes.size}_${instance.type}`
+                    ? `${collectionData.formattedName}_mode${collectionData.modes.size}_${instance.type}`
                     : instance.type;
                 // Root Value Instance
                 if (instance.isMultiMode) {
@@ -1069,6 +1085,19 @@ function generateStructsAndInstances(
         instances: instancesCode,
     };
 }
+interface VariableModeData {
+    value: string;
+    type: string;
+    refId?: string;
+    comment?: string;
+}
+
+interface CollectionData {
+    name: string;
+    formattedName: string;
+    modes: Set<string>;
+    variables: Map<string, Map<string, VariableModeData>>;
+}
 
 // For Figma Plugin - Export function with hierarchical structure
 // Export each collection to a separate virtual file
@@ -1093,26 +1122,7 @@ export async function exportFigmaVariablesToSeparateFiles(
         const exportedFiles: Array<{ name: string; content: string }> = [];
 
         // First, initialize the collection structure for ALL collections
-        const collectionStructure = new Map<
-            string,
-            {
-                name: string;
-                formattedName: string;
-                modes: Set<string>;
-                variables: Map<
-                    string,
-                    Map<
-                        string,
-                        {
-                            value: string;
-                            type: string;
-                            refId?: string;
-                            comment?: string;
-                        }
-                    >
-                >;
-            }
-        >();
+        const collectionStructure = new Map<string, CollectionData>();
 
         // Build a global map of variable paths
         const variablePathsById = new Map<
@@ -1193,17 +1203,12 @@ export async function exportFigmaVariablesToSeparateFiles(
                             .get(collectionName)!
                             .variables.has(sanitizedRowName)
                     ) {
-                        collectionStructure.get(collectionName)!.variables.set(
-                            sanitizedRowName,
-                            new Map<
-                                string,
-                                {
-                                    value: string;
-                                    type: string;
-                                    refId?: string;
-                                }
-                            >(),
-                        );
+                        collectionStructure
+                            .get(collectionName)!
+                            .variables.set(
+                                sanitizedRowName,
+                                new Map<string, VariableModeData>(),
+                            );
                     }
 
                     // Process values for each mode
@@ -1930,7 +1935,7 @@ function generateSchemeStructs(
 
 function collectMultiModeStructs(
     node: VariableNode,
-    collectionData: { modes: Set<string> },
+    collectionData: { modes: Set<string>; formattedName: string },
     structDefinitions: string[],
 ) {
     if (collectionData.modes.size <= 1) {
@@ -1942,7 +1947,7 @@ function collectMultiModeStructs(
 
     // Generate a struct for each type regardless of whether it's used
     for (const slintType of allSlintTypes) {
-        const structName = `mode${collectionData.modes.size}_${slintType}`;
+        const structName = `${collectionData.formattedName}_mode${collectionData.modes.size}_${slintType}`;
 
         let structDef = `struct ${structName} {\n`;
         for (const mode of collectionData.modes) {
@@ -1961,7 +1966,7 @@ function collectMultiModeStructs(
                 // Skip if we already added this type
                 if (!allSlintTypes.includes(slintType)) {
                     // Add a struct for this additional type
-                    const structName = `mode${collectionData.modes.size}_${slintType}`;
+                    const structName = `${collectionData.formattedName}_mode${collectionData.modes.size}_${slintType}`;
 
                     let structDef = `struct ${structName} {\n`;
                     for (const mode of collectionData.modes) {

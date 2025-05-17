@@ -13,10 +13,21 @@ export const manifest: PluginManifest = {
     ui: "index.html",
     editorType: ["figma", "dev"],
     capabilities: ["codegen", "vscode"],
-    codegenLanguages: [{ label: "Slint", value: "slint" }],
-    codegenPreferences: [],
+    codegenLanguages: [{ label: "Typescript", value: "typescript" }],
+    codegenPreferences: [
+        {
+            itemType: "select",
+            propertyName: "useVariables",
+            label: "Use Variables",
+            options: [
+                { label: "Yes", value: "true" },
+                { label: "No", value: "false", isDefault: true },
+            ],
+            includedLanguages: ["typescript"],
+        },
+    ],
     networkAccess: {
-        allowedDomains: ["https://cdnjs.cloudflare.com"],
+        allowedDomains: ["none"],
     },
     documentAccess: "dynamic-page",
 };

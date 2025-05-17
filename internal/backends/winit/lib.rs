@@ -31,7 +31,10 @@ pub use winit;
 /// Internal type used by the winit backend for thread communication and window system updates.
 #[non_exhaustive]
 #[derive(Debug)]
-pub struct SlintUserEvent(CustomEvent);
+pub struct SlintEvent(CustomEvent);
+
+/// Convenience alias for the event loop builder used by Slint.
+pub type EventLoopBuilder = winit::event_loop::EventLoopBuilder<SlintEvent>;
 
 /// Returned by callbacks passed to [`Window::on_winit_window_event`](WinitWindowAccessor::on_winit_window_event)
 /// to determine if winit events should propagate to the Slint event loop.
@@ -98,16 +101,18 @@ cfg_if::cfg_if! {
     }
 }
 
-fn default_renderer_factory() -> Box<dyn WinitCompatibleRenderer> {
+fn default_renderer_factory(
+    shared_backend_data: &Rc<SharedBackendData>,
+) -> Box<dyn WinitCompatibleRenderer> {
     cfg_if::cfg_if! {
         if #[cfg(enable_skia_renderer)] {
-            renderer::skia::WinitSkiaRenderer::new_suspended()
+            renderer::skia::WinitSkiaRenderer::new_suspended(shared_backend_data)
         } else if #[cfg(feature = "renderer-femtovg-wgpu")] {
-            renderer::femtovg::WGPUFemtoVGRenderer::new_suspended()
+            renderer::femtovg::WGPUFemtoVGRenderer::new_suspended(shared_backend_data)
         } else if #[cfg(feature = "renderer-femtovg")] {
-            renderer::femtovg::GlutinFemtoVGRenderer::new_suspended()
+            renderer::femtovg::GlutinFemtoVGRenderer::new_suspended(shared_backend_data)
         } else if #[cfg(feature = "renderer-software")] {
-            renderer::sw::WinitSoftwareRenderer::new_suspended()
+            renderer::sw::WinitSoftwareRenderer::new_suspended(shared_backend_data)
         } else {
             compile_error!("Please select a feature to build with the winit backend: `renderer-femtovg`, `renderer-skia`, `renderer-skia-opengl`, `renderer-skia-vulkan` or `renderer-software`");
         }
@@ -117,7 +122,7 @@ fn default_renderer_factory() -> Box<dyn WinitCompatibleRenderer> {
 fn try_create_window_with_fallback_renderer(
     shared_backend_data: &Rc<SharedBackendData>,
     attrs: winit::window::WindowAttributes,
-    _proxy: &winit::event_loop::EventLoopProxy<SlintUserEvent>,
+    _proxy: &winit::event_loop::EventLoopProxy<SlintEvent>,
     #[cfg(all(muda, target_os = "macos"))] muda_enable_default_menu_bar: bool,
 ) -> Option<Rc<WinitWindowAdapter>> {
     [
@@ -136,7 +141,7 @@ fn try_create_window_with_fallback_renderer(
     .find_map(|renderer_factory| {
         WinitWindowAdapter::new(
             shared_backend_data.clone(),
-            renderer_factory(),
+            renderer_factory(&shared_backend_data),
             attrs.clone(),
             None,
             #[cfg(any(enable_accesskit, muda))]
@@ -166,7 +171,7 @@ pub struct BackendBuilder {
     window_attributes_hook:
         Option<Box<dyn Fn(winit::window::WindowAttributes) -> winit::window::WindowAttributes>>,
     renderer_name: Option<String>,
-    event_loop_builder: Option<winit::event_loop::EventLoopBuilder<SlintUserEvent>>,
+    event_loop_builder: Option<EventLoopBuilder>,
     #[cfg(all(muda, target_os = "macos"))]
     muda_enable_default_menu_bar_bar: bool,
     #[cfg(target_family = "wasm")]
@@ -214,10 +219,7 @@ impl BackendBuilder {
     /// Configures this builder to use the specified event loop builder when creating the event
     /// loop during a subsequent call to [`Self::build`].
     #[must_use]
-    pub fn with_event_loop_builder(
-        mut self,
-        event_loop_builder: winit::event_loop::EventLoopBuilder<SlintUserEvent>,
-    ) -> Self {
+    pub fn with_event_loop_builder(mut self, event_loop_builder: EventLoopBuilder) -> Self {
         self.event_loop_builder = Some(event_loop_builder);
         self
     }
@@ -285,9 +287,15 @@ impl BackendBuilder {
             }
             #[cfg(feature = "renderer-femtovg-wgpu")]
             (Some("femtovg-wgpu"), maybe_graphics_api) => {
-                if maybe_graphics_api.is_some() {
+                if !maybe_graphics_api.is_some_and(|_api| {
+                    #[cfg(feature = "unstable-wgpu-24")]
+                    if matches!(_api, RequestedGraphicsAPI::WGPU24(..)) {
+                        return true;
+                    }
+                    false
+                }) {
                     return Err(
-                        "The FemtoVG WGPU renderer does not implement renderer selection by graphics API"
+                        "The FemtoVG WGPU renderer only supports the WGPU24 graphics API selection"
                             .into(),
                     );
                 }
@@ -324,6 +332,10 @@ impl BackendBuilder {
                     return Err(PlatformError::NoPlatform);
                 }
             }
+            #[cfg(feature = "unstable-wgpu-24")]
+            (None, Some(RequestedGraphicsAPI::WGPU24(..))) => {
+                renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
+            }
             (None, Some(_requested_graphics_api)) => {
                 cfg_if::cfg_if! {
                     if #[cfg(enable_skia_renderer)] {
@@ -354,33 +366,68 @@ impl BackendBuilder {
 }
 
 pub(crate) struct SharedBackendData {
+    #[cfg(enable_skia_renderer)]
+    skia_context: i_slint_renderer_skia::SkiaSharedContext,
     active_windows: RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>,
     #[cfg(not(target_arch = "wasm32"))]
     clipboard: std::cell::RefCell<clipboard::ClipboardPair>,
     not_running_event_loop: RefCell<Option<crate::event_loop::NotRunningEventLoop>>,
-    event_loop_proxy: winit::event_loop::EventLoopProxy<SlintUserEvent>,
+    event_loop_proxy: winit::event_loop::EventLoopProxy<SlintEvent>,
 }
 
 impl SharedBackendData {
-    fn new(
-        builder: winit::event_loop::EventLoopBuilder<SlintUserEvent>,
-    ) -> Result<Self, PlatformError> {
+    fn new(mut builder: EventLoopBuilder) -> Result<Self, PlatformError> {
         #[cfg(not(target_arch = "wasm32"))]
         use raw_window_handle::HasDisplayHandle;
 
-        let nre = NotRunningEventLoop::new(builder)?;
-        let event_loop_proxy = nre.instance.create_proxy();
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        {
+            #[cfg(feature = "wayland")]
+            {
+                use winit::platform::wayland::EventLoopBuilderExtWayland;
+                builder.with_any_thread(true);
+            }
+            #[cfg(feature = "x11")]
+            {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                builder.with_any_thread(true);
+
+                // Under WSL, the compositor sometimes crashes. Since we cannot reconnect after the compositor
+                // was restarted, the application panics. This does not happen when using XWayland. Therefore,
+                // when running under WSL, try to connect to X11 instead.
+                #[cfg(feature = "wayland")]
+                if std::fs::metadata("/proc/sys/fs/binfmt_misc/WSLInterop").is_ok()
+                    || std::fs::metadata("/run/WSL").is_ok()
+                {
+                    builder.with_x11();
+                }
+            }
+        }
+        #[cfg(target_family = "windows")]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
+        }
+
+        let event_loop =
+            builder.build().map_err(|e| format!("Error initializing winit event loop: {e}"))?;
+
+        let event_loop_proxy = event_loop.create_proxy();
         #[cfg(not(target_arch = "wasm32"))]
         let clipboard = crate::clipboard::create_clipboard(
-            &nre.instance
+            &event_loop
                 .display_handle()
                 .map_err(|display_err| PlatformError::OtherError(display_err.into()))?,
         );
         Ok(Self {
+            #[cfg(enable_skia_renderer)]
+            skia_context: i_slint_renderer_skia::SkiaSharedContext::default(),
             active_windows: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             clipboard: RefCell::new(clipboard),
-            not_running_event_loop: RefCell::new(Some(nre)),
+            not_running_event_loop: RefCell::new(Some(NotRunningEventLoop {
+                instance: event_loop,
+            })),
             event_loop_proxy,
         })
     }
@@ -428,7 +475,7 @@ impl SharedBackendData {
 /// ```
 pub struct Backend {
     requested_graphics_api: Option<RequestedGraphicsAPI>,
-    renderer_factory_fn: fn() -> Box<dyn WinitCompatibleRenderer>,
+    renderer_factory_fn: fn(&Rc<SharedBackendData>) -> Box<dyn WinitCompatibleRenderer>,
     event_loop_state: std::cell::RefCell<Option<crate::event_loop::EventLoopState>>,
     shared_data: Rc<SharedBackendData>,
 
@@ -505,7 +552,7 @@ impl i_slint_core::platform::Platform for Backend {
 
         let adapter = WinitWindowAdapter::new(
             self.shared_data.clone(),
-            (self.renderer_factory_fn)(),
+            (self.renderer_factory_fn)(&self.shared_data),
             attrs.clone(),
             self.requested_graphics_api.clone(),
             #[cfg(any(enable_accesskit, muda))]
@@ -571,11 +618,11 @@ impl i_slint_core::platform::Platform for Backend {
     }
 
     fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
-        struct Proxy(winit::event_loop::EventLoopProxy<SlintUserEvent>);
+        struct Proxy(winit::event_loop::EventLoopProxy<SlintEvent>);
         impl EventLoopProxy for Proxy {
             fn quit_event_loop(&self) -> Result<(), EventLoopError> {
                 self.0
-                    .send_event(SlintUserEvent(CustomEvent::Exit))
+                    .send_event(SlintEvent(CustomEvent::Exit))
                     .map_err(|_| EventLoopError::EventLoopTerminated)
             }
 
@@ -594,11 +641,11 @@ impl i_slint_core::platform::Platform for Backend {
                 // all at once.
                 #[cfg(target_arch = "wasm32")]
                 self.0
-                    .send_event(SlintUserEvent(CustomEvent::WakeEventLoopWorkaround))
+                    .send_event(SlintEvent(CustomEvent::WakeEventLoopWorkaround))
                     .map_err(|_| EventLoopError::EventLoopTerminated)?;
 
                 self.0
-                    .send_event(SlintUserEvent(CustomEvent::UserEvent(event)))
+                    .send_event(SlintEvent(CustomEvent::UserEvent(event)))
                     .map_err(|_| EventLoopError::EventLoopTerminated)
             }
         }
@@ -636,7 +683,7 @@ mod private {
 
 #[i_slint_core_macros::slint_doc]
 /// This helper trait can be used to obtain access to the [`winit::window::Window`] for a given
-/// [`slint::Window`](slint:rust:slint/struct.window).")]
+/// [`slint::Window`](slint:rust:slint/struct.window).
 pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     /// Returns true if a [`winit::window::Window`] exists for this window. This is the case if the window is
     /// backed by this winit backend.

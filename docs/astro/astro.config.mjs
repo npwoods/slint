@@ -156,6 +156,7 @@ export default defineConfig({
                                     "guide/platforms/desktop",
                                     "guide/platforms/embedded",
                                     "guide/platforms/mobile",
+                                    "guide/platforms/web",
                                 ],
                             },
                             {
@@ -291,6 +292,10 @@ export default defineConfig({
                                                 slug: "reference/global-functions/builtinfunctions",
                                             },
                                         ],
+                                    },
+                                    {
+                                        label: "Platform Namespace",
+                                        slug: "reference/global-namespaces/platform",
                                     },
                                 ],
                             },
