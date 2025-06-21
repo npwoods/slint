@@ -11,7 +11,7 @@
 This crate is the main entry point for embedding user interfaces designed with
 [Slint](https://slint.rs/) in Rust programs.
 */
-#![doc = i_slint_core_macros::slint_doc_str!("If you are new to Slint, start with the [Walk-through **tutorial**](slint:quickstart)")]
+#![doc = i_slint_core_macros::slint_doc_str!("If you are new to Slint, start with the [Walk-through **tutorial**](slint:quickstart).")]
 /*! If you are already familiar with Slint, the following topics provide related information.
 
 ## Topics
@@ -75,11 +75,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "1.10.0"
+slint = "1.12"
 ...
 
 [build-dependencies]
-slint-build = "1.10.0"
+slint-build = "1.12"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -200,6 +200,9 @@ each instance will have their own instance of associated globals singletons.
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::needless_doctest_main)] // We document how to write a main function
+
+#[cfg(target_env = "musl")]
+compile_error!("Compiling with MUSL is not supported by this crate.");
 
 extern crate alloc;
 
@@ -435,7 +438,7 @@ pub use i_slint_backend_selector::api::*;
 /// Helper type that helps checking that the generated code is generated for the right version
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct VersionCheck_1_12_0;
+pub struct VersionCheck_1_12_1;
 
 #[cfg(doctest)]
 mod compile_fail_tests;
@@ -538,7 +541,6 @@ pub mod wgpu_24 {
     //!```
     //!
     pub use i_slint_core::graphics::wgpu_24::*;
-    pub use wgpu_24 as wgpu;
 }
 
 #[cfg(feature = "unstable-winit-030")]
@@ -598,8 +600,8 @@ pub mod winit_030 {
     //!     Ok(())
     //! }
     //! ```
-    //! See also [`BackendSelector::with_winit_030_event_loop_builder()`](crate::BackendSelector::with_winit_030_event_loop_builder())
-    //! and [`BackendSelector::with_winit_030_window_attributes_hook()`](crate::BackendSelector::with_winit_030_window_attributes_hook()).
+    //! See also [`BackendSelector::with_winit_event_loop_builder()`](crate::BackendSelector::with_winit_event_loop_builder())
+    //! and [`BackendSelector::with_winit_window_attributes_hook()`](crate::BackendSelector::with_winit_window_attributes_hook()).
 
     pub use i_slint_backend_winit::{
         winit, EventLoopBuilder, SlintEvent, WinitWindowAccessor, WinitWindowEventResult,

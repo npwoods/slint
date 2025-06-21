@@ -11,10 +11,9 @@ import * as wasm_preview from "./wasm_preview";
 import * as lsp_commands from "./lsp_commands";
 import * as snippets from "./snippets";
 
-import {
-    type BaseLanguageClient,
-    type LanguageClientOptions,
-    NotificationType,
+import type {
+    BaseLanguageClient,
+    LanguageClientOptions,
 } from "vscode-languageclient";
 
 export class ClientHandle {
@@ -175,6 +174,39 @@ export function activate(
         }),
     );
 
+    const command = vscode.commands.registerCommand(
+        "slint.openHelp",
+        (word) => {
+            const helpUrl = getHelpUrlForElement(context, word);
+            if (helpUrl) {
+                vscode.env.openExternal(vscode.Uri.parse(helpUrl));
+            }
+        },
+    );
+
+    const hoverProvider = vscode.languages.registerHoverProvider(
+        { language: "slint" },
+        {
+            provideHover(document, position) {
+                const range = document.getWordRangeAtPosition(position);
+                const word = document.getText(range);
+
+                if (getHelpUrlForElement(context, word)) {
+                    const commandUri = vscode.Uri.parse(
+                        `command:slint.openHelp?${encodeURIComponent(JSON.stringify([word]))}`,
+                    );
+                    const markdown = new vscode.MarkdownString(
+                        `[${word} docs](${commandUri})`,
+                    );
+                    markdown.isTrusted = true;
+
+                    return new vscode.Hover(markdown, range);
+                }
+            },
+        },
+    );
+    context.subscriptions.push(hoverProvider, command);
+
     context.subscriptions.push(
         vscode.commands.registerCommand("slint.reload", async function () {
             statusBar.hide();
@@ -259,4 +291,78 @@ async function maybeSendStartupTelemetryEvent(
     }
 
     telemetryLogger.logUsage("extension-activated", usageData);
+}
+
+function helpBaseUrl(context: vscode.ExtensionContext): string {
+    if (
+        context.extensionMode === vscode.ExtensionMode.Development ||
+        context.extension.packageJSON.name.endsWith("-nightly")
+    ) {
+        return "https://snapshots.slint.dev/master/docs/slint/reference/";
+    } else {
+        return `https://releases.slint.dev/${context.extension.packageJSON.version}/docs/slint/reference/`;
+    }
+}
+
+function getHelpUrlForElement(
+    context: vscode.ExtensionContext,
+    elementName: string,
+): string | null {
+    const elementPaths: Record<string, string> = {
+        // elements
+        Image: "elements/image",
+        Path: "elements/path",
+        Text: "elements/text",
+        Rectangle: "elements/rectangle",
+        // gestures
+        Flickable: "gestures/flickable",
+        SwipeGestureHandler: "gestures/swipegesturehandler",
+        TouchArea: "gestures/toucharea",
+        // keyboard-input
+        FocusScope: "keyboard-input/focusscope",
+        TextInput: "keyboard-input/textinput",
+        TextInputInterface: "keyboard-input/textinputinterface",
+        // layouts
+        GridLayout: "layouts/gridlayout",
+        HorizontalLayout: "layouts/horizontallayout",
+        VerticalLayout: "layouts/verticallayout",
+        // window
+        ContextMenuArea: "window/contextmenuarea",
+        Dialog: "window/dialog",
+        MenuBar: "window/menubar",
+        PopupWindow: "window/popupwindow",
+        Window: "window/window",
+        // reference
+        Timer: "timer",
+        // std-widgets/basic-widgets/
+        Button: "std-widgets/basic-widgets/button",
+        CheckBox: "std-widgets/basic-widgets/checkbox",
+        ComboBox: "std-widgets/basic-widgets/combobox",
+        ProgressIndicator: "std-widgets/basic-widgets/progressindicator",
+        Slider: "std-widgets/basic-widgets/slider",
+        SpinBox: "std-widgets/basic-widgets/spinbox",
+        Spinner: "std-widgets/basic-widgets/spinner",
+        StandardButton: "std-widgets/basic-widgets/standardbutton",
+        Switch: "std-widgets/basic-widgets/switch",
+        //std-widgets/views
+        LineEdit: "std-widgets/views/lineedit",
+        ListView: "std-widgets/views/listview",
+        ScrollView: "std-widgets/views/scrollview",
+        StandardListView: "std-widgets/views/standardlistview",
+        StandardTableView: "std-widgets/views/standardtableview",
+        TabWidget: "std-widgets/views/tabwidget",
+        TextEdit: "std-widgets/views/textedit",
+        //std-widgets/layouts
+        GridBox: "std-widgets/layouts/gridbox",
+        GroupBox: "std-widgets/layouts/groupbox",
+        HorizontalBox: "std-widgets/layouts/horizontalbox",
+        VerticalBox: "std-widgets/layouts/verticalbox",
+        //std-widgets/misc
+        AboutSlint: "std-widgets/misc/aboutslint",
+        DatePickerPopup: "std-widgets/misc/datepickerpopup",
+        TimerPickerPopup: "std-widgets/misc/timerpickerpopup",
+    };
+
+    const path = elementPaths[elementName];
+    return path ? `${helpBaseUrl(context)}${path}/` : null;
 }

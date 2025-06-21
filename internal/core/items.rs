@@ -67,6 +67,7 @@ type ItemRendererRef<'a> = &'a mut dyn crate::item_rendering::ItemRenderer;
 /// Workarounds for cbindgen
 pub type VoidArg = ();
 pub type KeyEventArg = (KeyEvent,);
+type FocusReasonArg = (FocusReason,);
 type PointerEventArg = (PointerEvent,);
 type PointerScrollEventArg = (PointerScrollEvent,);
 type PointArg = (crate::api::LogicalPosition,);
@@ -78,10 +79,10 @@ type MenuEntryModel = crate::model::ModelRc<MenuEntry>;
 macro_rules! declare_item_vtable {
     (fn $getter:ident() -> $item_vtable_ty:ident for $item_ty:ty) => {
         ItemVTable_static! {
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub static $item_vtable_ty for $item_ty
         }
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $getter() -> *const ItemVTable {
             use vtable::HasStaticVTable;
             <$item_ty>::static_vtable()
@@ -93,7 +94,7 @@ macro_rules! declare_item_vtable {
 macro_rules! declare_item_vtable {
     (fn $getter:ident() -> $item_vtable_ty:ident for $item_ty:ty) => {
         ItemVTable_static! {
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub static $item_vtable_ty for $item_ty
         }
     };
@@ -111,6 +112,7 @@ pub enum RenderingResult {
 }
 
 /// Items are the nodes in the render tree.
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
 #[vtable]
 #[repr(C)]
 pub struct ItemVTable {
@@ -1460,7 +1462,7 @@ declare_item_vtable! {
 }
 
 #[cfg(feature = "ffi")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_contextmenu_close(
     s: Pin<&ContextMenu>,
     window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
@@ -1473,7 +1475,7 @@ pub unsafe extern "C" fn slint_contextmenu_close(
 }
 
 #[cfg(feature = "ffi")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_contextmenu_is_open(
     s: Pin<&ContextMenu>,
     window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
@@ -1672,7 +1674,7 @@ macro_rules! declare_builtin_structs {
 i_slint_common::for_each_builtin_structs!(declare_builtin_structs);
 
 #[cfg(feature = "ffi")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_item_absolute_position(
     self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
     self_index: u32,

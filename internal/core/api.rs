@@ -250,6 +250,7 @@ fn logical_physical_size() {
     assert_eq!(logical.to_physical(2.), phys);
 }
 
+#[i_slint_core_macros::slint_doc]
 /// This enum describes a low-level access to specific graphics APIs used
 /// by the renderer.
 #[derive(Clone)]
@@ -271,9 +272,12 @@ pub enum GraphicsAPI<'a> {
     /// The rendering is based on WGPU 24.x. Use the provided fields to submit commits to the provided
     /// WGPU command queue.
     ///
-    /// *Note*: This enum variant is behind a feature flag and may be removed or changed in future minor releases,
-    ///         as new major WGPU releases become available.
+    /// *Note*: This function is behind the [`unstable-wgpu-24` feature flag](slint:rust:slint/docs/cargo_features/#backends)
+    ///         and may be removed or changed in future minor releases, as new major WGPU releases become available.
+    ///
+    /// See also the [`slint::wgpu_24`](slint:rust:slint/wgpu_24) module.
     #[cfg(feature = "unstable-wgpu-24")]
+    #[non_exhaustive]
     WGPU24 {
         /// The WGPU instance used for rendering.
         instance: wgpu_24::Instance,
@@ -1032,7 +1036,6 @@ impl std::error::Error for EventLoopError {}
 /// use slint::platform::PlatformError;
 /// PlatformError::from(format!("Could not load resource {}", 1234));
 /// ```
-#[derive(Debug)]
 #[non_exhaustive]
 pub enum PlatformError {
     /// No default platform was selected, or no platform could be initialized.
@@ -1061,6 +1064,12 @@ pub enum PlatformError {
 impl From<PlatformError> for wasm_bindgen::JsValue {
     fn from(err: PlatformError) -> wasm_bindgen::JsValue {
         wasm_bindgen::JsError::from(err).into()
+    }
+}
+
+impl core::fmt::Debug for PlatformError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(self, f)
     }
 }
 

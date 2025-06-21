@@ -137,7 +137,9 @@ export component FocusScope {
     out property <bool> has-focus;
     callback key_pressed(event: KeyEvent) -> EventResult;
     callback key_released(event: KeyEvent) -> EventResult;
-    callback focus_changed_event();
+    callback focus_changed_event(reason: FocusReason);
+    callback focus_gained(reason: FocusReason);
+    callback focus_lost(reason: FocusReason);
     //-default_size_binding:expands_to_parent_geometry
     //-accepts_focus
 }
@@ -519,7 +521,7 @@ export global TextInputInterface {
 }
 
 export global Platform {
-    out property <string> os;
+    out property <OperatingSystemType> os;
     out property <string> style-name;
 }
 
@@ -730,4 +732,3 @@ export global NativePalette {
     //-is_non_item_type
     //-is_internal
 }
-

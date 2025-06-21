@@ -20,15 +20,16 @@ mod htmlimage;
 mod svg;
 
 #[allow(missing_docs)]
+#[cfg_attr(not(feature = "ffi"), i_slint_core_macros::remove_extern)]
 #[vtable::vtable]
 #[repr(C)]
 pub struct OpaqueImageVTable {
-    drop_in_place: fn(VRefMut<OpaqueImageVTable>) -> Layout,
-    dealloc: fn(&OpaqueImageVTable, ptr: *mut u8, layout: Layout),
+    drop_in_place: extern "C" fn(VRefMut<OpaqueImageVTable>) -> Layout,
+    dealloc: extern "C" fn(&OpaqueImageVTable, ptr: *mut u8, layout: Layout),
     /// Returns the image size
-    size: fn(VRef<OpaqueImageVTable>) -> IntSize,
+    size: extern "C" fn(VRef<OpaqueImageVTable>) -> IntSize,
     /// Returns a cache key
-    cache_key: fn(VRef<OpaqueImageVTable>) -> ImageCacheKey,
+    cache_key: extern "C" fn(VRef<OpaqueImageVTable>) -> ImageCacheKey,
 }
 
 #[cfg(feature = "svg")]
@@ -688,7 +689,7 @@ impl std::error::Error for LoadImageError {}
 /// ```
 #[repr(transparent)]
 #[derive(Default, Clone, Debug, PartialEq, derive_more::From)]
-pub struct Image(ImageInner);
+pub struct Image(pub(crate) ImageInner);
 
 impl Image {
     #[cfg(feature = "image-decoders")]
@@ -811,6 +812,19 @@ impl Image {
             },
             SharedImageBuffer::RGBA8Premultiplied(buffer) => buffer,
         })
+    }
+
+    /// Returns the [WGPU](http://wgpu.rs) 24.x texture that this image wraps; returns None if the image does not
+    /// hold such a previously wrapped texture.
+    ///
+    /// *Note*: This function is behind a feature flag and may be removed or changed in future minor releases,
+    ///         as new major WGPU releases become available.
+    #[cfg(feature = "unstable-wgpu-24")]
+    pub fn to_wgpu_24_texture(&self) -> Option<wgpu_24::Texture> {
+        match &self.0 {
+            ImageInner::WGPUTexture(WGPUTexture::WGPU24Texture(texture)) => Some(texture.clone()),
+            _ => None,
+        }
     }
 
     /// Creates a new Image from an existing OpenGL texture. The texture remains borrowed by Slint
@@ -974,50 +988,6 @@ impl BorrowedOpenGLTextureBuilder {
     /// Completes the process of building a slint::Image that holds a borrowed OpenGL texture.
     pub fn build(self) -> Image {
         Image(ImageInner::BorrowedOpenGLTexture(self.0))
-    }
-}
-
-#[cfg(feature = "unstable-wgpu-24")]
-#[derive(Debug)]
-#[non_exhaustive]
-/// This enum describes the possible errors that can occur when importing a WGPU texture,
-/// via [`Image::try_from()`].
-pub enum WGPUTextureImportError {
-    /// The texture format is not supported. The only supported format is Rgba8Unorm.
-    InvalidFormat,
-    /// The texture usage must include TEXTURE_BINDING as well as RENDER_ATTACHMENT.
-    InvalidUsage,
-}
-
-#[cfg(feature = "unstable-wgpu-24")]
-impl core::fmt::Display for WGPUTextureImportError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            WGPUTextureImportError::InvalidFormat => f.write_str(
-                "The texture format is not supported. The only supported format is Rgba8Unorm",
-            ),
-            WGPUTextureImportError::InvalidUsage => f.write_str(
-                "The texture usage must include TEXTURE_BINDING as well as RENDER_ATTACHMENT",
-            ),
-        }
-    }
-}
-
-#[cfg(feature = "unstable-wgpu-24")]
-impl TryFrom<wgpu_24::Texture> for Image {
-    type Error = WGPUTextureImportError;
-
-    fn try_from(texture: wgpu_24::Texture) -> Result<Self, Self::Error> {
-        if texture.format() != wgpu_24::TextureFormat::Rgba8Unorm {
-            return Err(WGPUTextureImportError::InvalidFormat);
-        }
-        let usages = texture.usage();
-        if !usages.contains(wgpu_24::TextureUsages::TEXTURE_BINDING)
-            || !usages.contains(wgpu_24::TextureUsages::RENDER_ATTACHMENT)
-        {
-            return Err(WGPUTextureImportError::InvalidUsage);
-        }
-        Ok(Self(ImageInner::WGPUTexture(WGPUTexture::WGPU24Texture(texture))))
     }
 }
 
@@ -1344,7 +1314,7 @@ pub(crate) mod ffi {
     }
 
     #[cfg(feature = "image-decoders")]
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_load_from_path(path: &SharedString, image: *mut Image) {
         core::ptr::write(
             image,
@@ -1353,7 +1323,7 @@ pub(crate) mod ffi {
     }
 
     #[cfg(feature = "std")]
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_load_from_embedded_data(
         data: Slice<'static, u8>,
         format: Slice<'static, u8>,
@@ -1362,12 +1332,12 @@ pub(crate) mod ffi {
         core::ptr::write(image, super::load_image_from_embedded_data(data, format));
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_size(image: &Image) -> IntSize {
         image.size()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_image_path(image: &Image) -> Option<&SharedString> {
         match &image.0 {
             ImageInner::EmbeddedImage { cache_key, .. } => match cache_key {
@@ -1385,7 +1355,7 @@ pub(crate) mod ffi {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_from_embedded_textures(
         textures: &'static StaticTextures,
         image: *mut Image,
@@ -1393,13 +1363,13 @@ pub(crate) mod ffi {
         core::ptr::write(image, Image::from(ImageInner::StaticTextures(textures)));
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_image_compare_equal(image1: &Image, image2: &Image) -> bool {
         image1.eq(image2)
     }
 
     /// Call [`Image::set_nine_slice_edges`]
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_image_set_nine_slice_edges(
         image: &mut Image,
         top: u16,
@@ -1410,7 +1380,7 @@ pub(crate) mod ffi {
         image.set_nine_slice_edges(top, right, bottom, left);
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_image_to_rgb8(
         image: &Image,
         data: &mut SharedVector<Rgb8Pixel>,
@@ -1425,7 +1395,7 @@ pub(crate) mod ffi {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_image_to_rgba8(
         image: &Image,
         data: &mut SharedVector<Rgba8Pixel>,
@@ -1440,7 +1410,7 @@ pub(crate) mod ffi {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_image_to_rgba8_premultiplied(
         image: &Image,
         data: &mut SharedVector<Rgba8Pixel>,

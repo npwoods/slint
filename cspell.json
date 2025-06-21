@@ -76,6 +76,7 @@
                 "standardlistview",
                 "standardtableview",
                 "rustup",
+                "setdefault",
                 "Sonoma",
                 "SUBDIR",
                 "Torizon",
@@ -150,6 +151,7 @@
         "rustdocs",
         "rustflags",
         "rvalue",
+        "SANDBOXING",
         "scrollview",
         "SDK",
         "seti",
@@ -193,7 +195,9 @@
         "espflash",
         "pico",
         "wgpu",
-        "WGPU"
+        "WGPU",
+        "Xcodegen",
+        "Xcodeproj",
     ],
     "ignorePaths": [
         "api/cpp/docs/conf.py",

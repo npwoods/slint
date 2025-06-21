@@ -55,19 +55,12 @@ listenTS("generateSnippetRequest", async (payload) => {
     if (selection.length === 1) {
         const node = selection[0];
         title = node.name;
-        try {
-            // --- Pass the useVariables value received from UI ---
-            slintSnippet = await generateSlintSnippet(node, useVariables);
 
-            if (slintSnippet === null) {
-                slintSnippet = `// Unsupported node type: ${node.type}`;
-            }
-        } catch (error) {
-            console.error(
-                `[Backend] Error generating snippet for ${node.name}:`,
-                error,
-            );
-            slintSnippet = `// Error generating snippet for ${node.name}:\n// ${error instanceof Error ? error.message : String(error)}`;
+        // --- Pass the useVariables value received from UI ---
+        slintSnippet = await generateSlintSnippet(node, useVariables);
+
+        if (slintSnippet === null) {
+            slintSnippet = `// Unsupported node type: ${node.type}`;
         }
     } else if (selection.length > 1) {
         slintSnippet = "// Select a single component to inspect";
@@ -114,6 +107,11 @@ listenTS("exportToFiles", async (message) => {
     }
 });
 
+// Resize window handler
+listenTS("resizeWindow", ({ width, height }) => {
+    figma.ui.resize(width, height);
+});
+
 // Define state variables outside any function (at module level)
 const variableMonitoring: {
     initialized: boolean;
@@ -126,9 +124,6 @@ const variableMonitoring: {
     lastChange: 0,
     lastEventTime: 0,
 };
-
-// Keep the DEBOUNCE_INTERVAL as a constant
-const DEBOUNCE_INTERVAL = 3000; // 3 seconds
 
 listenTS("monitorVariableChanges", () => {
     figma.ui.postMessage({
