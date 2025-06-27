@@ -3,7 +3,26 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
-## [1.12.1] - TBD
+## [1.13.0] - Unreleased
+
+### Rust
+
+ - Minimum Supported Rust Version (MSRV) is 1.85
+
+## [1.12.1] - 2025-06-25
+
+### General
+
+ - Fixed invalid code gen with return statements. (#8723)
+ - Updated `muda` dependency to avoid outdated and insecure `gtk` dependency to appear in the `Cargo.lock` file even if it was not used. (#7800)
+ - Fixed memory leaks and crash in change callbacks (#8768, #8741)
+ - winit: Fixed window constraints (min, max, pref) not being applied sometimes (#8765)
+ - No longer generate unused structs in the generated code to avoid warnings with Rust 1.89
+
+### Slint Language
+
+ - Enums without value cause compilation errors (instead of panics)
+ - Fixed runtime and compile errors when accessing the `Platform` global from within other globals. (#8777)
 
 ### Node.js API
 
@@ -11,15 +30,15 @@ All notable changes to this project are documented in this file.
 
 ### C++
 
- - Fixed compilation of PopupWindow::show in changed callback (#8710)
+ - Fixed compilation of `PopupWindow::show()` in changed callbacks. (#8710)
 
 ### LSP and Tooling
 
- - Added binaries for Windows on ARM (VS Code extension, slint-lsp binaries)
- - Binaries have bigger stack size on Windows
- - live-preview: Lazily compute palette to speedup the UI
+ - Added binaries for Windows on ARM (VS Code extension, slint-lsp binaries).
+ - Fixed potential crashes due to stack overflows on Windows.
+ - live-preview: Lazily compute palette to speedup the UI.
 
-## [1.12.0] - 2026-06-16
+## [1.12.0] - 2025-06-16
 
 ### General
 
@@ -1931,3 +1950,4 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [1.10.0]: https://github.com/slint-ui/slint/releases/tag/v1.10.0
 [1.11.0]: https://github.com/slint-ui/slint/releases/tag/v1.11.0
 [1.12.0]: https://github.com/slint-ui/slint/releases/tag/v1.12.0
+[1.12.1]: https://github.com/slint-ui/slint/releases/tag/v1.12.1
