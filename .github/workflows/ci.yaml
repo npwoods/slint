@@ -16,6 +16,7 @@ concurrency:
 
 env:
     MACOSX_DEPLOYMENT_TARGET: "11.0"
+    SLINT_COMPILER_DENY_WARNINGS: 1
 
 jobs:
     files-changed:
@@ -58,6 +59,9 @@ jobs:
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
                     - os: ubuntu-22.04
                       rust_version: "nightly"
+                    # Bevy requires 1.86, won't compile with 1.85
+                    - rust_version: "1.85"
+                      maybe_exclude_bevy: "--exclude bevy-example"
                 exclude:
                     - os: macos-14
                       rust_version: "1.85"
@@ -94,13 +98,18 @@ jobs:
               with:
                   toolchain: ${{ matrix.rust_version }}
                   key: x-v3
-            - name: Run tests (not qt)
+            - name: Run tests
               run:  cargo test --verbose --all-features --workspace ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python -- --skip=_qt::t
               env:
                   SLINT_CREATE_SCREENSHOTS: 1
               shell: bash
             - name: Run tests (qt)
               run: cargo test --verbose --all-features --workspace ${{ matrix.extra_args }} ${{ matrix.maybe_exclude_bevy }} --exclude slint-node --exclude pyslint --exclude test-driver-node --exclude slint-node --exclude test-driver-nodejs --exclude test-driver-cpp --exclude mcu-board-support --exclude mcu-embassy --exclude printerdemo_mcu --exclude uefi-demo --exclude slint-cpp --exclude slint-python --bin test-driver-rust -- _qt --test-threads=1
+              shell: bash
+            - name: live-reload test
+              env:
+                SLINT_LIVE_RELOAD: 1
+              run: cargo test --verbose --features=build-time,slint/live-reload -p test-driver-rust -- --skip=_qt::t
               shell: bash
             - name: Archive screenshots after failed tests
               if: ${{ failure() }}
@@ -200,6 +209,9 @@ jobs:
             - name: Run mypy
               working-directory: api/python/slint
               run: uv run mypy -p tests -p slint
+            - name: Run mypy on slint-compiler
+              working-directory: api/python/compiler
+              run: uv run mypy slint_compiler
             - name: Run ruff linter
               working-directory: api/python/slint
               run: uv tool run ruff check
@@ -433,7 +445,7 @@ jobs:
 #        steps:
 #            - uses: actions/checkout@v4
 #            - uses: dtolnay/rust-toolchain@stable
-#            - uses: esp-rs/xtensa-toolchain@v1.5
+#            - uses: esp-rs/xtensa-toolchain@v1.6
 #              with:
 #                  default: true
 #                  buildtargets: esp32
@@ -602,7 +614,7 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - uses: dtolnay/rust-toolchain@stable
-            - uses: esp-rs/xtensa-toolchain@v1.5
+            - uses: esp-rs/xtensa-toolchain@v1.6
               with:
                   default: true
                   buildtargets: esp32

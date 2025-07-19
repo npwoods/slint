@@ -243,7 +243,7 @@ fn default_config() -> cbindgen::Config {
         ("target_arch = wasm32".into(), "SLINT_TARGET_WASM".into()),
         ("target_os = android".into(), "__ANDROID__".into()),
         // Disable Rust WGPU specific API feature
-        ("feature = unstable-wgpu-24".into(), "SLINT_DISABLED_CODE".into()),
+        ("feature = unstable-wgpu-25".into(), "SLINT_DISABLED_CODE".into()),
     ]
     .iter()
     .cloned()
@@ -896,6 +896,7 @@ fn gen_interpreter(
         "Diagnostic",
         "PropertyDescriptor",
         "Box",
+        "LiveReloadingComponentInner",
     ])
     .map(String::from)
     .collect();
@@ -942,6 +943,7 @@ fn gen_interpreter(
                 using slint::interpreter::ValueType;
                 using slint::interpreter::PropertyDescriptor;
                 using slint::interpreter::Diagnostic;
+                struct LiveReloadingComponentInner;
                 template <typename T> using Box = T*;
             }",
         )
@@ -985,6 +987,7 @@ macro_rules! declare_features {
 
 declare_features! {
     interpreter
+    live_reload
     testing
     backend_qt
     backend_winit
