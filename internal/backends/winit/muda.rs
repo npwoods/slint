@@ -165,14 +165,7 @@ impl MudaAdapter {
                         accelerator,
                     ))
                 } else {
-                    // BletchMAME hack                
-                    Box::new(muda::CheckMenuItem::with_id(
-                        id.clone(),
-                        &entry.title,
-                        entry.enabled,
-                        false,
-                        accelerator,
-                    ))
+                    Box::new(muda::MenuItem::with_id(id.clone(), &entry.title, entry.enabled, accelerator))
                 }
             } else {
                 let sub_menu = muda::Submenu::with_id(id.clone(), &entry.title, entry.enabled);
