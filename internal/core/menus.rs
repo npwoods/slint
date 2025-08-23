@@ -117,8 +117,9 @@ impl MenuFromItemTree {
                     let has_sub_menu = !children.is_empty();
                     let enabled = menu_item.enabled();
                     let checkable = menu_item.checkable();
-                    let checked = menu_item.checked();
+                    let checked = menu_item.checked();                
                     let icon = menu_item.icon();
+                    let muda_accelerator = menu_item.muda_accelerator();
                     self.item_cache.borrow_mut().insert(
                         id.clone(),
                         ShadowTreeNode { item: ItemRc::downgrade(&item), children },
@@ -132,6 +133,7 @@ impl MenuFromItemTree {
                         checkable,
                         checked,
                         icon,
+                        muda_accelerator
                     });
                 }
                 VisitChildrenResult::CONTINUE
@@ -194,6 +196,7 @@ pub struct MenuItem {
     pub checkable: Property<bool>,
     pub checked: Property<bool>,
     pub icon: Property<Image>,
+    pub muda_accelerator: Property<SharedString>,
 }
 
 impl crate::items::Item for MenuItem {

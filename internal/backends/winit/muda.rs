@@ -137,6 +137,11 @@ impl MudaAdapter {
             if entry.is_separator || entry.title.is_empty() {
                 Box::new(muda::PredefinedMenuItem::separator())
             } else if !entry.has_sub_menu {
+                let accelerator = (!entry.muda_accelerator.is_empty()).then(|| {
+                    use std::str::FromStr;
+                    muda::accelerator::Accelerator::from_str(&entry.muda_accelerator).unwrap()
+                });
+
                 // the top level always has a sub menu regardless of entry.has_sub_menu
                 if entry.checkable {
                     Box::new(muda::CheckMenuItem::with_id(
@@ -144,7 +149,7 @@ impl MudaAdapter {
                         &entry.title,
                         entry.enabled,
                         entry.checked,
-                        None,
+                        accelerator,
                     ))
                 } else if let Some(rgba) = entry.icon.to_rgba8() {
                     let icon = muda::Icon::from_rgba(
@@ -158,7 +163,7 @@ impl MudaAdapter {
                         &entry.title,
                         entry.enabled,
                         icon,
-                        None,
+                        accelerator,
                     ))
                 } else {
                     // BletchMAME hack                
@@ -167,7 +172,7 @@ impl MudaAdapter {
                         &entry.title,
                         entry.enabled,
                         false,
-                        None,
+                        accelerator,
                     ))
                 }
             } else {
