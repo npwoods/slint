@@ -99,6 +99,8 @@ namespace slint::platform::key_codes {{
     i_slint_common::for_each_special_keys!(print_key_codes);
     writeln!(enums_pub, "}}")?;
 
+    enums_priv.flush()?;
+    enums_pub.flush()?;
     Ok(())
 }
 
@@ -184,6 +186,8 @@ fn builtin_structs(path: &Path) -> anyhow::Result<()> {
     i_slint_common::for_each_builtin_structs!(print_structs);
     writeln!(structs_priv, "}}")?;
     writeln!(structs_pub, "}}")?;
+    structs_priv.flush()?;
+    structs_pub.flush()?;
     Ok(())
 }
 
@@ -410,13 +414,7 @@ fn gen_corelib(
     string_config.export.exclude = vec!["SharedString".into()];
     string_config.export.body.insert(
         "Slice".to_owned(),
-        "    const T &operator[](int i) const { return ptr[i]; }
-        /// Note: this doesn't initialize Slice properly, but we need to keep the struct as compatible with C
-        constexpr Slice() = default;
-        /// Rust uses a NonNull, so even empty slices shouldn't use nullptr
-        constexpr Slice(const T *ptr, uintptr_t len) : ptr(ptr ? const_cast<T*>(ptr) : reinterpret_cast<T*>(sizeof(T))), len(len) {}
-        "
-            .to_owned(),
+        "    const T &operator[](int i) const { return ptr[i]; }".to_owned(),
     );
     cbindgen::Builder::new()
         .with_config(string_config)
@@ -564,7 +562,8 @@ fn gen_corelib(
             "slint_windowrc_color_scheme",
             "slint_windowrc_supports_native_menu_bar",
             "slint_windowrc_setup_native_menu_bar",
-            "slint_windowrc_default_font_size",
+            "slint_windowrc_show_native_popup_menu",
+            "slint_windowrc_resolved_default_font_size",
             "slint_windowrc_dispatch_pointer_event",
             "slint_windowrc_dispatch_key_event",
             "slint_windowrc_dispatch_event",
