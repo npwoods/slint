@@ -20,7 +20,7 @@ use winit::window::Window;
 pub struct MudaAdapter {
     entries: Vec<MenuEntry>,
     tracker: Option<Pin<Box<PropertyTracker<MudaPropertyTracker>>>>,
-    pub menu: muda::Menu,
+    menu: muda::Menu,
 }
 
 #[derive(Clone, Copy, Debug, strum::EnumString, strum::Display)]
@@ -90,7 +90,6 @@ impl MudaAdapter {
         let menu = muda::Menu::new();
         install_event_handler_if_necessary(proxy);
 
-        #[cfg(target_os = "windows")]
         let mut s = Self { entries: Default::default(), tracker: None, menu };
         s.rebuild_menu(winit_window, Some(context_menu), MudaType::Context);
 
@@ -134,7 +133,7 @@ impl MudaAdapter {
         ) -> Box<dyn muda::IsMenuItem> {
             let id = muda::MenuId(format!("{window_id}|{}|{}", map.len(), muda_type));
             map.push(entry.clone());
-            if entry.is_separator || entry.title.is_empty() {
+            if entry.is_separator {
                 Box::new(muda::PredefinedMenuItem::separator())
             } else if !entry.has_sub_menu {
                 let accelerator = (!entry.muda_accelerator.is_empty()).then(|| {

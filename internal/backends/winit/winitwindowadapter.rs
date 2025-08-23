@@ -162,7 +162,7 @@ fn window_is_resizable(
     }
 }
 
-pub(crate) enum WinitWindowOrNone {
+enum WinitWindowOrNone {
     HasWindow {
         window: Arc<winit::window::Window>,
         #[cfg(enable_accesskit)]
@@ -346,7 +346,7 @@ pub struct WinitWindowAdapter {
         Option<Box<dyn FnMut(&corelib::api::Window, &winit::event::WindowEvent) -> EventResult>>,
     >,
 
-    pub(crate) winit_window_or_none: RefCell<WinitWindowOrNone>,
+    winit_window_or_none: RefCell<WinitWindowOrNone>,
     window_existence_wakers: RefCell<Vec<core::task::Waker>>,
 
     #[cfg(not(use_winit_theme))]
