@@ -14,6 +14,7 @@ pub mod component_catalog;
 pub mod document_cache;
 pub use document_cache::{DocumentCache, SourceFileVersion};
 pub mod rename_component;
+pub mod rename_element_id;
 #[cfg(test)]
 pub mod test;
 #[cfg(any(test, feature = "preview-engine"))]
@@ -47,6 +48,7 @@ pub trait LspToPreview {
 }
 
 #[derive(Default, Clone)]
+#[allow(dead_code)]
 pub struct DummyLspToPreview {}
 
 impl LspToPreview for DummyLspToPreview {
@@ -654,7 +656,7 @@ impl ComponentInformation {
 
 /// Poll a future once and return its result if it was `Ready` afterwards
 /// or `None` otherwise.
-#[cfg(feature = "preview-engine")]
+#[cfg(any(test, feature = "preview-engine"))]
 pub fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
     struct DummyWaker();
     impl std::task::Wake for DummyWaker {

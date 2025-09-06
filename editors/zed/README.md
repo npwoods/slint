@@ -13,9 +13,19 @@ Normally you won't need to configure anything. Unless you are using a developmen
 {
   "lsp": {
     "slint": {
-      "binary": "slint-lsp",
-      "args": []
+      "binary": {
+        "path": "/path/to/slint-lsp",
+        "arguments": [],
+        "env": {}
+      },
     }
   }
 }
 ```
+
+## Development
+
+The extension will download the version of the Slint LSP binary match the version of the extension.
+To test out the development version of the extension, start `zed` with the `SLINT_DEV_MODE` environment variable set, and "Install Dev Extension" from the `editors/zed` folder, or "rebuild extension".
+When the `SLINT_DEV_MODE` environment variable is set, the extension will download the
+latest nightly version of the LSP binary.

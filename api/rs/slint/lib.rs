@@ -75,11 +75,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "1.12"
+slint = "1.13"
 ...
 
 [build-dependencies]
-slint-build = "1.12"
+slint-build = "1.13"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -200,9 +200,6 @@ each instance will have their own instance of associated globals singletons.
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::needless_doctest_main)] // We document how to write a main function
-
-#[cfg(target_env = "musl")]
-compile_error!("Compiling with MUSL is not supported by this crate.");
 
 extern crate alloc;
 
