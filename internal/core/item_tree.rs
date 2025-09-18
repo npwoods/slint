@@ -464,6 +464,15 @@ impl ItemRc {
         let mut result = p;
         while let Some(parent) = current.parent_item(ParentItemTraversalMode::StopAtPopups) {
             let geometry = parent.geometry();
+            if self
+                .window_adapter()
+                .map(|adapter| adapter.renderer().supports_transformations())
+                .unwrap_or(true)
+            {
+                if let Some(transform) = parent.children_transform() {
+                    result = transform.transform_point(result.cast()).cast();
+                }
+            }
             result += geometry.origin.to_vector();
             current = parent.clone();
         }
@@ -808,18 +817,32 @@ impl ItemRc {
     /// Returns the transform to apply to children to map them into the local coordinate space of this item.
     /// Typically this is None, but rotation for example may return Some.
     pub fn children_transform(&self) -> Option<ItemTransform> {
-        self.downcast::<crate::items::Rotate>().map(|rotate_item| {
+        self.downcast::<crate::items::Transform>().map(|transform_item| {
             let origin = euclid::Vector2D::<f32, crate::lengths::LogicalPx>::from_lengths(
-                rotate_item.as_pin_ref().rotation_origin_x().cast(),
-                rotate_item.as_pin_ref().rotation_origin_y().cast(),
+                transform_item.as_pin_ref().rotation_origin_x().cast(),
+                transform_item.as_pin_ref().rotation_origin_y().cast(),
             );
             ItemTransform::translation(-origin.x, -origin.y)
                 .cast()
+                .then_scale(
+                    transform_item.as_pin_ref().scale_x(),
+                    transform_item.as_pin_ref().scale_y(),
+                )
                 .then_rotate(euclid::Angle {
-                    radians: rotate_item.as_pin_ref().rotation_angle().to_radians(),
+                    radians: transform_item.as_pin_ref().rotation_angle().to_radians(),
                 })
                 .then_translate(origin)
         })
+    }
+
+    /// Returns the inverse of the children transform.
+    ///
+    /// None if children_transform is None or in the case of
+    /// non-invertible transforms (which should be extremely rare).
+    pub fn inverse_children_transform(&self) -> Option<ItemTransform> {
+        self.children_transform()
+            // Should practically always be possible.
+            .and_then(|child_transform| child_transform.inverse())
     }
 }
 

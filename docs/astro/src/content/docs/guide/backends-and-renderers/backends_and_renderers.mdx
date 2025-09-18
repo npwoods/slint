@@ -80,7 +80,7 @@ The Qt renderer comes with the <Link type="QtBackend" label="Qt backend" /> and 
 - Suitable for Microcontrollers.
 - Some features haven't been implemented yet:
   * No support for `Path`.
-  * No image rotation or smooth scaling.
+  * No support for rotations or scaling.
   * No support for `drop-shadow-*` properties.
   * No support for `border-radius` in combination with `clip: true`.
   * No text stroking/outlining.
@@ -185,3 +185,10 @@ issues we're aware of and how to resolve them.
   ```
   cargo update -p cc --precise 1.1.31
   ```
+
+ * The application doesn't start on Windows but exist immediately
+
+ The build succeeds, but running the `.exe` on Windows terminates immediately without error messages.
+
+ This might be caused by missing MSVC runtime libraries. To solve this install, install the
+ [Microsoft Visual C++ Redistributable package](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)

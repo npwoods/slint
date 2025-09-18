@@ -1323,6 +1323,13 @@ impl ItemRenderer for QtItemRenderer<'_> {
         }}
     }
 
+    fn scale(&mut self, x_factor: f32, y_factor: f32) {
+        let painter: &mut QPainterPtr = &mut self.painter;
+        cpp! { unsafe [painter as "QPainterPtr*", x_factor as "float", y_factor as "float"] {
+            (*painter)->scale(x_factor, y_factor);
+        }}
+    }
+
     fn apply_opacity(&mut self, opacity: f32) {
         let painter: &mut QPainterPtr = &mut self.painter;
         cpp! { unsafe [painter as "QPainterPtr*", opacity as "float"] {
@@ -2444,6 +2451,10 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
             size.height,
         );
         Ok(buffer)
+    }
+
+    fn supports_transformations(&self) -> bool {
+        true
     }
 }
 

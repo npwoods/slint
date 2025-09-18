@@ -15,7 +15,7 @@ use crate::value::{SlintToPyValue, TypeCollection};
 
 pub struct PyModelShared {
     notify: ModelNotify,
-    self_ref: RefCell<Option<PyObject>>,
+    self_ref: RefCell<Option<Py<PyAny>>>,
     /// The type collection is needed when calling a Python implementation of set_row_data and
     /// the model data provided (for example from within a .slint file) contains an enum. Then
     /// we need to know how to map it to the correct Python enum. This field is lazily set, whenever
@@ -56,7 +56,7 @@ impl PyModelBase {
         }
     }
 
-    fn init_self(&self, self_ref: PyObject) {
+    fn init_self(&self, self_ref: Py<PyAny>) {
         *self.inner.self_ref.borrow_mut() = Some(self_ref);
     }
 
@@ -88,7 +88,7 @@ impl i_slint_core::model::Model for PyModelShared {
     type Data = slint_interpreter::Value;
 
     fn row_count(&self) -> usize {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let obj = self.self_ref.borrow();
             let Some(obj) = obj.as_ref() else {
                 eprintln!("Python: Model implementation is lacking self object (in row_count)");
@@ -97,8 +97,10 @@ impl i_slint_core::model::Model for PyModelShared {
             let result = match obj.call_method0(py, "row_count") {
                 Ok(result) => result,
                 Err(err) => {
-                    eprintln!(
-                        "Python: Model implementation of row_count() threw an exception: {err}"
+                    crate::handle_unraisable(
+                        py,
+                        "Python: Model implementation of row_count() threw an exception".into(),
+                        err,
                     );
                     return 0;
                 }
@@ -107,7 +109,11 @@ impl i_slint_core::model::Model for PyModelShared {
             match result.extract::<usize>(py) {
                 Ok(count) => count,
                 Err(err) => {
-                    eprintln!("Python: Model implementation of row_count() returned value that cannot be cast to usize: {err}");
+                    crate::handle_unraisable(
+                        py,
+                        "Python: Model implementation of row_count() returned value that cannot be cast to usize".into(),
+                        err,
+                    );
                     0
                 }
             }
@@ -115,7 +121,7 @@ impl i_slint_core::model::Model for PyModelShared {
     }
 
     fn row_data(&self, row: usize) -> Option<Self::Data> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let obj = self.self_ref.borrow();
             let Some(obj) = obj.as_ref() else {
                 eprintln!("Python: Model implementation is lacking self object (in row_data)");
@@ -126,8 +132,10 @@ impl i_slint_core::model::Model for PyModelShared {
                 Ok(result) => result,
                 Err(err) if err.is_instance_of::<PyIndexError>(py) => return None,
                 Err(err) => {
-                    eprintln!(
-                        "Python: Model implementation of row_data() threw an exception: {err}"
+                    crate::handle_unraisable(
+                        py,
+                        "Python: Model implementation of row_data() threw an exception".into(),
+                        err,
                     );
                     return None;
                 }
@@ -140,7 +148,11 @@ impl i_slint_core::model::Model for PyModelShared {
             ) {
                 Ok(pv) => Some(pv),
                 Err(err) => {
-                    eprintln!("Python: Model implementation of row_data() returned value that cannot be converted to Rust: {err}");
+                    crate::handle_unraisable(
+                        py,
+                        "Python: Model implementation of row_data() returned value that cannot be cast to usize".into(),
+                        err,
+                    );
                     None
                 }
             }
@@ -148,7 +160,7 @@ impl i_slint_core::model::Model for PyModelShared {
     }
 
     fn set_row_data(&self, row: usize, data: Self::Data) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let obj = self.self_ref.borrow();
             let Some(obj) = obj.as_ref() else {
                 eprintln!("Python: Model implementation is lacking self object (in set_row_data)");
@@ -165,8 +177,10 @@ impl i_slint_core::model::Model for PyModelShared {
             if let Err(err) =
                 obj.call_method1(py, "set_row_data", (row, type_collection.to_py_value(data)))
             {
-                eprintln!(
-                    "Python: Model implementation of set_row_data() threw an exception: {err}"
+                crate::handle_unraisable(
+                    py,
+                    "Python: Model implementation of set_row_data() threw an exception".into(),
+                    err,
                 );
             };
         });

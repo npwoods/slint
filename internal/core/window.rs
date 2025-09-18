@@ -293,6 +293,8 @@ pub struct InputMethodProperties {
     pub anchor_point: LogicalPosition,
     /// The type of input for the text edit.
     pub input_type: InputType,
+    /// The clip rect in window coordinates
+    pub clip_rect: Option<LogicalRect>,
 }
 
 /// This struct describes layout constraints of a resizable element, such as a window.
@@ -704,7 +706,6 @@ impl WindowInner {
             let root = match menubar_item {
                 None => item_tree.map(|item_tree| ItemRc::new(item_tree.clone(), 0)),
                 Some(menubar_item) => {
-                    assert_ne!(menubar_item.index(), 0, "ContextMenuInternal cannot be root");
                     event.translate(
                         menubar_item
                             .map_to_item_tree(Default::default(), &self.component())
@@ -1202,6 +1203,7 @@ impl WindowInner {
                 Some(x) => item_tree = x.item_tree().clone(),
             }
         };
+
         let parent_root_item_tree = root_of(parent_item.item_tree().clone());
         let (parent_window_adapter, position) = if let Some(parent_popup) = self
             .active_popups
@@ -1257,6 +1259,19 @@ impl WindowInner {
 
         let popup_id = self.next_popup_id.get();
         self.next_popup_id.set(self.next_popup_id.get().checked_add(1).unwrap());
+
+        // Close active popups before creating a new one.
+        let siblings: Vec<_> = self
+            .active_popups
+            .borrow()
+            .iter()
+            .filter(|p| p.parent_item == parent_item.downgrade())
+            .map(|p| p.popup_id)
+            .collect();
+
+        for sibling in siblings {
+            self.close_popup(sibling);
+        }
 
         let location = match parent_window_adapter
             .internal(crate::InternalToken)

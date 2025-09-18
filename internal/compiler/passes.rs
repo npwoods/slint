@@ -6,11 +6,11 @@ mod binding_analysis;
 mod border_radius;
 mod check_expressions;
 mod check_public_api;
-mod check_rotation;
 mod clip;
 mod collect_custom_fonts;
 mod collect_globals;
 mod collect_init_code;
+mod collect_libraries;
 mod collect_structs_and_enums;
 mod collect_subcomponents;
 mod compile_paths;
@@ -100,6 +100,7 @@ pub async fn run_passes(
     let raw_type_loader =
         keep_raw.then(|| crate::typeloader::snapshot_with_extra_doc(type_loader, doc).unwrap());
 
+    collect_libraries::collect_libraries(doc);
     collect_subcomponents::collect_subcomponents(doc);
     lower_tabwidget::lower_tabwidget(doc, type_loader, diag).await;
     lower_menus::lower_menus(doc, type_loader, diag).await;
@@ -147,7 +148,7 @@ pub async fn run_passes(
         z_order::reorder_by_z_order(component, diag);
         lower_property_to_element::lower_property_to_element(
             component,
-            "opacity",
+            core::iter::once("opacity"),
             core::iter::empty(),
             None,
             &SmolStr::new_static("Opacity"),
@@ -156,7 +157,7 @@ pub async fn run_passes(
         );
         lower_property_to_element::lower_property_to_element(
             component,
-            "cache-rendering-hint",
+            core::iter::once("cache-rendering-hint"),
             core::iter::empty(),
             None,
             &SmolStr::new_static("Layer"),
@@ -167,25 +168,28 @@ pub async fn run_passes(
         lower_shadows::lower_shadow_properties(component, &doc.local_registry, diag);
         lower_property_to_element::lower_property_to_element(
             component,
-            crate::typeregister::RESERVED_ROTATION_PROPERTIES[0].0,
-            crate::typeregister::RESERVED_ROTATION_PROPERTIES[1..]
+            crate::typeregister::RESERVED_TRANSFORM_PROPERTIES[..3]
                 .iter()
                 .map(|(prop_name, _)| *prop_name),
-            Some(&|e, prop| Expression::BinaryExpression {
-                lhs: Expression::PropertyReference(NamedReference::new(
-                    e,
-                    match prop {
-                        "rotation-origin-x" => SmolStr::new_static("width"),
-                        "rotation-origin-y" => SmolStr::new_static("height"),
-                        "rotation-angle" => return Expression::Invalid,
-                        _ => unreachable!(),
-                    },
-                ))
-                .into(),
-                op: '/',
-                rhs: Expression::NumberLiteral(2., Default::default()).into(),
+            crate::typeregister::RESERVED_TRANSFORM_PROPERTIES[3..]
+                .iter()
+                .map(|(prop_name, _)| *prop_name),
+            Some(&|e, prop| {
+                let prop_div_2 = |prop: &str| Expression::BinaryExpression {
+                    lhs: Expression::PropertyReference(NamedReference::new(e, prop.into())).into(),
+                    op: '/',
+                    rhs: Expression::NumberLiteral(2., Default::default()).into(),
+                };
+
+                match prop {
+                    "rotation-origin-x" => prop_div_2("width"),
+                    "rotation-origin-y" => prop_div_2("height"),
+                    "scale-x" | "scale-y" => Expression::NumberLiteral(1., Default::default()),
+                    "rotation-angle" => Expression::NumberLiteral(0., Default::default()),
+                    _ => unreachable!(),
+                }
             }),
-            &SmolStr::new_static("Rotate"),
+            &SmolStr::new_static("Transform"),
             &global_type_registry.borrow(),
             diag,
         );
@@ -206,6 +210,7 @@ pub async fn run_passes(
     }
 
     binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
+    collect_globals::mark_library_globals(doc);
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {
@@ -331,6 +336,5 @@ pub fn run_import_passes(
     purity_check::purity_check(doc, diag);
     focus_handling::replace_forward_focus_bindings_with_focus_functions(doc, diag);
     check_expressions::check_expressions(doc, diag);
-    check_rotation::check_rotation(doc, diag);
     unique_id::check_unique_id(doc, diag);
 }

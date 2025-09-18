@@ -3,6 +3,24 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
+## [1.13.1] - 2025-09-11
+
+ - Windows: Fixed flickering when updating the menu bar.
+ - LinuxKMS: Fixed build with just renderer-femtovg
+ - LinuxKMS: Fixed GPU based rendering on systems where the driver reported no DRM planes.
+ - Qt: use the cursor flash time from the config
+ - Fixed spurious Slint compiler error when using `ContextMenuArea` in component within a `if` or `for`
+ - C++: fixed the live preview feature missing the `slint_live_preview.h` header (#9335)
+ - FemtoVG: added support for conical gradients (#9334)
+ - FemtoVG: Fixed panic when using rendering notifiers in Wasm with WebGL.
+ - `SwipeGestureHandler`: improved thresholds and destection of move when embedded in another `SwipeGestureHandler`
+ - MCU: fix timer not starting if started before first call to `update_timers_and_animations`
+ - wasm: Fix sizing of the window based on the canvas size or the preferred size
+ - LSP: fix renaming elements id that have a `-` or `_` mismatch.
+ - live-preivew: allow to edit element id
+ - live-preview: search line edit for the library
+ - Slintpad: compress the snippet in the URL
+
 ## [1.13.0] - 2025-09-03
 
 ### General
@@ -2030,3 +2048,5 @@ as well as the [Rust migration guide for the `sixtyfps` crate](api/rs/slint/migr
 [1.11.0]: https://github.com/slint-ui/slint/releases/tag/v1.11.0
 [1.12.0]: https://github.com/slint-ui/slint/releases/tag/v1.12.0
 [1.12.1]: https://github.com/slint-ui/slint/releases/tag/v1.12.1
+[1.13.0]: https://github.com/slint-ui/slint/releases/tag/v1.13.0
+[1.13.1]: https://github.com/slint-ui/slint/releases/tag/v1.13.1

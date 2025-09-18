@@ -286,10 +286,11 @@ impl<'a> SkiaItemRenderer<'a> {
                             / skia_image.height() as f32,
                     ))
                     * Matrix::translate((-(tiled_offset.x as i32), -(tiled_offset.y as i32)));
-                if let Some(shader) =
-                    skia_image.make_subset(self.canvas.direct_context().as_mut(), &src).and_then(
-                        |i| i.to_shader((TileMode::Repeat, TileMode::Repeat), filter_mode, &matrix),
-                    )
+                if let Some(shader) = skia_image
+                    .make_subset(None, &src, skia_safe::image::RequiredProperties::default())
+                    .and_then(|i| {
+                        i.to_shader((TileMode::Repeat, TileMode::Repeat), filter_mode, &matrix)
+                    })
                 {
                     let mut paint = self.default_paint().unwrap_or_default();
                     paint.set_shader(shader);
@@ -919,6 +920,10 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
 
     fn rotate(&mut self, angle_in_degrees: f32) {
         self.canvas.rotate(angle_in_degrees, None);
+    }
+
+    fn scale(&mut self, x_factor: f32, y_factor: f32) {
+        self.canvas.scale((x_factor, y_factor));
     }
 
     fn apply_opacity(&mut self, opacity: f32) {

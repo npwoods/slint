@@ -65,14 +65,20 @@ impl PyTimer {
         &self,
         mode: PyTimerMode,
         interval: chrono::Duration,
-        callback: PyObject,
+        callback: Py<PyAny>,
     ) -> PyResult<()> {
         let interval = interval
             .to_std()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         self.timer.start(mode.into(), interval, move || {
-            Python::with_gil(|py| {
-                callback.call0(py).expect("unexpected failure running python timer callback");
+            Python::attach(|py| {
+                if let Err(err) = callback.call0(py) {
+                    crate::handle_unraisable(
+                        py,
+                        "unexpected failure running python timer callback".into(),
+                        err,
+                    );
+                }
             });
         });
         Ok(())
@@ -85,13 +91,19 @@ impl PyTimer {
     /// * `duration`: The duration from now until when the timer should fire.
     /// * `callback`: The function to call when the time has been reached or exceeded.
     #[staticmethod]
-    fn single_shot(duration: chrono::Duration, callback: PyObject) -> PyResult<()> {
+    fn single_shot(duration: chrono::Duration, callback: Py<PyAny>) -> PyResult<()> {
         let duration = duration
             .to_std()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         i_slint_core::timers::Timer::single_shot(duration, move || {
-            Python::with_gil(|py| {
-                callback.call0(py).expect("unexpected failure running python timer callback");
+            Python::attach(|py| {
+                if let Err(err) = callback.call0(py) {
+                    crate::handle_unraisable(
+                        py,
+                        "unexpected failure running python singleshot timer callback".into(),
+                        err,
+                    );
+                }
             });
         });
         Ok(())

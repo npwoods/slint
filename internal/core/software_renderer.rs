@@ -928,6 +928,10 @@ impl RendererSealed for SoftwareRenderer {
         }
         Ok(target_buffer_with_alpha)
     }
+
+    fn supports_transformations(&self) -> bool {
+        false
+    }
 }
 
 fn render_window_frame_by_line(
@@ -2492,6 +2496,10 @@ impl<T: ProcessScene> crate::item_rendering::ItemRenderer for SceneBuilder<'_, T
 
     fn rotate(&mut self, _angle_in_degrees: f32) {
         // TODO (#6068)
+    }
+
+    fn scale(&mut self, _x_factor: f32, _y_factor: f32) {
+        // TODO
     }
 
     fn apply_opacity(&mut self, opacity: f32) {
