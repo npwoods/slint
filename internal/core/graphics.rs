@@ -155,16 +155,43 @@ pub struct FontRequest {
     pub italic: bool,
 }
 
-#[cfg(feature = "shared-fontdb")]
+#[cfg(feature = "shared-fontique")]
 impl FontRequest {
-    /// Returns the relevant properties of this FontRequest propagated into a fontdb Query.
-    pub fn to_fontdb_query(&self) -> i_slint_common::sharedfontdb::fontdb::Query<'_> {
-        use i_slint_common::sharedfontdb::fontdb::{Query, Style, Weight};
-        Query {
-            style: if self.italic { Style::Italic } else { Style::Normal },
-            weight: Weight(self.weight.unwrap_or(/* CSS normal*/ 400) as _),
+    /// Attempts to query the fontique font collection for a matching font.
+    pub fn query_fontique(&self) -> Option<i_slint_common::sharedfontique::fontique::QueryFont> {
+        use i_slint_common::sharedfontique::{self, fontique};
+
+        let mut collection = sharedfontique::get_collection();
+
+        let mut query = collection.query();
+        query.set_families(std::iter::once(if let Some(family) = self.family.as_ref() {
+            fontique::QueryFamily::from(family.as_str())
+        } else {
+            fontique::QueryFamily::Generic(fontique::GenericFamily::SansSerif)
+        }));
+
+        query.set_attributes(fontique::Attributes {
+            weight: self
+                .weight
+                .as_ref()
+                .map(|&weight| fontique::FontWeight::new(weight as f32))
+                .unwrap_or_default(),
+            style: if self.italic {
+                fontique::FontStyle::Italic
+            } else {
+                fontique::FontStyle::Normal
+            },
             ..Default::default()
-        }
+        });
+
+        let mut font = None;
+
+        query.matches_with(|queried_font| {
+            font = Some(queried_font.clone());
+            fontique::QueryStatus::Stop
+        });
+
+        font
     }
 }
 

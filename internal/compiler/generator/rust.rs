@@ -180,7 +180,10 @@ pub fn generate(
             .iter()
             .map(|(symbol, library_info)| {
                 let ident = qualified_name_ident(symbol, library_info);
-                quote!(pub use #ident;)
+                quote!(
+                    #[allow(unused_imports)]
+                    pub use #ident;
+                )
             })
             .chain(doc_used_types.library_global_imports.iter().map(|(symbol, library_info)| {
                 let ident = qualified_name_ident(symbol, library_info);
@@ -2412,7 +2415,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                     quote!(sp::PathData::Commands(#f))
                 }
                 (_, Type::Void) => {
-                    quote!(#f;)
+                    quote!({#f;})
                 }
                 _ => f,
             }
@@ -3194,6 +3197,10 @@ fn compile_builtin_function_call(
             quote!((#a1 as f64).powf(#a2 as f64))
         }
         BuiltinFunction::Exp => quote!((#(#a)* as f64).exp()),
+        BuiltinFunction::Sign => quote!({
+            let x: f64 = (#(#a)*) as f64;
+            if x == 0.0 { 0.0 } else { x.signum() }
+        }),
         BuiltinFunction::ToFixed => {
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!(sp::shared_string_from_number_fixed(#a1 as f64, (#a2 as i32).max(0) as usize))

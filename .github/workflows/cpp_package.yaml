@@ -28,12 +28,10 @@ jobs:
             CARGO_INCREMENTAL: false
         strategy:
             matrix:
-                os: [ubuntu-22.04, macOS-13, macos-14, windows-2022]
+                os: [ubuntu-22.04, macos-14, windows-2022]
                 include:
                     - os: ubuntu-22.04
                       package_suffix: linux
-                    - os: macOS-13
-                      package_suffix: macos-x86_64
                     - os: macos-14
                       package_suffix: macos-aarch64
                     - os: windows-2022
@@ -160,7 +158,7 @@ jobs:
             - name: install espup
               run: |
                   cargo binstall espup
-                  espup install
+                  espup install -v "1.88.0" # Pinned because of https://github.com/esp-rs/rust/issues/266
                   rustup default esp
             - name: add esp toolchains to PATH
               if: runner.os != 'Windows'
@@ -237,7 +235,7 @@ jobs:
             CARGO_INCREMENTAL: false
         strategy:
             matrix:
-                os: [ubuntu-22.04, macOS-13, macos-14, windows-2022]
+                os: [ubuntu-22.04, macos-14, windows-2022]
                 include:
                     - os: ubuntu-22.04
                       package_suffix: Linux-x86_64
@@ -245,20 +243,17 @@ jobs:
                     - os: ubuntu-22.04-arm
                       package_suffix: Linux-aarch64
                       cargo_target: aarch64-unknown-linux-gnu
-                    - os: macOS-13
-                      package_suffix: Darwin-x86_64
-                      cargo_target: x86_64-apple-darwin
                     - os: macos-14
                       package_suffix: Darwin-arm64
                       cargo_target: aarch64-apple-darwin
                     - os: windows-2022
                       package_suffix: Windows-AMD64
                       msvc_arch: x64
-                      cargo_target: x86_64-pc-windows-gnu
+                      cargo_target: x86_64-pc-windows-msvc
                     - os: windows-11-arm
                       package_suffix: Windows-ARM64
                       msvc_arch: arm64
-                      cargo_target: aarch64-pc-windows-gnu
+                      cargo_target: aarch64-pc-windows-msvc
 
         runs-on: ${{ matrix.os }}
         steps:

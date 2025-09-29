@@ -16,7 +16,11 @@ from typing import Any
 import pathlib
 from .models import ListModel, Model
 from .slint import Image, Color, Brush, Timer, TimerMode
+from .loop import SlintEventLoop
 from pathlib import Path
+from collections.abc import Coroutine
+import asyncio
+import gettext
 
 Struct = native.PyStruct
 
@@ -52,7 +56,9 @@ class Component:
 
     def run(self) -> None:
         """Shows the window, runs the event loop, hides it when the loop is quit, and returns."""
-        self.__instance__.run()
+        self.show()
+        run_event_loop()
+        self.hide()
 
 
 def _normalize_prop(name: str) -> str:
@@ -426,6 +432,87 @@ def set_xdg_app_id(app_id: str) -> None:
     native.set_xdg_app_id(app_id)
 
 
+quit_event = asyncio.Event()
+
+
+def run_event_loop(
+    main_coro: typing.Optional[Coroutine[None, None, None]] = None,
+) -> None:
+    """Runs the main Slint event loop. If specified, the coroutine `main_coro` is run in parallel. The event loop doesn't
+    terminate when the coroutine finishes, it terminates when calling `quit_event_loop()`.
+
+    Example:
+    ```python
+    import slint
+
+    ...
+    image_model: slint.ListModel[slint.Image] = slint.ListModel()
+    ...
+
+    async def main_receiver(image_model: slint.ListModel) -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://some.server/svg-image") as response:
+                svg = await response.read()
+                image = slint.Image.from_svg_data(svg)
+                image_model.append(image)
+
+    ...
+    slint.run_event_loop(main_receiver(image_model))
+    ```
+
+    """
+
+    async def run_inner() -> None:
+        global quit_event
+        loop = typing.cast(SlintEventLoop, asyncio.get_event_loop())
+
+        quit_task = asyncio.ensure_future(quit_event.wait(), loop=loop)
+
+        tasks: typing.List[asyncio.Task[typing.Any]] = [quit_task]
+
+        main_task = None
+        if main_coro:
+            main_task = loop.create_task(main_coro)
+            tasks.append(main_task)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        if main_task is not None and main_task in done:
+            main_task.result()  # propagate exception if thrown
+            if quit_task in pending:
+                await quit_event.wait()
+
+    global quit_event
+    quit_event = asyncio.Event()
+    asyncio.run(run_inner(), debug=False, loop_factory=SlintEventLoop)
+
+
+def quit_event_loop() -> None:
+    """Quits the running event loop in the next event processing cycle. This will make an earlier call to `run_event_loop()`
+    return."""
+    global quit_event
+    quit_event.set()
+
+
+def init_translations(translations: typing.Optional[gettext.GNUTranslations]) -> None:
+    """Installs the specified translations object to handle translations originating from the Slint code.
+
+    Example:
+    ```python
+    import gettext
+    import slint
+
+    translations_dir = os.path.join(os.path.dirname(__file__), "lang")
+    try:
+        translations = gettext.translation("my_app", translations_dir, ["de"])
+        slint.install_translations(translations)
+    except OSError:
+        pass
+    ```
+    """
+    native.init_translations(translations)
+
+
 __all__ = [
     "CompileError",
     "Component",
@@ -440,4 +527,7 @@ __all__ = [
     "TimerMode",
     "set_xdg_app_id",
     "callback",
+    "run_event_loop",
+    "quit_event_loop",
+    "init_translations",
 ]
