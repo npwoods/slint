@@ -49,7 +49,7 @@ jobs:
         strategy:
             matrix:
                 os: [ubuntu-22.04, macos-14, windows-2022]
-                rust_version: [stable, "1.85"]
+                rust_version: [stable, "1.88"]
                 include:
                     - os: windows-2022
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
@@ -60,13 +60,11 @@ jobs:
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
                     - os: ubuntu-22.04
                       rust_version: "nightly"
-                    # Bevy requires 1.86, won't compile with 1.85
-                    - rust_version: "1.85"
-                      maybe_exclude_bevy: "--exclude bevy-example"
                 exclude:
+                    # There is only a limited amount of mac worker machine allocated and this is currently the bottleneck, so disable it
                     - os: macos-14
-                      rust_version: "1.85"
-                    # We already test 1.85 and nightly. Stable is in the middle and already covered by other jobs
+                      rust_version: "1.88"
+                    # We already test 1.88 and nightly. Stable is in the middle and already covered by other jobs
                     - os: ubuntu-22.04
                       rust_version: "stable"
 
@@ -145,9 +143,9 @@ jobs:
                 node-version: 20
                 package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - uses: ./.github/actions/setup-rust
               with:
                   key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
@@ -204,7 +202,7 @@ jobs:
               with:
                   python-version: "3.12"
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - uses: fjwillemsen/setup-nox2@v3.0.0
             - name: Run python tests
               working-directory: api/python/slint
@@ -274,7 +272,7 @@ jobs:
             matrix:
                 include:
                     - os: macos-14
-                      rust_version: "1.85"
+                      rust_version: "1.88"
                     - os: windows-2022
                       rust_version: "nightly"
                     - os: ubuntu-22.04
@@ -363,9 +361,9 @@ jobs:
         runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - uses: Swatinem/rust-cache@v2
               with:
                 key: "vsce_1" # increment this to bust the cache if needed
@@ -616,6 +614,11 @@ jobs:
         runs-on: ubuntu-22.04
         container: espressif/idf:release-v5.2
         steps:
+            - name: Fix up pydantic regression (https://github.com/espressif/idf-component-manager/issues/97#issuecomment-3380777944)
+              run: |
+                  . ${IDF_PATH}/export.sh
+                  cd $IDF_PYTHON_ENV_PATH
+                  bin/pip install pydantic==2.11.10
             - uses: actions/checkout@v5
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
@@ -623,7 +626,6 @@ jobs:
                   default: true
                   buildtargets: esp32
                   ldproxy: false
-                  version: "1.88.0" # Pinned because of https://github.com/esp-rs/rust/issues/266
             - uses: Swatinem/rust-cache@v2
             - name: Build and Test Printer demo
               shell: bash
@@ -694,9 +696,9 @@ jobs:
                 node-version: 20
                 package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Run pnpm install
               working-directory: tools/figma-inspector
               run: pnpm install --frozen-lockfile

@@ -170,7 +170,7 @@ pub trait WindowAdapterInternal {
     fn register_item_tree(&self) {}
 
     /// This function is called by the generated code when a component and therefore its tree of items are destroyed. The
-    /// implementation typically uses this to free the underlying graphics resources cached via [`crate::graphics::RenderingCache`].
+    /// implementation typically uses this to free the underlying graphics resources.
     fn unregister_item_tree(
         &self,
         _component: ItemTreeRef,
@@ -196,7 +196,7 @@ pub trait WindowAdapterInternal {
     fn input_method_request(&self, _: InputMethodRequest) {}
 
     /// Return self as any so the backend can upcast
-    // TODO: consider using the as_any crate, or deriving the traint from Any to provide a better default
+    // TODO: consider using the as_any crate, or deriving the trait from Any to provide a better default
     fn as_any(&self) -> &dyn core::any::Any {
         &()
     }
@@ -801,7 +801,7 @@ impl WindowInner {
 
         // Check capture_key_event (going from window to focused item):
         for i in item_list.iter().rev() {
-            if i.borrow().as_ref().capture_key_event(&event, &self.window_adapter(), &i)
+            if i.borrow().as_ref().capture_key_event(&event, &self.window_adapter(), i)
                 == crate::input::KeyEventResult::EventAccepted
             {
                 crate::properties::ChangeTracker::run_change_handlers();
@@ -930,7 +930,7 @@ impl WindowInner {
 
     /// Take the focus_item out of this Window
     ///
-    /// This sends the event whiwh must be either FocusOut or WindowLostFocus for popups
+    /// This sends the event which must be either FocusOut or WindowLostFocus for popups
     fn take_focus_item(&self, event: &FocusEvent) -> Option<ItemRc> {
         let focus_item = self.focus_item.take();
         assert!(matches!(event, FocusEvent::FocusOut(_)));
@@ -990,7 +990,7 @@ impl WindowInner {
             visited.push(current_item.clone());
             current_item = forward(current_item);
 
-            if visited.iter().any(|i| *i == current_item) {
+            if visited.contains(&current_item) {
                 return None; // Nothing to do: We took the focus_item already
             }
         }
@@ -1093,9 +1093,9 @@ impl WindowInner {
     /// Returns None if no component is set yet.
     pub fn draw_contents<T>(
         &self,
-        render_components: impl FnOnce(&[(&ItemTreeRc, LogicalPoint)]) -> T,
+        render_components: impl FnOnce(&[(ItemTreeWeak, LogicalPoint)]) -> T,
     ) -> Option<T> {
-        let component_rc = self.try_component()?;
+        let component_weak = ItemTreeRc::downgrade(&self.try_component()?);
         Some(self.pinned_fields.as_ref().project_ref().redraw_tracker.evaluate_as_dependency_root(
             || {
                 if !self
@@ -1104,17 +1104,18 @@ impl WindowInner {
                     .iter()
                     .any(|p| matches!(p.location, PopupWindowLocation::ChildWindow(..)))
                 {
-                    render_components(&[(&component_rc, LogicalPoint::default())])
+                    render_components(&[(component_weak, LogicalPoint::default())])
                 } else {
                     let borrow = self.active_popups.borrow();
-                    let mut cmps = Vec::with_capacity(borrow.len() + 1);
-                    cmps.push((&component_rc, LogicalPoint::default()));
+                    let mut item_trees = Vec::with_capacity(borrow.len() + 1);
+                    item_trees.push((component_weak, LogicalPoint::default()));
                     for popup in borrow.iter() {
                         if let PopupWindowLocation::ChildWindow(location) = &popup.location {
-                            cmps.push((&popup.component, *location));
+                            item_trees.push((ItemTreeRc::downgrade(&popup.component), *location));
                         }
                     }
-                    render_components(&cmps)
+                    drop(borrow);
+                    render_components(&item_trees)
                 }
             },
         ))
@@ -1750,6 +1751,8 @@ pub mod ffi {
                     crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
                     #[cfg(feature = "unstable-wgpu-26")]
                     crate::api::GraphicsAPI::WGPU26 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                    #[cfg(feature = "unstable-wgpu-27")]
+                    crate::api::GraphicsAPI::WGPU27 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                 };
                 (self.callback)(state, cpp_graphics_api, self.user_data)
             }
@@ -1900,9 +1903,9 @@ pub mod ffi {
         menu_instance: &vtable::VRc<MenuVTable>,
     ) {
         let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-        window_adapter
-            .internal(crate::InternalToken)
-            .map(|x| x.setup_menubar(menu_instance.clone()));
+        if let Some(x) = window_adapter.internal(crate::InternalToken) {
+            x.setup_menubar(menu_instance.clone())
+        }
     }
 
     /// Show a native context menu

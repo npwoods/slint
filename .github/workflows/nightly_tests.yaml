@@ -17,6 +17,11 @@ jobs:
         runs-on: ubuntu-22.04
         container: espressif/idf:${{ matrix.esp-idf-target }}
         steps:
+            - name: Fix up pydantic regression (https://github.com/espressif/idf-component-manager/issues/97#issuecomment-3380777944)
+              run: |
+                  . ${IDF_PATH}/export.sh
+                  cd $IDF_PYTHON_ENV_PATH
+                  bin/pip install pydantic==2.11.10
             - uses: actions/checkout@v5
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
@@ -24,7 +29,6 @@ jobs:
                   default: true
                   buildtargets: esp32
                   ldproxy: false
-                  version: "1.88.0" # Pinned because of https://github.com/esp-rs/rust/issues/266
             - uses: Swatinem/rust-cache@v2
             - name: Build and Test Printer demo
               shell: bash
@@ -198,6 +202,23 @@ jobs:
               run: cargo build
               working-directory: examples/bevy
 
+    android_wgpu:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - name: Install Android API level 30
+              run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
+            - uses: dtolnay/rust-toolchain@stable
+            - name: Install cargo-apk
+              run: cargo install cargo-apk
+            - uses: ./.github/actions/setup-rust
+              with:
+                  target: aarch64-linux-android
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: ./.github/actions/install-skia-dependencies
+            - name: Build wgpu_texture demo
+              run: cargo apk build -p wgpu_texture --target aarch64-linux-android --lib
+
     uvx_slint_compiler:
         strategy:
             matrix:
@@ -206,7 +227,7 @@ jobs:
         steps:
             - uses: actions/checkout@v5
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - name: Run slint compiler via uxv
               working-directory: api/python/compiler
               env:

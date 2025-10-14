@@ -17,6 +17,7 @@ mod compile_paths;
 mod const_propagation;
 mod deduplicate_property_read;
 mod default_geometry;
+mod deprecated_rotation_origin;
 #[cfg(feature = "software-renderer")]
 mod embed_glyphs;
 mod embed_images;
@@ -55,8 +56,9 @@ mod visible;
 mod z_order;
 
 use crate::expression_tree::Expression;
-use crate::namedreference::NamedReference;
 use smol_str::SmolStr;
+
+pub use binding_analysis::GlobalAnalysis;
 
 pub fn ignore_debug_hooks(expr: &Expression) -> &Expression {
     let mut expr = expr;
@@ -141,6 +143,7 @@ pub async fn run_passes(
 
     doc.visit_all_used_components(|component| {
         border_radius::handle_border_radius(component, diag);
+        deprecated_rotation_origin::handle_rotation_origin(component, diag);
         flickable::handle_flickable(component, &global_type_registry.borrow());
         lower_layout::lower_layouts(component, type_loader, &style_metrics, diag);
         default_geometry::default_geometry(component, diag);
@@ -166,30 +169,8 @@ pub async fn run_passes(
         );
         visible::handle_visible(component, &global_type_registry.borrow(), diag);
         lower_shadows::lower_shadow_properties(component, &doc.local_registry, diag);
-        lower_property_to_element::lower_property_to_element(
+        lower_property_to_element::lower_transform_properties(
             component,
-            crate::typeregister::RESERVED_TRANSFORM_PROPERTIES[..3]
-                .iter()
-                .map(|(prop_name, _)| *prop_name),
-            crate::typeregister::RESERVED_TRANSFORM_PROPERTIES[3..]
-                .iter()
-                .map(|(prop_name, _)| *prop_name),
-            Some(&|e, prop| {
-                let prop_div_2 = |prop: &str| Expression::BinaryExpression {
-                    lhs: Expression::PropertyReference(NamedReference::new(e, prop.into())).into(),
-                    op: '/',
-                    rhs: Expression::NumberLiteral(2., Default::default()).into(),
-                };
-
-                match prop {
-                    "rotation-origin-x" => prop_div_2("width"),
-                    "rotation-origin-y" => prop_div_2("height"),
-                    "scale-x" | "scale-y" => Expression::NumberLiteral(1., Default::default()),
-                    "rotation-angle" => Expression::NumberLiteral(0., Default::default()),
-                    _ => unreachable!(),
-                }
-            }),
-            &SmolStr::new_static("Transform"),
             &global_type_registry.borrow(),
             diag,
         );
@@ -209,7 +190,8 @@ pub async fn run_passes(
         doc.used_types.borrow_mut().sub_components.clear();
     }
 
-    binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
+    let global_analysis =
+        binding_analysis::binding_analysis(doc, &type_loader.compiler_config, diag);
     collect_globals::mark_library_globals(doc);
     unique_id::assign_unique_id(doc);
 
@@ -232,7 +214,7 @@ pub async fn run_passes(
     doc.visit_all_used_components(|component| {
         if !diag.has_errors() {
             // binding loop causes panics in const_propagation
-            const_propagation::const_propagation(component);
+            const_propagation::const_propagation(component, &global_analysis);
         }
         deduplicate_property_read::deduplicate_property_read(component);
         if !component.is_global() {

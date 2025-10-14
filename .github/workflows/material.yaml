@@ -35,6 +35,7 @@ jobs:
   wasm_demo:
       uses: ./.github/workflows/wasm_gallery.yaml
   apk_demo:
+      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       uses: ./.github/workflows/apk_gallery.yaml
       secrets:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -84,9 +85,9 @@ jobs:
         shell: bash
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - uses: pnpm/action-setup@v4.1.0
+      - uses: pnpm/action-setup@v4.2.0
         with:
-          version: 10.14.0
+          version: 10.18.2
       - name: Take screenshots
         run: cargo run -p slint-docsnapper -- -Lmaterial=$PWD/src/material.slint docs
         working-directory: ui-libraries/material
@@ -99,6 +100,7 @@ jobs:
           name: wasm_gallery
           path: ui-libraries/material/docs/dist/wasm
       - uses: actions/download-artifact@v5
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         with:
           name: apk_gallery
           path: ui-libraries/material/docs/dist/apk

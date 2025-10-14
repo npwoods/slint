@@ -71,6 +71,9 @@ export component ResettingLineEdit {
                     // self.text = root.default-text;
                     root.can-compile = true;
                 }
+                if self.has_focus {
+                    self.select-all();
+                }
             }
         }
     }
@@ -258,7 +261,7 @@ export component ChildIndicator inherits Rectangle {
         colorize: Palette.foreground;
         visible: expand.has-hover || root.control-hover;
         source: Icons.chevron-down;
-        rotation-angle: root.open ? 0deg : -90deg;
+        transform-rotation: root.open ? 0deg : -90deg;
     }
 
     expand := TouchArea {
@@ -350,13 +353,6 @@ export component ViewHeader inherits Rectangle {
 export component SecondaryContent inherits Rectangle {
     in property <bool> enabled;
     in property <bool> open: false;
-    in property <bool> has-code-action: true;
-    in property <bool> has-reset-action: true;
-
-    callback reset();
-
-    callback code-action();
-    callback reset-action();
 
     background: Palette.background;
     clip: true;
@@ -376,27 +372,6 @@ export component SecondaryContent inherits Rectangle {
             spacing: EditorSpaceSettings.default-padding;
 
             @children
-
-            HorizontalLayout {
-                spacing: EditorSpaceSettings.default-spacing;
-
-                ResetButton {
-                    height: root.has-reset-action ? self.preferred-height : 0px;
-                    enabled: root.enabled;
-                    clicked() => {
-                        root.reset-action();
-                        root.reset();
-                    }
-                }
-
-                CodeButton {
-                    height: root.has-code-action ? self.preferred-height : 0px;
-                    enabled: root.enabled;
-                    clicked() => {
-                        root.code-action();
-                    }
-                }
-            }
         }
     }
 }

@@ -39,15 +39,13 @@ component HeaderItemTemplate {
             width: 10px;
             colorize: Palette.foreground;
             source: Icons.chevron-down;
-            rotation-origin-x: self.width / 2;
-            rotation-origin-y: self.height / 2;
             states [
                 closed when !root.open: {
-                    rotation-angle: -0.25turn;
+                    transform-rotation: -0.25turn;
                 }
             ]
 
-            animate rotation-angle { duration: EditorAnimationSettings.rotation-duration; }
+            animate transform-rotation { duration: EditorAnimationSettings.rotation-duration; }
         }
 
         BodyText {

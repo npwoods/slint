@@ -3,7 +3,7 @@
 
 use i_slint_core::api::{GraphicsAPI, PhysicalSize as PhysicalWindowSize, Window};
 use i_slint_core::graphics::RequestedGraphicsAPI;
-use i_slint_core::item_rendering::DirtyRegion;
+use i_slint_core::partial_renderer::DirtyRegion;
 use i_slint_core::platform::PlatformError;
 
 use std::cell::RefCell;
@@ -186,6 +186,8 @@ impl super::Surface for WGPUSurface {
     ) -> Option<skia_safe::Image> {
         let texture = match any_wgpu_texture {
             i_slint_core::graphics::WGPUTexture::WGPU26Texture(texture) => texture.clone(),
+            #[cfg(feature = "unstable-wgpu-27")]
+            i_slint_core::graphics::WGPUTexture::WGPU27Texture(..) => return None,
         };
 
         // Skia won't submit commands right away, so remember the texture and transition before

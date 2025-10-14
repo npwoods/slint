@@ -26,9 +26,8 @@ export component TestCase  {
         y: -5phx;
         width: 200phx;
         height: 10phx;
-        rotation-angle: 45deg;
-        rotation-origin-x: 0phx;
-        rotation-origin-y: 5phx;
+        transform-rotation: 45deg;
+        transform-origin: { x: 0phx, y: 5phx };
         background: area1.has-hover? green : red;
         area1 := TouchArea {
             clicked => {
@@ -105,18 +104,16 @@ export component TestCase  {
         y: 100phx;
         width: 200phx;
         height: 10phx;
-        rotation-angle: 75deg;
-        rotation-origin-x: 0phx;
-        rotation-origin-y: 0phx;
+        transform-rotation: 75deg;
+        transform-origin: { x: 0phx, y: 0phx };
         background: blue;
          Rectangle {
             x: 175phx;
             y: 0phx;
             width: 100phx;
             height: 10phx;
-            rotation-angle: -90deg;
-            rotation-origin-x: 0phx;
-            rotation-origin-y: 0phx;
+            transform-rotation: -90deg;
+            transform-origin: { x: 0phx, y: 0phx };
             background: green;
             area2 := TouchArea {
                 clicked => {

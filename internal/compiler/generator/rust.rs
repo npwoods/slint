@@ -33,7 +33,7 @@ use std::str::FromStr;
 
 #[derive(Clone)]
 struct RustGeneratorContext {
-    /// Path to the SharedGlobals structure that contains the global and the WindowAdaptor
+    /// Path to the SharedGlobals structure that contains the global and the WindowAdapter
     global_access: TokenStream,
 }
 
@@ -229,7 +229,7 @@ pub fn generate(
         .iter_enumerated()
         .filter(|(_, glob)| glob.from_library)
         .map(|(_idx, glob)| generate_global_getters(glob, &llr));
-    let shared_globals = generate_shared_globals(&doc, &llr, compiler_config);
+    let shared_globals = generate_shared_globals(doc, &llr, compiler_config);
     let globals_ids = llr.globals.iter().filter(|glob| glob.exported).flat_map(|glob| {
         std::iter::once(ident(&glob.name)).chain(glob.aliases.iter().map(|x| ident(x)))
     });
@@ -454,10 +454,10 @@ fn generate_shared_globals(
         .filter(|g| g.from_library)
         .map(|g| {
             let library_info = doc.library_exports.get(g.name.as_str()).unwrap();
-            let shared_gloabls_var_name =
+            let shared_globals_var_name =
                 format_ident!("library_{}_shared_globals", library_info.name);
             let global_name = format_ident!("global_{}", ident(&g.name));
-            quote!( #shared_gloabls_var_name.#global_name )
+            quote!( #shared_globals_var_name.#global_name )
         })
         .collect::<Vec<_>>();
     let pub_token = if compiler_config.library_name.is_some() { quote!(pub) } else { quote!() };
@@ -468,18 +468,18 @@ fn generate_shared_globals(
         .filter_map(|import| import.library_info.clone())
         .map(|library_info| {
             let struct_name = format_ident!("{}SharedGlobals", library_info.name);
-            let shared_gloabls_var_name =
+            let shared_globals_var_name =
                 format_ident!("library_{}_shared_globals", library_info.name);
             let shared_globals_type_name = if let Some(module) = library_info.module {
                 let package = ident(&library_info.package);
                 let module = ident(&module);
-                //(quote!(#shared_gloabls_var_name),quote!(let #shared_gloabls_var_name = #package::#module::#shared_globals_type_name::new(root_item_tree_weak.clone());))
+                //(quote!(#shared_gloabls_var_name),quote!(let #shared_globals_var_name = #package::#module::#shared_globals_type_name::new(root_item_tree_weak.clone());))
                 quote!(#package::#module::#struct_name)
             } else {
                 let package = ident(&library_info.package);
                 quote!(#package::#struct_name)
             };
-            (quote!(#shared_gloabls_var_name), shared_globals_type_name)
+            (quote!(#shared_globals_var_name), shared_globals_type_name)
         })
         .unzip();
 
@@ -1663,8 +1663,7 @@ fn generate_item_tree(
         quote!(false)
     };
 
-    let parent_item_expression = parent_ctx.and_then(|parent| {
-        Some(parent.repeater_index.map_or_else(|| {
+    let parent_item_expression = parent_ctx.map(|parent| parent.repeater_index.map_or_else(|| {
             // No repeater index, this could be a PopupWindow
             quote!(if let Some(parent_rc) = self.parent.clone().upgrade() {
                        let parent_origin = sp::VRcMapped::origin(&parent_rc);
@@ -1684,8 +1683,7 @@ fn generate_item_tree(
                 *_result = sp::ItemRc::new(parent_component, parent_index + #sub_component_offset - 1)
                     .downgrade();
             })
-        }))
-    });
+        }));
     let mut item_tree_array = vec![];
     let mut item_array = vec![];
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
@@ -2871,11 +2869,18 @@ fn compile_builtin_function_call(
                 arguments
             {
                 let mut parent_ctx = ctx;
-                let mut component_access_tokens = quote!(_self);
+                let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
                 if let llr::PropertyReference::InParent { level, .. } = parent_ref {
                     for _ in 0..level.get() {
-                        component_access_tokens =
-                            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
+                        component_access_tokens = match component_access_tokens {
+                            MemberAccess::Option(token_stream) => MemberAccess::Option(
+                                quote!(#token_stream.and_then(|a| a.as_pin_ref().parent.upgrade())),
+                            ),
+                            MemberAccess::Direct(token_stream) => {
+                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                            }
+                            _ => unreachable!(),
+                        };
                         parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
                     }
                 }
@@ -2896,7 +2901,7 @@ fn compile_builtin_function_call(
                 let close_policy = compile_expression(close_policy, ctx);
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
-                quote!({
+                component_access_tokens.then(|component_access_tokens| quote!({
                     let popup_instance = #popup_window_id::new(#component_access_tokens.self_weak.get().unwrap().clone()).unwrap();
                     let popup_instance_vrc = sp::VRc::map(popup_instance.clone(), |x| x);
                     let position = { let _self = popup_instance_vrc.as_pin_ref(); #position };
@@ -2913,7 +2918,7 @@ fn compile_builtin_function_call(
                         ))
                     );
                     #popup_window_id::user_init(popup_instance_vrc.clone());
-                })
+                }))
             } else {
                 panic!("internal error: invalid args to ShowPopupWindow {arguments:?}")
             }
@@ -2923,18 +2928,34 @@ fn compile_builtin_function_call(
                 arguments
             {
                 let mut parent_ctx = ctx;
-                let mut component_access_tokens = quote!(_self);
+                let mut component_access_tokens = MemberAccess::Direct(quote!(_self));
                 if let llr::PropertyReference::InParent { level, .. } = parent_ref {
                     for _ in 0..level.get() {
-                        component_access_tokens =
-                            quote!(#component_access_tokens.parent.upgrade().unwrap().as_pin_ref());
+                        component_access_tokens = match component_access_tokens {
+                            MemberAccess::Option(token_stream) => MemberAccess::Option(
+                                quote!(#token_stream.and_then(|a| a.parent.upgrade())),
+                            ),
+                            MemberAccess::Direct(token_stream) => {
+                                MemberAccess::Option(quote!(#token_stream.parent.upgrade()))
+                            }
+                            _ => unreachable!(),
+                        };
                         parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
                     }
                 }
                 let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
+                let current_id_tokens = match component_access_tokens {
+                    MemberAccess::Option(token_stream) => quote!(
+                        #token_stream.and_then(|a| a.as_pin_ref().#popup_id_name.take())
+                    ),
+                    MemberAccess::Direct(token_stream) => {
+                        quote!(#token_stream.as_ref().#popup_id_name.take())
+                    }
+                    _ => unreachable!(),
+                };
                 quote!(
-                    if let Some(current_id) = #component_access_tokens.#popup_id_name.take() {
+                    if let Some(current_id) = #current_id_tokens {
                         sp::WindowInner::from_pub(#window_adapter_tokens.window()).close_popup(current_id);
                     }
                 )
@@ -3197,10 +3218,6 @@ fn compile_builtin_function_call(
             quote!((#a1 as f64).powf(#a2 as f64))
         }
         BuiltinFunction::Exp => quote!((#(#a)* as f64).exp()),
-        BuiltinFunction::Sign => quote!({
-            let x: f64 = (#(#a)*) as f64;
-            if x == 0.0 { 0.0 } else { x.signum() }
-        }),
         BuiltinFunction::ToFixed => {
             let (a1, a2) = (a.next().unwrap(), a.next().unwrap());
             quote!(sp::shared_string_from_number_fixed(#a1 as f64, (#a2 as i32).max(0) as usize))
@@ -3414,7 +3431,7 @@ fn compile_builtin_function_call(
                 let ident = format_ident!("timer{}", *timer_index as usize);
                 quote!(_self.#ident.restart())
             } else {
-                panic!("internal error: invalid args to RetartTimer {arguments:?}")
+                panic!("internal error: invalid args to RestartTimer {arguments:?}")
             }
         }
     }
@@ -3665,7 +3682,7 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
 fn compile_expression_no_parenthesis(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
     fn extract_single_group(stream: &TokenStream) -> Option<TokenStream> {
         let mut iter = stream.clone().into_iter();
-        let Some(elem) = iter.next() else { return None };
+        let elem = iter.next()?;
         let TokenTree::Group(elem) = elem else { return None };
         if elem.delimiter() != proc_macro2::Delimiter::Parenthesis {
             return None;

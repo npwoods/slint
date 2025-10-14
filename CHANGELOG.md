@@ -15,28 +15,43 @@ All notable changes to this project are documented in this file.
  - Wasm: fix mac-specific shortcut when detecting macOs via browser User-Agent
  - macOs: Implement Cmd+Backspace to delete to the start of a line in a TextInput
  - muda: On Windows, force the menu bar to be redrawn after menus are rebuilt (#9435)
+ - use `fontique` and `parley` crate for text layout
+ - Fixed maximum size of empty layout with alignment
+ - partial renderer: Don't mark region dirty if the geometry is dirty but hasn't changed
 
 ### Slint Language
 
  - Added support for rotation and scaling of all elements and their children
  - GridLayout: allow access to row/col/rowspan/colspan properties from other bindings
  - Added `Math.sign()` (#9444)
+ - The slint compiler now emits a warning if a statement is without effect (#9474)
+ - Addded `LayoutAlignment.space-evenly` (#9545)
 
 ### Widgets
 
+ - TextInput: don't allow undo/redo when read-only (#9609)
  - Added Button::icon-size (#9279)
  - Fixed TimePickerPopup placement logic (#9262)
  - LineEdit: implemented show-password icon for the Qt style
  - Slider: Fixed track geometry to account for handle size (#9449)
+ - Menu: fixed menu separator appearence (#8339)
+ - LineEdit: call `edited` callback when the "x" button is pressed
+ - ScrollView: Fixed scrolled callback with Qt style (#9574)
 
 ### Rust
 
+ - Minimum Supported Rust Version (MSRV) is 1.88
  - Slint macro: Use new Rust 1.88 API proc_macro API to be able to access file relative to the .rs file
+ - Fixed error in generated Rust code when convering some expressions to void
+ - Upgraded WGPU dependency to version 27: The `unstable-wgpu-27` Cargo feature exists next to the old `unstable-wgpu-26` feature,
+   alongside the `slint::wgpu_27` module.
+ - Added support for `unstable-wgpu-*` and `BackendSelector`'s `require_wgpu_*` on Android.
 
 ### Python
 
  - Added support for asyncio by making the Slint event loop act as asyncio event loop.
  - Added suport for translations via `slint.init_translations()` accepting a `gettext.GNUTranslation`.
+ - Added support for using the `@slint.callback()` decorator with `async` functions, as long as they don't return any value.
 
 ### Tools:
 
@@ -45,6 +60,8 @@ All notable changes to this project are documented in this file.
  - live-preview: Added search in the properties list
  - live-preview: Fixed resizing elements not in layout
  - live-preview: Fixed resetting binding of declared properties
+ - live-preview: Added a way to always see the code of properties
+ - live-preview: Added support for editing `@conical-gradient` in the color picker
 
 ## [1.13.1] - 2025-09-11
 

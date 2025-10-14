@@ -29,9 +29,9 @@ jobs:
             RELEASE_INPUT: ${{ inputs.release }}
         steps:
             - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4.1.0
+            - uses: pnpm/action-setup@v4.2.0
               with:
-                version: 10.14.0
+                version: 10.18.2
             - name: Set up crate rustdoc link
               run: |
                   rgb_version=`grep 'rgb = '  internal/core/Cargo.toml | sed 's/^.*"\(.*\)"/\1/'`
@@ -47,7 +47,7 @@ jobs:
                   sudo apt-get install ttf-mscorefonts-installer -y
             - uses: ./.github/actions/setup-rust
               with:
-                  toolchain: nightly-2025-09-01 # Pinnded because faillure to build cargo-about
+                  toolchain: nightly
                   components: rustfmt
                   target: aarch64-linux-android
             - name: Install apt dependencies
@@ -57,7 +57,7 @@ jobs:
                   crate: cargo-about
                   version: "=0.6.6"
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
             - name: Remove docs from cache # Avoid stale docs
               run: |
                   rm -rf target/doc target/cppdocs api/node/docs

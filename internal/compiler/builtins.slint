@@ -52,6 +52,8 @@ component ImageItem inherits Empty {
     in property <ImageFit> image-fit;
     in property <ImageRendering> image-rendering;
     in property <brush> colorize;
+
+    in property <angle> rotation-angle <=> transform-rotation;
 }
 
 export component ClippedImage inherits ImageItem {
@@ -82,11 +84,10 @@ export component ComponentContainer inherits Empty {
 }
 
 export component Transform inherits Empty {
-    in property <angle> rotation-angle;
-    in property <percent> scale-x;
-    in property <percent> scale-y;
-    in property <length> rotation-origin-x;
-    in property <length> rotation-origin-y;
+    in property <angle> transform-rotation;
+    in property <percent> transform-scale-x;
+    in property <percent> transform-scale-y;
+    in property <Point> transform-origin;
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }
@@ -101,6 +102,8 @@ component SimpleText inherits Empty {
     in property <TextHorizontalAlignment> horizontal-alignment;
     in property <TextVerticalAlignment> vertical-alignment;
     //-default_size_binding:implicit_size
+
+    in property <angle> rotation-angle <=> transform-rotation;
 }
 
 component ComplexText inherits SimpleText {
@@ -659,6 +662,7 @@ export component NativeScrollView {
     in property <ScrollBarPolicy> vertical-scrollbar-policy;
     in property <ScrollBarPolicy> horizontal-scrollbar-policy;
     in property <bool> enabled: true;
+    callback scrolled;
     //-default_size_binding:expands_to_parent_geometry
     //-is_internal
 }

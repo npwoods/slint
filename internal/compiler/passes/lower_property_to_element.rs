@@ -20,7 +20,7 @@ pub(crate) fn lower_property_to_element(
     component: &Rc<Component>,
     property_names: impl Iterator<Item = &'static str> + Clone,
     extra_properties: impl Iterator<Item = &'static str> + Clone,
-    default_value_for_extra_properties: Option<&dyn Fn(&ElementRc, &str) -> Expression>,
+    default_value_for_extra_properties: Option<&dyn Fn(&ElementRc, &str) -> Option<Expression>>,
     element_name: &SmolStr,
     type_register: &TypeRegister,
     diag: &mut BuildDiagnostics,
@@ -95,7 +95,7 @@ pub(crate) fn lower_property_to_element(
 fn create_property_element(
     child: &ElementRc,
     properties: impl Iterator<Item = &'static str>,
-    default_value_for_extra_properties: Option<&dyn Fn(&ElementRc, &str) -> Expression>,
+    default_value_for_extra_properties: Option<&dyn Fn(&ElementRc, &str) -> Option<Expression>>,
     element_name: &SmolStr,
     type_register: &TypeRegister,
 ) -> ElementRc {
@@ -105,7 +105,9 @@ fn create_property_element(
                 BindingExpression::new_two_way(NamedReference::new(child, property_name.into()));
             if let Some(default_value_for_extra_properties) = default_value_for_extra_properties {
                 if !child.borrow().bindings.contains_key(property_name) {
-                    bind.expression = default_value_for_extra_properties(child, property_name)
+                    if let Some(e) = default_value_for_extra_properties(child, property_name) {
+                        bind.expression = e;
+                    }
                 }
             }
             (property_name.into(), bind.into())
@@ -120,4 +122,54 @@ fn create_property_element(
         ..Default::default()
     };
     element.make_rc()
+}
+
+/// Wrapper around lower_property_to_element for the Transform element
+pub fn lower_transform_properties(
+    component: &Rc<Component>,
+    tr: &TypeRegister,
+    diag: &mut BuildDiagnostics,
+) {
+    let transform_origin = crate::typeregister::transform_origin_property();
+
+    lower_property_to_element(
+        component,
+        crate::typeregister::RESERVED_TRANSFORM_PROPERTIES.iter().map(|(prop_name, _)| *prop_name),
+        std::iter::once(transform_origin.0),
+        Some(&|e, prop| {
+            let prop_div_2 = |prop: &str| Expression::BinaryExpression {
+                lhs: Expression::PropertyReference(NamedReference::new(e, prop.into())).into(),
+                op: '/',
+                rhs: Expression::NumberLiteral(2., Default::default()).into(),
+            };
+
+            match prop {
+                "transform-origin" => Some(Expression::Struct {
+                    ty: transform_origin.1.clone(),
+                    values: [
+                        (SmolStr::new_static("x"), prop_div_2("width")),
+                        (SmolStr::new_static("y"), prop_div_2("height")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                }),
+                "transform-scale-x" | "transform-scale-y" => {
+                    if e.borrow().is_binding_set("transform-scale", true) {
+                        Some(Expression::PropertyReference(NamedReference::new(
+                            e,
+                            SmolStr::new_static("transform-scale"),
+                        )))
+                    } else {
+                        Some(Expression::NumberLiteral(1., Default::default()))
+                    }
+                }
+                "transform-scale" => None,
+                "transform-rotation" => Some(Expression::NumberLiteral(0., Default::default())),
+                _ => unreachable!(),
+            }
+        }),
+        &SmolStr::new_static("Transform"),
+        tr,
+        diag,
+    );
 }

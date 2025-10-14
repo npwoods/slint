@@ -11,6 +11,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyclass_enum, gen_stub_py
 use slint_interpreter::{ComponentHandle, Value};
 
 use i_slint_compiler::langtype::Type;
+use i_slint_compiler::parser::normalize_identifier;
 
 use indexmap::IndexMap;
 use pyo3::gc::PyVisit;
@@ -113,12 +114,12 @@ impl PyDiagnostic {
 
     #[getter]
     fn column_number(&self) -> usize {
-        self.0.line_column().0
+        self.0.line_column().1
     }
 
     #[getter]
     fn line_number(&self) -> usize {
-        self.0.line_column().1
+        self.0.line_column().0
     }
 
     #[getter]
@@ -268,6 +269,39 @@ impl ComponentDefinition {
 
     fn global_functions(&self, name: &str) -> Option<Vec<String>> {
         self.definition.global_functions(name).map(|functioniter| functioniter.collect())
+    }
+
+    fn callback_returns_void(&self, callback_name: &str) -> bool {
+        let callback_name = normalize_identifier(callback_name);
+        self.definition
+            .properties_and_callbacks()
+            .find_map(|(name, (ty, _))| {
+                if name == callback_name {
+                    if let Type::Callback(signature) = ty {
+                        return Some(signature.return_type == Type::Void);
+                    }
+                }
+                None
+            })
+            .unwrap_or_default()
+    }
+
+    fn global_callback_returns_void(&self, global_name: &str, callback_name: &str) -> bool {
+        let global_name = normalize_identifier(global_name);
+        let callback_name = normalize_identifier(callback_name);
+        self.definition
+            .global_properties_and_callbacks(&global_name)
+            .and_then(|mut props| {
+                props.find_map(|(name, (ty, _))| {
+                    if name == callback_name {
+                        if let Type::Callback(signature) = ty {
+                            return Some(signature.return_type == Type::Void);
+                        }
+                    }
+                    None
+                })
+            })
+            .unwrap_or_default()
     }
 
     fn create(&self) -> Result<ComponentInstance, crate::errors::PyPlatformError> {
@@ -444,12 +478,51 @@ impl ComponentInstance {
         for global_callbacks in self.global_callbacks.values() {
             global_callbacks.__traverse__(&visit)?;
         }
+
+        for value in self.properties_for_gc() {
+            crate::value::traverse_value(&value, &visit)?;
+        }
+
         Ok(())
     }
 
     fn __clear__(&mut self) {
         self.callbacks.__clear__();
         self.global_callbacks.clear();
+
+        for value in self.properties_for_gc() {
+            crate::value::clear_strongrefs_in_value(&value)
+        }
+    }
+}
+
+impl ComponentInstance {
+    fn properties_for_gc(&self) -> Vec<slint_interpreter::Value> {
+        let mut props = Vec::new();
+
+        props.extend(
+            self.instance
+                .definition()
+                .properties_and_callbacks()
+                .filter_map(|(name, (ty, _))| ty.is_property_type().then(|| name))
+                .filter_map(|prop_name| self.instance.get_property(&prop_name).ok()),
+        );
+
+        for global_name in self.instance.definition().globals() {
+            if let Some(prop_iter) =
+                self.instance.definition().global_properties_and_callbacks(&global_name)
+            {
+                props.extend(
+                    prop_iter
+                        .filter_map(|(name, (ty, _))| ty.is_property_type().then(|| name))
+                        .filter_map(|prop_name| {
+                            self.instance.get_global_property(&global_name, &prop_name).ok()
+                        }),
+                );
+            }
+        }
+
+        props
     }
 }
 

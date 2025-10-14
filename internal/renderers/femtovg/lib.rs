@@ -15,13 +15,14 @@ use i_slint_core::graphics::{euclid, rendering_metrics_collector::RenderingMetri
 use i_slint_core::graphics::{BorderRadius, Rgba8Pixel};
 use i_slint_core::graphics::{FontRequest, SharedPixelBuffer};
 use i_slint_core::item_rendering::ItemRenderer;
+use i_slint_core::item_tree::ItemTreeWeak;
 use i_slint_core::items::TextWrap;
 use i_slint_core::lengths::{
     LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx, ScaleFactor,
 };
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::RendererSealed;
-use i_slint_core::textlayout::sharedparley::{self, parley};
+use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::Brush;
 use images::TextureImporter;
@@ -39,7 +40,7 @@ mod images;
 mod itemrenderer;
 #[cfg(feature = "opengl")]
 pub mod opengl;
-#[cfg(feature = "wgpu-26")]
+#[cfg(feature = "wgpu-27")]
 pub mod wgpu;
 
 pub trait WindowSurface<R: femtovg::Renderer> {
@@ -224,12 +225,14 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 }
 
                 for (component, origin) in components {
-                    i_slint_core::item_rendering::render_component_items(
-                        component,
-                        &mut item_renderer,
-                        *origin,
-                        &self.window_adapter()?,
-                    );
+                    if let Some(component) = ItemTreeWeak::upgrade(component) {
+                        i_slint_core::item_rendering::render_component_items(
+                            &component,
+                            &mut item_renderer,
+                            *origin,
+                            &self.window_adapter()?,
+                        );
+                    }
                 }
 
                 if let Some(cb) = post_render_cb.as_ref() {
@@ -288,17 +291,7 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         scale_factor: ScaleFactor,
         text_wrap: TextWrap,
     ) -> LogicalSize {
-        let layout = sharedparley::layout(
-            text,
-            scale_factor,
-            sharedparley::LayoutOptions {
-                max_width,
-                text_wrap,
-                font_request: Some(font_request),
-                ..Default::default()
-            },
-        );
-        PhysicalSize::new(layout.width(), layout.height()) / scale_factor
+        sharedparley::text_size(font_request, text, max_width, scale_factor, text_wrap)
     }
 
     fn font_metrics(
@@ -306,15 +299,7 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: i_slint_core::graphics::FontRequest,
         _scale_factor: ScaleFactor,
     ) -> i_slint_core::items::FontMetrics {
-        let font = font_request.query_fontique().unwrap();
-        let face = sharedfontique::ttf_parser::Face::parse(font.blob.data(), font.index).unwrap();
-
-        i_slint_core::items::FontMetrics {
-            ascent: face.ascender() as _,
-            descent: face.descender() as _,
-            x_height: face.x_height().unwrap_or_default() as _,
-            cap_height: face.capital_height().unwrap_or_default() as _,
-        }
+        sharedparley::font_metrics(font_request)
     }
 
     fn text_input_byte_offset_for_position(
@@ -324,31 +309,12 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> usize {
-        let pos = pos * scale_factor;
-        let text = text_input.text();
-
-        let width = text_input.width();
-        let height = text_input.height();
-        if width.get() <= 0. || height.get() <= 0. || pos.y < 0. {
-            return 0;
-        }
-
-        let layout = sharedparley::layout(
-            &text,
+        sharedparley::text_input_byte_offset_for_position(
+            text_input,
+            pos,
+            font_request,
             scale_factor,
-            sharedparley::LayoutOptions {
-                font_request: Some(font_request),
-                max_width: Some(width),
-                max_height: Some(height),
-                vertical_align: text_input.vertical_alignment(),
-                ..Default::default()
-            },
-        );
-        let cursor =
-            parley::layout::cursor::Cursor::from_point(&layout, pos.x, pos.y - layout.y_offset);
-
-        let visual_representation = text_input.visual_representation(None);
-        visual_representation.map_byte_offset_from_byte_offset_in_visual_text(cursor.index())
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -358,37 +324,11 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         font_request: FontRequest,
         scale_factor: ScaleFactor,
     ) -> LogicalRect {
-        let text = text_input.text();
-
-        let font_size = font_request.pixel_size.unwrap_or(sharedparley::DEFAULT_FONT_SIZE);
-
-        let width = text_input.width();
-        let height = text_input.height();
-        if width.get() <= 0. || height.get() <= 0. {
-            return LogicalRect::new(
-                LogicalPoint::default(),
-                LogicalSize::from_lengths(LogicalLength::new(1.0), font_size),
-            );
-        }
-
-        let layout = sharedparley::layout(
-            &text,
-            scale_factor,
-            sharedparley::LayoutOptions {
-                max_width: Some(width),
-                max_height: Some(height),
-                ..Default::default()
-            },
-        );
-        let cursor = parley::layout::cursor::Cursor::from_byte_index(
-            &layout,
+        sharedparley::text_input_cursor_rect_for_byte_offset(
+            text_input,
             byte_offset,
-            Default::default(),
-        );
-        let rect = cursor.geometry(&layout, (text_input.text_cursor_width()).get());
-        LogicalRect::new(
-            LogicalPoint::new(rect.min_x() as _, rect.min_y() as f32 + layout.y_offset),
-            LogicalSize::new(rect.width() as _, rect.height() as _),
+            font_request,
+            scale_factor,
         )
     }
 
