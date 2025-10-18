@@ -73,6 +73,7 @@ members = [
   'tools/viewer',
   'tools/tr-extractor',
   "ui-libraries/material/examples/gallery",
+  "ui-libraries/material/crate",
   'xtask',
 ]
 
