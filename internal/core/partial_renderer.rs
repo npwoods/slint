@@ -215,10 +215,16 @@ impl PartialRendererCache {
 }
 
 /// A region composed of a few rectangles that need to be redrawn.
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct DirtyRegion {
     rectangles: [euclid::Box2D<Coord, LogicalPx>; Self::MAX_COUNT],
     count: usize,
+}
+
+impl core::fmt::Debug for DirtyRegion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", &self.rectangles[..self.count])
+    }
 }
 
 impl DirtyRegion {
@@ -426,6 +432,11 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                             // When the opacity or the clip change, this will impact all the children, including
                             // the ones outside the element, regardless if they are themselves dirty or not.
                             new_state.must_refresh_children |= rendering_dirty || geometry_changed;
+
+                            if rendering_dirty {
+                                // Destroy the tracker as we we might not re-render this clipped item but it would stay dirty
+                                *tracker = None;
+                            }
                         }
 
                         if geometry_changed {

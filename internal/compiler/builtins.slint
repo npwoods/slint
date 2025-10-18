@@ -120,6 +120,18 @@ component ComplexText inherits SimpleText {
 
 export { ComplexText as Text }
 
+export component MarkdownText inherits SimpleText {
+    in property <string> font-family;
+    in property <bool> font-italic;
+    in property <TextOverflow> overflow;
+    in property <TextWrap> wrap;
+    in property <length> letter-spacing;
+    in property <brush> stroke;
+    in property <length> stroke-width;
+    in property <TextStrokeStyle> stroke-style;
+    //-default_size_binding:implicit_size
+}
+
 export component TouchArea {
     in property <bool> enabled: true;
     out property <bool> pressed;
@@ -293,7 +305,7 @@ component WindowItem {
     in property <bool> always-on-top;
     in-out property <bool> full-screen;
     in property <string> default-font-family;
-    in-out property <length> default-font-size; // <=> StyleMetrics.default-font-size  set in apply_default_properties_from_style
+    in property <length> default-font-size;
     in property <int> default-font-weight;
     in property <image> icon;
 }
