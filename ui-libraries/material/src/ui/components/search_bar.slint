@@ -20,7 +20,7 @@ component SearchTile inherits ListTile {
 
     callback action_button_clicked();
 
-    if root.action_button_icon.width > 0 && root.action_button_icon.height > 0: IconButton {
+    if root.action_button_icon.width > 0 && root.action_button_icon.height > 0 : IconButton {
         icon: root.action_button_icon;
 
         clicked => {
@@ -45,7 +45,7 @@ component SearchIcon {
     }
 }
 
-component SearchTextInput {
+component SearchTextInput  {
     in_out property <string> text <=> text_input.text;
     in property <string> placeholder_text;
     property <length> computed_x;
@@ -105,8 +105,7 @@ component SearchTextInput {
                 }
             }
         }
-
-        if root.text == "" && root.placeholder_text != "": MaterialText {
+        if root.text == "" && root.placeholder_text != "" : MaterialText {
             width: 100%;
             height: 100%;
             text: root.placeholder_text;
@@ -133,7 +132,7 @@ export component SearchBar {
     callback action_button_clicked(index: int);
     callback key_pressed(event: KeyEvent) -> EventResult;
     callback key_released(event: KeyEvent) -> EventResult;
-    callback item_clicked(index: int) -> bool;
+    callback item-activated(index: int) -> bool;
 
     property <color> color: MaterialPalette.on_surface_variant;
     property <length> item_height: MaterialStyleMetrics.size_72;
@@ -166,7 +165,7 @@ export component SearchBar {
                     color: MaterialPalette.on_surface;
 
                     states [
-                        placeholder when root.text == "": {
+                        placeholder when root.text == "" : {
                             text: root.placeholder_text;
                             color: MaterialPalette.on_surface;
                         }
@@ -178,10 +177,10 @@ export component SearchBar {
                     color: root.color;
                 }
 
-                if (root.avatar_icon.width > 0 && root.avatar_icon.height > 0) || root.avatar_background != #00000000: VerticalLayout {
+                if (root.avatar_icon.width > 0 && root.avatar_icon.height > 0) || root.avatar_background != #00000000 : VerticalLayout {
                     alignment: center;
 
-                    Avatar {
+                    Avatar  {
                         image: root.avatar_icon;
                         background: root.avatar_background;
                     }
@@ -235,7 +234,7 @@ export component SearchBar {
                         text: root.text;
 
                         accepted => {
-                            root.accepted(self.text);
+                             root.accepted(self.text);
                         }
 
                         edited => {
@@ -244,11 +243,11 @@ export component SearchBar {
                         }
 
                         key_pressed(event) => {
-                            root.key_pressed(event)
+                             root.key_pressed(event)
                         }
 
                         key_released(event) => {
-                            root.key_released(event)
+                             root.key_released(event)
                         }
 
                         changed text => {
@@ -266,21 +265,21 @@ export component SearchBar {
                     }
                 }
 
-                HorizontalDivider { }
+                HorizontalDivider {}
 
-                if root.items.length == 0: MaterialText {
+                if root.items.length == 0 : MaterialText {
                     text: root.empty_text;
                     color: root.color;
                     horizontal_alignment: center;
                     style: MaterialTypography.label_small;
                 }
 
-                if root.items.length == 0: Rectangle { }
+                if root.items.length == 0 : Rectangle {}
 
-                if root.items.length > 0: ListView {
+                if root.items.length > 0 : ListView {
                     horizontal_stretch: 1;
 
-                    for item[index] in root.items: SearchTile {
+                    for item[index] in root.items : SearchTile {
                         text: item.text;
                         supporting_text: item.supporting_text;
                         avatar_icon: item.avatar_icon;
@@ -290,7 +289,7 @@ export component SearchBar {
                         action_button_icon: item.action_button_icon;
 
                         clicked => {
-                            if (!root.item_clicked(index)) {
+                            if (!root.item-activated(index)) {
                                 root.text = self.text;
                             }
                             popup.close();
