@@ -337,7 +337,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             return;
         }
 
-        sharedparley::draw_text(self, text, Some(text.font_request(self_rc)), size);
+        sharedparley::draw_text(self, text, Some(self_rc), size);
     }
 
     fn draw_text_input(
@@ -350,13 +350,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             return;
         }
 
-        sharedparley::draw_text_input(
-            self,
-            text_input,
-            Some(text_input.font_request(self_rc)),
-            size,
-            None,
-        );
+        sharedparley::draw_text_input(self, text_input, self_rc, size, None);
     }
 
     fn draw_path(&mut self, path: Pin<&items::Path>, item_rc: &ItemRc, _size: LogicalSize) {
@@ -460,6 +454,11 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
                 items::LineCap::Butt => femtovg::LineCap::Butt,
                 items::LineCap::Round => femtovg::LineCap::Round,
                 items::LineCap::Square => femtovg::LineCap::Square,
+            });
+            paint.set_line_join(match path.stroke_line_join() {
+                items::LineJoin::Miter => femtovg::LineJoin::Miter,
+                items::LineJoin::Round => femtovg::LineJoin::Round,
+                items::LineJoin::Bevel => femtovg::LineJoin::Bevel,
             });
             paint.set_anti_alias(anti_alias);
             paint
@@ -984,12 +983,15 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
         }
     }
 
-    fn fill_rectangle(&mut self, physical_rect: sharedparley::PhysicalRect, color: Color) {
-        if color.alpha() == 0 {
-            return;
-        }
-
-        let paint = femtovg::Paint::color(to_femtovg_color(&color));
+    fn fill_rectangle(
+        &mut self,
+        physical_rect: sharedparley::PhysicalRect,
+        brush: Self::PlatformBrush,
+    ) {
+        let paint = match brush {
+            GlyphBrush::Fill(paint) => paint,
+            GlyphBrush::Stroke(paint) => paint,
+        };
 
         let mut path = femtovg::Path::new();
         path.rect(

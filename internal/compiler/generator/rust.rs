@@ -23,7 +23,6 @@ use crate::object_tree::Document;
 use crate::typeloader::LibraryInfo;
 use crate::CompilerConfiguration;
 use itertools::Either;
-use lyon_path::geom::euclid::approxeq::ApproxEq;
 use proc_macro2::{Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use smol_str::SmolStr;
@@ -197,7 +196,7 @@ pub fn generate(
     let (structs_and_enums_ids, inner_module) =
         generate_types(&doc.used_types.borrow().structs_and_enums);
 
-    let llr = crate::llr::lower_to_item_tree::lower_to_item_tree(doc, compiler_config)?;
+    let llr = crate::llr::lower_to_item_tree::lower_to_item_tree(doc, compiler_config);
 
     if llr.public_components.is_empty() {
         return Ok(Default::default());
@@ -439,14 +438,9 @@ fn generate_shared_globals(
 
     let from_library_global_types =
         llr.globals.iter().filter(|g| g.from_library).map(global_inner_name).collect::<Vec<_>>();
-    let apply_constant_scale_factor = if !compiler_config.const_scale_factor.approx_eq(&1.0) {
-        let factor = compiler_config.const_scale_factor as f32;
-        Some(
-            quote!(adapter.window().try_dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged{ scale_factor: #factor })?;),
-        )
-    } else {
-        None
-    };
+    let apply_constant_scale_factor = compiler_config.const_scale_factor.map(|factor| {
+        quote!(sp::WindowInner::from_pub(adapter.window()).set_const_scale_factor(#factor);)
+    });
 
     let library_global_vars = llr
         .globals
@@ -2428,6 +2422,14 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 (Type::String, Type::PathData) => {
                     quote!(sp::PathData::Commands(#f))
                 }
+                (Type::Enumeration(e), Type::String) => {
+                    let cases = e.values.iter().enumerate().map(|(idx, v)| {
+                        let c = compile_expression(&Expression::EnumerationValue(EnumerationValue{ value: idx, enumeration: e.clone() }), ctx);
+                        let v = v.as_str();
+                        quote!(#c => sp::SharedString::from(#v))
+                    });
+                    quote!(match #f { #(#cases),* })
+                }
                 (_, Type::Void) => {
                     quote!({#f;})
                 }
@@ -3453,6 +3455,10 @@ fn compile_builtin_function_call(
             } else {
                 panic!("internal error: invalid args to RestartTimer {arguments:?}")
             }
+        }
+        BuiltinFunction::OpenUrl => {
+            let url = a.next().unwrap();
+            quote!(sp::open_url(&#url))
         }
     }
 }

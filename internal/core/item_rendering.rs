@@ -5,7 +5,7 @@
 //! module for rendering the tree of items
 
 use super::items::*;
-use crate::graphics::{FontRequest, Image, IntRect};
+use crate::graphics::{Color, FontRequest, Image, IntRect};
 use crate::item_tree::ItemTreeRc;
 use crate::item_tree::{ItemVisitor, ItemVisitorVTable, VisitChildrenResult};
 use crate::lengths::{
@@ -286,19 +286,48 @@ pub trait RenderImage {
     fn tiling(self: Pin<&Self>) -> (ImageTiling, ImageTiling);
 }
 
+/// Trait for an item has font properties
+#[allow(missing_docs)]
+pub trait HasFont {
+    fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest;
+}
+
+/// Trait for an item that represents an string towards the renderer
+#[allow(missing_docs)]
+pub trait RenderString: HasFont {
+    fn text(self: Pin<&Self>) -> SharedString;
+}
+
 /// Trait for an item that represents an Text towards the renderer
 #[allow(missing_docs)]
-pub trait RenderText {
+pub trait RenderText: RenderString {
     fn target_size(self: Pin<&Self>) -> LogicalSize;
-    fn text(self: Pin<&Self>) -> SharedString;
-    fn font_request(self: Pin<&Self>, self_rc: &ItemRc) -> FontRequest;
     fn color(self: Pin<&Self>) -> Brush;
     fn alignment(self: Pin<&Self>) -> (TextHorizontalAlignment, TextVerticalAlignment);
     fn wrap(self: Pin<&Self>) -> TextWrap;
     fn overflow(self: Pin<&Self>) -> TextOverflow;
-    fn letter_spacing(self: Pin<&Self>) -> LogicalLength;
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle);
     fn is_markdown(self: Pin<&Self>) -> bool;
+    fn link_color(self: Pin<&Self>) -> Color;
+}
+
+impl HasFont for (SharedString, Brush) {
+    fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest {
+        crate::items::WindowItem::resolved_font_request(
+            self_rc,
+            SharedString::default(),
+            0,
+            LogicalLength::default(),
+            LogicalLength::default(),
+            false,
+        )
+    }
+}
+
+impl RenderString for (SharedString, Brush) {
+    fn text(self: Pin<&Self>) -> SharedString {
+        self.0.clone()
+    }
 }
 
 impl RenderText for (SharedString, Brush) {
@@ -306,16 +335,12 @@ impl RenderText for (SharedString, Brush) {
         LogicalSize::default()
     }
 
-    fn text(self: Pin<&Self>) -> SharedString {
-        self.0.clone()
-    }
-
-    fn font_request(self: Pin<&Self>, _self_rc: &ItemRc) -> crate::graphics::FontRequest {
-        Default::default()
-    }
-
     fn color(self: Pin<&Self>) -> Brush {
         self.1.clone()
+    }
+
+    fn link_color(self: Pin<&Self>) -> Color {
+        Default::default()
     }
 
     fn alignment(
@@ -330,10 +355,6 @@ impl RenderText for (SharedString, Brush) {
 
     fn overflow(self: Pin<&Self>) -> crate::items::TextOverflow {
         Default::default()
-    }
-
-    fn letter_spacing(self: Pin<&Self>) -> LogicalLength {
-        LogicalLength::default()
     }
 
     fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {

@@ -372,7 +372,7 @@ impl FlickableData {
                     InputEventFilterResult::ForwardEvent
                 }
             }
-            MouseEvent::Moved { position } => {
+            MouseEvent::Moved { position, .. } => {
                 let do_intercept = inner.capture_events
                     || inner.pressed_time.is_some_and(|pressed_time| {
                         if crate::animations::current_tick() - pressed_time > DURATION_THRESHOLD {
@@ -433,7 +433,7 @@ impl FlickableData {
                     InputEventResult::EventIgnored
                 }
             }
-            MouseEvent::Moved { position } => {
+            MouseEvent::Moved { position, .. } => {
                 if inner.pressed_time.is_some() {
                     let current_viewport_size = LogicalSize::from_lengths(
                         (Flickable::FIELD_OFFSETS.viewport_width).apply_pin(flick).get(),
@@ -442,7 +442,7 @@ impl FlickableData {
 
                     // Update reference points when the size of the viewport changes to
                     // avoid 'jumping' during scrolling.
-                    // This happens when height estimate of a ListView changes after
+                    // This happens when the height estimate of a ListView changes after
                     // new items are loaded.
                     if current_viewport_size != inner.pressed_viewport_size {
                         inner.pressed_viewport_size = current_viewport_size;
