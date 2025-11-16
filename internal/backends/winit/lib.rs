@@ -27,6 +27,8 @@ mod winitwindowadapter;
 use winitwindowadapter::*;
 pub(crate) mod event_loop;
 mod frame_throttle;
+#[cfg(target_os = "ios")]
+mod ios;
 
 /// Re-export of the winit crate.
 pub use winit;
@@ -60,7 +62,7 @@ mod renderer {
     use i_slint_core::platform::PlatformError;
     use winit::event_loop::ActiveEventLoop;
 
-    pub trait WinitCompatibleRenderer {
+    pub trait WinitCompatibleRenderer: std::any::Any {
         fn render(&self, window: &i_slint_core::api::Window) -> Result<(), PlatformError>;
 
         fn as_core_renderer(&self) -> &dyn i_slint_core::renderer::Renderer;
@@ -384,17 +386,14 @@ impl BackendBuilder {
             }
             #[cfg(feature = "renderer-femtovg-wgpu")]
             (Some("femtovg-wgpu"), maybe_graphics_api) => {
-                if !maybe_graphics_api.is_some_and(|_api| {
+                if let Some(_api) = maybe_graphics_api {
                     #[cfg(feature = "unstable-wgpu-27")]
-                    if matches!(_api, RequestedGraphicsAPI::WGPU27(..)) {
-                        return true;
+                    if !matches!(_api, RequestedGraphicsAPI::WGPU27(..)) {
+                        return Err(
+                           "The FemtoVG WGPU renderer only supports the WGPU27 graphics API selection"
+                                .into(),
+                        );
                     }
-                    false
-                }) {
-                    return Err(
-                        "The FemtoVG WGPU renderer only supports the WGPU27 graphics API selection"
-                            .into(),
-                    );
                 }
                 renderer::femtovg::WGPUFemtoVGRenderer::new_suspended
             }
@@ -525,7 +524,7 @@ pub(crate) struct SharedBackendData {
     _requested_graphics_api: Option<RequestedGraphicsAPI>,
     #[cfg(enable_skia_renderer)]
     skia_context: i_slint_renderer_skia::SkiaSharedContext,
-    active_windows: RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>,
+    active_windows: Rc<RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>>,
     /// List of visible windows that have been created when without the event loop and
     /// need to be mapped to a winit Window as soon as the event loop becomes active.
     inactive_windows: RefCell<Vec<Weak<WinitWindowAdapter>>>,
@@ -534,6 +533,9 @@ pub(crate) struct SharedBackendData {
     not_running_event_loop: RefCell<Option<winit::event_loop::EventLoop<SlintEvent>>>,
     event_loop_proxy: winit::event_loop::EventLoopProxy<SlintEvent>,
     is_wayland: bool,
+    #[cfg(target_os = "ios")]
+    #[allow(unused)]
+    keyboard_notifications: ios::KeyboardNotifications,
 }
 
 impl SharedBackendData {
@@ -585,6 +587,13 @@ impl SharedBackendData {
             }
         }
 
+        let active_windows =
+            Rc::<RefCell<HashMap<winit::window::WindowId, Weak<WinitWindowAdapter>>>>::default();
+
+        #[cfg(target_os = "ios")]
+        let keyboard_notifications =
+            ios::register_keyboard_notifications(Rc::downgrade(&active_windows));
+
         let event_loop_proxy = event_loop.create_proxy();
         #[cfg(not(target_arch = "wasm32"))]
         let clipboard = crate::clipboard::create_clipboard(
@@ -596,13 +605,15 @@ impl SharedBackendData {
             _requested_graphics_api: requested_graphics_api,
             #[cfg(enable_skia_renderer)]
             skia_context: i_slint_renderer_skia::SkiaSharedContext::default(),
-            active_windows: Default::default(),
+            active_windows,
             inactive_windows: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             clipboard: RefCell::new(clipboard),
             not_running_event_loop: RefCell::new(Some(event_loop)),
             event_loop_proxy,
             is_wayland,
+            #[cfg(target_os = "ios")]
+            keyboard_notifications,
         })
     }
 

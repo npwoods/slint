@@ -11,9 +11,9 @@ use std::rc::{Rc, Weak};
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::Callable;
 use crate::object_tree::{self, Document, ExportedName, Exports};
-use crate::parser::{syntax_nodes, NodeOrToken, SyntaxKind, SyntaxToken};
+use crate::parser::{NodeOrToken, SyntaxKind, SyntaxToken, syntax_nodes};
 use crate::typeregister::TypeRegister;
-use crate::{expression_tree, CompilerConfiguration};
+use crate::{CompilerConfiguration, expression_tree};
 use crate::{fileaccess, langtype, layout, parser};
 use core::future::Future;
 use itertools::Itertools;
@@ -836,7 +836,8 @@ impl Snapshotter {
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))
                     .collect(),
             },
-            Expression::ConicGradient { stops } => Expression::ConicGradient {
+            Expression::ConicGradient { from_angle, stops } => Expression::ConicGradient {
+                from_angle: Box::new(self.snapshot_expression(from_angle)),
                 stops: stops
                     .iter()
                     .map(|(e1, e2)| (self.snapshot_expression(e1), self.snapshot_expression(e2)))

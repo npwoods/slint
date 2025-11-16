@@ -12,8 +12,8 @@ use crate::langtype::Type;
 use crate::layout::*;
 use crate::object_tree::*;
 use crate::typeloader::TypeLoader;
-use crate::typeregister::{layout_info_type, TypeRegister};
-use smol_str::{format_smolstr, SmolStr};
+use crate::typeregister::{TypeRegister, layout_info_type};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -194,6 +194,12 @@ fn lower_grid_layout(
             }
             let row_children = std::mem::take(&mut layout_child.borrow_mut().children);
             for x in row_children {
+                x.borrow_mut().bindings.get("row").map(|binding| {
+                    diag.push_error(
+                        "The 'row' property cannot be used for elements inside a Row".to_string(),
+                        &*binding.borrow(),
+                    );
+                });
                 grid.add_element(
                     &x,
                     (&mut row, &mut col),

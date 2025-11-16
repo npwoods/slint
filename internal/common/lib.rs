@@ -3,9 +3,11 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
-#![cfg_attr(not(feature = "shared-fontique"), no_std)]
+#![cfg_attr(not(any(feature = "shared-fontique", feature = "color-parsing")), no_std)]
 
 pub mod builtin_structs;
+#[cfg(feature = "color-parsing")]
+pub mod color_parsing;
 pub mod enums;
 pub mod key_codes;
 
@@ -24,11 +26,7 @@ pub fn get_native_style(has_qt: bool, target: &str) -> &'static str {
     } else if target.contains("wasm") {
         "fluent"
     } else if target.contains("linux") | target.contains("bsd") {
-        if has_qt {
-            "qt"
-        } else {
-            "fluent"
-        }
+        if has_qt { "qt" } else { "fluent" }
     } else if cfg!(target_os = "android") {
         "material"
     } else if cfg!(target_os = "windows") {

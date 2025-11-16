@@ -9,7 +9,7 @@ use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxNode};
 use crate::typeregister;
 use core::cell::RefCell;
-use smol_str::{format_smolstr, SmolStr};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -739,6 +739,8 @@ pub enum Expression {
     },
 
     ConicGradient {
+        /// The starting angle (rotation) of the gradient, corresponding to CSS `from <angle>`
+        from_angle: Box<Expression>,
         /// First expression in the tuple is a color, second expression is the stop angle
         stops: Vec<(Expression, Expression)>,
     },
@@ -828,11 +830,7 @@ impl Expression {
                     Type::Bool
                 } else if *op == '+' || *op == '-' {
                     let (rhs_ty, lhs_ty) = (rhs.ty(), lhs.ty());
-                    if rhs_ty == lhs_ty {
-                        rhs_ty
-                    } else {
-                        Type::Invalid
-                    }
+                    if rhs_ty == lhs_ty { rhs_ty } else { Type::Invalid }
                 } else {
                     debug_assert!(*op == '*' || *op == '/');
                     let unit_vec = |ty| {
@@ -974,7 +972,8 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { stops } => {
+            Expression::ConicGradient { from_angle, stops } => {
+                visitor(from_angle);
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -1077,7 +1076,8 @@ impl Expression {
                     visitor(s);
                 }
             }
-            Expression::ConicGradient { stops } => {
+            Expression::ConicGradient { from_angle, stops } => {
+                visitor(from_angle);
                 for (c, s) in stops {
                     visitor(c);
                     visitor(s);
@@ -1174,8 +1174,9 @@ impl Expression {
             Expression::RadialGradient { stops } => {
                 stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
-            Expression::ConicGradient { stops } => {
-                stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
+            Expression::ConicGradient { from_angle, stops } => {
+                from_angle.is_constant(ga)
+                    && stops.iter().all(|(c, s)| c.is_constant(ga) && s.is_constant(ga))
             }
             Expression::EnumerationValue(_) => true,
             Expression::ReturnStatement(expr) => {
@@ -1212,7 +1213,11 @@ impl Expression {
                     Expression::LinearGradient { .. }
                     | Expression::RadialGradient { .. }
                     | Expression::ConicGradient { .. } => {
-                        let message = format!("Narrowing conversion from {0} to {1}. This can lead to unexpected behavior because the {0} is a gradient", Type::Brush, Type::Color);
+                        let message = format!(
+                            "Narrowing conversion from {0} to {1}. This can lead to unexpected behavior because the {0} is a gradient",
+                            Type::Brush,
+                            Type::Color
+                        );
                         diag.push_warning(message, node);
                         self
                     }
@@ -1550,8 +1555,8 @@ pub struct BindingExpression {
     pub expression: Expression,
     /// The location of this expression in the source code
     pub span: Option<SourceLocation>,
-    /// How deep is this binding declared in the hierarchy. When two binding are conflicting
-    /// for the same priority (because of two way binding), the lower priority wins.
+    /// How deep is this binding declared in the hierarchy. When two bindings are conflicting
+    /// for the same priority (because of a two way binding), the lower priority wins.
     /// The priority starts at 1, and each level of inlining adds one to the priority.
     /// 0 means the expression was added by some passes and it is not explicit in the source code
     pub priority: i32,
@@ -1827,14 +1832,11 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
             }
             write!(f, ")")
         }
-        Expression::ConicGradient { stops } => {
-            write!(f, "@conic-gradient(")?;
-            let mut first = true;
+        Expression::ConicGradient { from_angle, stops } => {
+            write!(f, "@conic-gradient(from ")?;
+            pretty_print(f, from_angle)?;
             for (c, s) in stops {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                first = false;
+                write!(f, ", ")?;
                 pretty_print(f, c)?;
                 write!(f, " ")?;
                 pretty_print(f, s)?;

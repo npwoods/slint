@@ -311,6 +311,6 @@ pub mod ffi {
         };
 
         let vrc = vtable::VRc::into_dyn(vtable::VRc::new(menu));
-        core::ptr::write(result, vrc);
+        unsafe { core::ptr::write(result, vrc) };
     }
 }

@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::io::BufWriter;
 use std::sync::OnceLock;
 
-use smol_str::{format_smolstr, SmolStr, StrExt};
+use smol_str::{SmolStr, StrExt, format_smolstr};
 
 /// The configuration for the C++ code generator
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -58,52 +58,43 @@ pub fn ident(ident: &str) -> SmolStr {
 }
 
 pub fn concatenate_ident(ident: &str) -> SmolStr {
-    if ident.contains('-') {
-        ident.replace_smolstr("-", "_")
-    } else {
-        ident.into()
-    }
+    if ident.contains('-') { ident.replace_smolstr("-", "_") } else { ident.into() }
 }
 
 /// Given a property reference to a native item (eg, the property name is empty)
 /// return tokens to the `ItemRc`
-fn access_item_rc(pr: &llr::PropertyReference, ctx: &EvaluationContext) -> String {
-    let mut ctx = ctx;
+fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String {
     let mut component_access = "self->".into();
 
-    let pr = match pr {
-        llr::PropertyReference::InParent { level, parent_reference } => {
-            for _ in 0..level.get() {
-                component_access = format!("{component_access}parent.lock().value()->");
-                ctx = ctx.parent.as_ref().unwrap().ctx;
-            }
-            parent_reference
-        }
-        other => other,
+    let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
+        unreachable!()
+    };
+    let llr::LocalMemberIndex::Native { item_index, prop_name: _ } = &local_reference.reference
+    else {
+        unreachable!()
     };
 
-    match pr {
-        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name: _ } => {
-            let (sub_compo_path, sub_component) = follow_sub_component_path(
-                ctx.compilation_unit,
-                ctx.current_sub_component.unwrap(),
-                sub_component_path,
-            );
-            if !sub_component_path.is_empty() {
-                component_access += &sub_compo_path;
-            }
-            let component_rc = format!("{component_access}self_weak.lock()->into_dyn()");
-            let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
-            let item_index = if item_index_in_tree == 0 {
-                format!("{component_access}tree_index")
-            } else {
-                format!("{component_access}tree_index_of_first_child + {item_index_in_tree} - 1")
-            };
-
-            format!("{}, {}", &component_rc, item_index)
-        }
-        _ => unreachable!(),
+    for _ in 0..*parent_level {
+        component_access = format!("{component_access}parent.lock().value()->");
     }
+
+    let (sub_compo_path, sub_component) = follow_sub_component_path(
+        ctx.compilation_unit,
+        ctx.parent_sub_component_idx(*parent_level).unwrap(),
+        &local_reference.sub_component_path,
+    );
+    if !local_reference.sub_component_path.is_empty() {
+        component_access += &sub_compo_path;
+    }
+    let component_rc = format!("{component_access}self_weak.lock()->into_dyn()");
+    let item_index_in_tree = sub_component.items[*item_index].index_in_tree;
+    let item_index = if item_index_in_tree == 0 {
+        format!("{component_access}tree_index")
+    } else {
+        format!("{component_access}tree_index_of_first_child + {item_index_in_tree} - 1")
+    };
+
+    format!("{}, {}", &component_rc, item_index)
 }
 
 /// This module contains some data structure that helps represent a C++ code.
@@ -113,7 +104,7 @@ pub mod cpp_ast {
     use std::cell::Cell;
     use std::fmt::{Display, Error, Formatter};
 
-    use smol_str::{format_smolstr, SmolStr};
+    use smol_str::{SmolStr, format_smolstr};
 
     thread_local!(static INDENTATION : Cell<u32> = Cell::new(0));
     fn indent(f: &mut Formatter<'_>) -> Result<(), Error> {
@@ -465,21 +456,20 @@ pub mod cpp_ast {
     }
 }
 
+use crate::CompilerConfiguration;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp};
 use crate::langtype::{Enumeration, EnumerationValue, NativeClass, Type};
 use crate::layout::Orientation;
 use crate::llr::{
-    self, EvaluationContext as llr_EvaluationContext, ParentCtx as llr_ParentCtx,
+    self, EvaluationContext as llr_EvaluationContext, EvaluationScope, ParentScope,
     TypeResolutionContext as _,
 };
 use crate::object_tree::Document;
 use crate::parser::syntax_nodes;
-use crate::CompilerConfiguration;
 use cpp_ast::*;
 use itertools::{Either, Itertools};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroUsize;
 
 const SHARED_GLOBAL_CLASS: &str = "SharedGlobals";
 
@@ -497,7 +487,6 @@ struct CppGeneratorContext<'a> {
 }
 
 type EvaluationContext<'a> = llr_EvaluationContext<'a, CppGeneratorContext<'a>>;
-type ParentCtx<'a> = llr_ParentCtx<'a, CppGeneratorContext<'a>>;
 
 impl CppType for Type {
     fn cpp_type(&self) -> Option<SmolStr> {
@@ -588,7 +577,7 @@ fn remove_parentheses_test() {
 }
 
 fn property_set_value_code(
-    property: &llr::PropertyReference,
+    property: &llr::MemberReference,
     value_expr: &str,
     ctx: &EvaluationContext,
 ) -> String {
@@ -604,12 +593,12 @@ fn property_set_value_code(
 }
 
 fn handle_property_init(
-    prop: &llr::PropertyReference,
+    prop: &llr::MemberReference,
     binding_expression: &llr::BindingExpression,
     init: &mut Vec<String>,
     ctx: &EvaluationContext,
 ) {
-    let prop_access = access_member(prop, ctx);
+    let prop_access = access_member(prop, ctx).unwrap();
     let prop_type = ctx.property_ty(prop);
     if let Type::Callback(callback) = &prop_type {
         let mut ctx2 = ctx.clone();
@@ -619,27 +608,25 @@ fn handle_property_init(
             format!("[[maybe_unused]] {} arg_{}", ty.cpp_type().unwrap_or_default(), i)
         });
 
-        init.push(prop_access.then(|prop_access| {
-            format!(
-                "{prop_access}.set_handler(
-                    [this]({params}) {{
-                        [[maybe_unused]] auto self = this;
-                        {code};
-                    }});",
-                prop_access = prop_access,
-                params = params.join(", "),
-                code = return_compile_expression(
-                    &binding_expression.expression.borrow(),
-                    &ctx2,
-                    Some(&callback.return_type)
-                )
+        init.push(format!(
+            "{prop_access}.set_handler(
+                [this]({params}) {{
+                    [[maybe_unused]] auto self = this;
+                    {code};
+                }});",
+            prop_access = prop_access,
+            params = params.join(", "),
+            code = return_compile_expression(
+                &binding_expression.expression.borrow(),
+                &ctx2,
+                Some(&callback.return_type)
             )
-        }));
+        ));
     } else {
         let init_expr = compile_expression(&binding_expression.expression.borrow(), ctx);
 
         init.push(if binding_expression.is_constant && !binding_expression.is_state_info {
-            prop_access.then(|prop_access| format!("{prop_access}.set({init_expr});"))
+            format!("{prop_access}.set({init_expr});")
         } else {
             let binding_code = format!(
                 "[this]() {{
@@ -649,18 +636,18 @@ fn handle_property_init(
             );
 
             if binding_expression.is_state_info {
-                prop_access.then(|prop_access| format!("slint::private_api::set_state_binding({prop_access}, {binding_code});"))
+                format!("slint::private_api::set_state_binding({prop_access}, {binding_code});")
             } else {
                 match &binding_expression.animation {
                     Some(llr::Animation::Static(anim)) => {
                         let anim = compile_expression(anim, ctx);
-                        prop_access.then(|prop_access| format!("{prop_access}.set_animated_binding({binding_code}, {anim});"))
+                        format!("{prop_access}.set_animated_binding({binding_code}, {anim});")
                     }
                     Some(llr::Animation::Transition (
                         anim
                     )) => {
                         let anim = compile_expression(anim, ctx);
-                        prop_access.then(|prop_access| format!(
+                        format!(
                             "{prop_access}.set_animated_binding_for_transition({binding_code},
                             [this](uint64_t *start_time) -> slint::cbindgen_private::PropertyAnimation {{
                                 [[maybe_unused]] auto self = this;
@@ -668,9 +655,9 @@ fn handle_property_init(
                                 *start_time = time;
                                 return anim;
                             }});",
-                        ))
+                        )
                     }
-                    None => prop_access.then(|prop_access| format!("{prop_access}.set_binding({binding_code});")),
+                    None => format!("{prop_access}.set_binding({binding_code});"),
                 }
             }
         });
@@ -1242,13 +1229,11 @@ fn generate_public_component(
 
     let ctx = EvaluationContext {
         compilation_unit: unit,
-        current_sub_component: Some(component.item_tree.root),
-        current_global: None,
+        current_scope: EvaluationScope::SubComponent(component.item_tree.root, None),
         generator_state: CppGeneratorContext {
             global_access: "(&this->m_globals)".to_string(),
             conditional_includes,
         },
-        parent: None,
         argument_types: &[],
     };
 
@@ -1358,7 +1343,7 @@ fn generate_item_tree(
     target_struct: &mut Struct,
     sub_tree: &llr::ItemTree,
     root: &llr::CompilationUnit,
-    parent_ctx: Option<ParentCtx>,
+    parent_ctx: Option<&ParentScope>,
     is_popup_menu: bool,
     item_tree_class_name: SmolStr,
     field_access: Access,
@@ -1536,7 +1521,7 @@ fn generate_item_tree(
                     format!("*result = {{ parent->self_weak, 0 }};"),
                     ]
                 }, |idx| {
-                let current_sub_component = parent.ctx.current_sub_component().unwrap();
+                let current_sub_component = &root.sub_components[parent.sub_component];
                 let parent_index = current_sub_component.repeated[idx].index_in_tree;
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
@@ -1771,7 +1756,7 @@ fn generate_item_tree(
 
     if let Some(parent) = &parent_ctx {
         let parent_type =
-            format!("class {} const *", ident(&parent.ctx.current_sub_component().unwrap().name));
+            format!("class {} const *", ident(&root.sub_components[parent.sub_component].name));
         create_parameters.push(format!("{parent_type} parent"));
 
         init_parent_parameters = ", parent";
@@ -1864,7 +1849,7 @@ fn generate_sub_component(
     target_struct: &mut Struct,
     component: llr::SubComponentIdx,
     root: &llr::CompilationUnit,
-    parent_ctx: Option<ParentCtx>,
+    parent_ctx: Option<&ParentScope>,
     field_access: Access,
     file: &mut File,
     conditional_includes: &ConditionalIncludes,
@@ -1921,7 +1906,7 @@ fn generate_sub_component(
     init.push("self->tree_index = tree_index;".into());
 
     if let Some(parent_ctx) = &parent_ctx {
-        let parent_type = ident(&parent_ctx.ctx.current_sub_component().unwrap().name);
+        let parent_type = ident(&root.sub_components[parent_ctx.sub_component].name);
         init_parameters.push(format!("class {parent_type} const *parent"));
 
         target_struct.members.push((
@@ -1947,6 +1932,8 @@ fn generate_sub_component(
 
     let component = &root.sub_components[component];
 
+    let parent_ctx = ParentScope::new(&ctx, None);
+
     component.popup_windows.iter().for_each(|popup| {
         let component_id = ident(&root.sub_components[popup.item_tree.root].name);
         let mut popup_struct = Struct { name: component_id.clone(), ..Default::default() };
@@ -1954,7 +1941,7 @@ fn generate_sub_component(
             &mut popup_struct,
             &popup.item_tree,
             root,
-            Some(ParentCtx::new(&ctx, None)),
+            Some(&parent_ctx),
             false,
             component_id,
             Access::Public,
@@ -1971,7 +1958,7 @@ fn generate_sub_component(
             &mut menu_struct,
             menu,
             root,
-            Some(ParentCtx::new(&ctx, None)),
+            Some(&parent_ctx),
             false,
             component_id,
             Access::Public,
@@ -1982,22 +1969,23 @@ fn generate_sub_component(
         file.declarations.push(Declaration::Struct(menu_struct));
     }
 
-    for property in component.properties.iter().filter(|p| p.use_count.get() > 0) {
+    for property in component.properties.iter() {
         let cpp_name = ident(&property.name);
-
-        let ty = if let Type::Callback(callback) = &property.ty {
-            let param_types =
-                callback.args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
-            let return_type = callback.return_type.cpp_type().unwrap();
-            format_smolstr!(
-                "slint::private_api::Callback<{}({})>",
-                return_type,
-                param_types.join(", ")
-            )
-        } else {
-            format_smolstr!("slint::private_api::Property<{}>", property.ty.cpp_type().unwrap())
-        };
-
+        let ty =
+            format_smolstr!("slint::private_api::Property<{}>", property.ty.cpp_type().unwrap());
+        target_struct.members.push((
+            field_access,
+            Declaration::Var(Var { ty, name: cpp_name, ..Default::default() }),
+        ));
+    }
+    for callback in component.callbacks.iter() {
+        let cpp_name = ident(&callback.name);
+        let param_types = callback.args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
+        let ty = format_smolstr!(
+            "slint::private_api::Callback<{}({})>",
+            callback.ret_ty.cpp_type().unwrap(),
+            param_types.join(", ")
+        );
         target_struct.members.push((
             field_access,
             Declaration::Var(Var { ty, name: cpp_name, ..Default::default() }),
@@ -2095,17 +2083,17 @@ fn generate_sub_component(
 
     for (prop1, prop2, fields) in &component.two_way_bindings {
         if fields.is_empty() {
-            let ty = ctx.property_ty(prop1).cpp_type().unwrap();
+            let ty = ctx.property_ty(&prop1).cpp_type().unwrap();
+            let p1 = access_member(prop1, &ctx).unwrap();
             init.push(
-                access_member(prop1, &ctx).then(|p1| {
-                    access_member(prop2, &ctx).then(|p2| {
-                        format!("slint::private_api::Property<{ty}>::link_two_way(&{p1}, &{p2})",)
-                    })
+                access_member(prop2, &ctx).then(|p2| {
+                    format!("slint::private_api::Property<{ty}>::link_two_way(&{p1}, &{p2})",)
                 }) + ";",
             );
         } else {
             let mut access = "x".to_string();
-            let mut ty = ctx.property_ty(prop2);
+            let mut ty = ctx.property_ty(&prop2);
+            let cpp_ty = ty.cpp_type().unwrap();
             for f in fields {
                 let Type::Struct(s) = &ty else {
                     panic!("Field of two way binding on a non-struct type")
@@ -2113,26 +2101,23 @@ fn generate_sub_component(
                 access = struct_field_access(access, &s, f);
                 ty = s.fields.get(f).unwrap();
             }
-            let ty = ctx.property_ty(prop2).cpp_type().unwrap();
-            init.push(access_member(prop1, &ctx).then(|p1|
+
+            let p1 = access_member(prop1, &ctx).unwrap();
+            init.push(
                 access_member(prop2, &ctx).then(|p2|
-                    format!("slint::private_api::Property<{ty}>::link_two_way_with_map(&{p2}, &{p1}, [](const auto &x){{ return {access}; }}, [](auto &x, const auto &v){{ {access} = v; }})")
-                )
-            ) + ";");
+                    format!("slint::private_api::Property<{cpp_ty}>::link_two_way_with_map(&{p2}, &{p1}, [](const auto &x){{ return {access}; }}, [](auto &x, const auto &v){{ {access} = v; }})")
+                ) + ";",
+            );
         }
     }
 
     let mut properties_init_code = Vec::new();
     for (prop, expression) in &component.property_init {
-        if expression.use_count.get() > 0 && component.prop_used(prop, root) {
-            handle_property_init(prop, expression, &mut properties_init_code, &ctx)
-        }
+        handle_property_init(prop, expression, &mut properties_init_code, &ctx)
     }
     for prop in &component.const_properties {
-        if component.prop_used(prop, root) {
-            let p = access_member(prop, &ctx);
-            properties_init_code.push(p.then(|p| format!("{p}.set_constant();")));
-        }
+        let p = access_local_member(prop, &ctx);
+        properties_init_code.push(format!("{p}.set_constant();"));
     }
 
     for item in &component.items {
@@ -2154,7 +2139,7 @@ fn generate_sub_component(
         generate_repeated_component(
             repeated,
             root,
-            ParentCtx::new(&ctx, Some(idx)),
+            ParentScope::new(&ctx, Some(idx)),
             data_type.as_ref(),
             file,
             conditional_includes,
@@ -2171,11 +2156,11 @@ fn generate_sub_component(
         ));
 
         let ensure_updated = if let Some(listview) = &repeated.listview {
-            let vp_y = access_member(&listview.viewport_y, &ctx).unwrap();
-            let vp_h = access_member(&listview.viewport_height, &ctx).unwrap();
-            let lv_h = access_member(&listview.listview_height, &ctx).unwrap();
-            let vp_w = access_member(&listview.viewport_width, &ctx).unwrap();
-            let lv_w = access_member(&listview.listview_width, &ctx).unwrap();
+            let vp_y = access_local_member(&listview.viewport_y, &ctx);
+            let vp_h = access_local_member(&listview.viewport_height, &ctx);
+            let lv_h = access_local_member(&listview.listview_height, &ctx);
+            let vp_w = access_local_member(&listview.viewport_width, &ctx);
+            let lv_w = access_local_member(&listview.listview_width, &ctx);
 
             format!(
                 "self->{repeater_id}.ensure_updated_listview(self, &{vp_w}, &{vp_h}, &{vp_y}, {lv_w}.get(), {lv_h}.get());"
@@ -2230,7 +2215,7 @@ fn generate_sub_component(
 
     user_init.extend(component.change_callbacks.iter().enumerate().map(|(idx, (p, e))| {
         let code = compile_expression(&e.borrow(), &ctx);
-        let prop = compile_expression(&llr::Expression::PropertyReference(p.clone()), &ctx);
+        let prop = compile_expression(&llr::Expression::PropertyReference(p.clone().into()), &ctx);
         format!("self->change_tracker{idx}.init(self, [](auto self) {{ return {prop}; }}, []([[maybe_unused]] auto self, auto) {{ {code}; }});")
     }));
 
@@ -2500,7 +2485,7 @@ fn generate_sub_component(
 fn generate_repeated_component(
     repeated: &llr::RepeatedElement,
     root: &llr::CompilationUnit,
-    parent_ctx: ParentCtx,
+    parent_ctx: ParentScope,
     model_data_type: Option<&Type>,
     file: &mut File,
     conditional_includes: &ConditionalIncludes,
@@ -2511,7 +2496,7 @@ fn generate_repeated_component(
         &mut repeater_struct,
         &repeated.sub_tree,
         root,
-        Some(parent_ctx),
+        Some(&parent_ctx),
         false,
         repeater_id.clone(),
         Access::Public,
@@ -2521,28 +2506,26 @@ fn generate_repeated_component(
 
     let ctx = EvaluationContext {
         compilation_unit: root,
-        current_sub_component: Some(repeated.sub_tree.root),
-        current_global: None,
+        current_scope: EvaluationScope::SubComponent(repeated.sub_tree.root, Some(&parent_ctx)),
         generator_state: CppGeneratorContext { global_access: "self".into(), conditional_includes },
-        parent: Some(parent_ctx),
         argument_types: &[],
     };
 
-    let access_prop = |&property_index| {
+    let access_prop = |idx: &llr::PropertyIdx| {
         access_member(
-            &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
+            &llr::LocalMemberReference { sub_component_path: vec![], reference: (*idx).into() }
+                .into(),
             &ctx,
         )
+        .unwrap()
     };
     let index_prop = repeated.index_prop.iter().map(access_prop);
     let data_prop = repeated.data_prop.iter().map(access_prop);
 
     if let Some(model_data_type) = model_data_type {
         let mut update_statements = vec!["[[maybe_unused]] auto self = this;".into()];
-        update_statements
-            .extend(index_prop.map(|prop| prop.then(|prop| format!("{prop}.set(i);"))));
-        update_statements
-            .extend(data_prop.map(|prop| prop.then(|prop| format!("{prop}.set(data);"))));
+        update_statements.extend(index_prop.map(|prop| format!("{prop}.set(i);")));
+        update_statements.extend(data_prop.map(|prop| format!("{prop}.set(data);")));
 
         repeater_struct.members.push((
             Access::Public, // Because Repeater accesses it
@@ -2613,7 +2596,7 @@ fn generate_repeated_component(
                     "auto self = reinterpret_cast<const {}*>(component.instance);",
                     repeater_id
                 ),
-                format!("return {};", index.get_property()),
+                format!("return {index}.get();"),
             ]);
         }
     }
@@ -2631,21 +2614,26 @@ fn generate_global(
 ) {
     let mut global_struct = Struct { name: ident(&global.name), ..Default::default() };
 
-    for property in global.properties.iter().filter(|p| p.use_count.get() > 0) {
+    for property in global.properties.iter() {
         let cpp_name = ident(&property.name);
-
-        let ty = if let Type::Callback(callback) = &property.ty {
-            let param_types =
-                callback.args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
-            format_smolstr!(
-                "slint::private_api::Callback<{}({})>",
-                callback.return_type.cpp_type().unwrap(),
-                param_types.join(", ")
-            )
-        } else {
-            format_smolstr!("slint::private_api::Property<{}>", property.ty.cpp_type().unwrap())
-        };
-
+        let ty =
+            format_smolstr!("slint::private_api::Property<{}>", property.ty.cpp_type().unwrap());
+        global_struct.members.push((
+            // FIXME: this is public (and also was public in the pre-llr generator) because other generated code accesses the
+            // fields directly. But it shouldn't be from an API point of view since the same `global_struct` class is public API
+            // when the global is exported and exposed in the public component.
+            Access::Public,
+            Declaration::Var(Var { ty, name: cpp_name, ..Default::default() }),
+        ));
+    }
+    for callback in global.callbacks.iter().filter(|p| p.use_count.get() > 0) {
+        let cpp_name = ident(&callback.name);
+        let param_types = callback.args.iter().map(|t| t.cpp_type().unwrap()).collect::<Vec<_>>();
+        let ty = format_smolstr!(
+            "slint::private_api::Callback<{}({})>",
+            callback.ret_ty.cpp_type().unwrap(),
+            param_types.join(", ")
+        );
         global_struct.members.push((
             // FIXME: this is public (and also was public in the pre-llr generator) because other generated code accesses the
             // fields directly. But it shouldn't be from an API point of view since the same `global_struct` class is public API
@@ -2662,19 +2650,13 @@ fn generate_global(
         CppGeneratorContext { global_access: "this->globals".into(), conditional_includes },
     );
 
-    for (property_index, expression) in global.init_values.iter_enumerated() {
-        if global.properties[property_index].use_count.get() == 0 {
-            continue;
-        }
-
-        if let Some(expression) = expression.as_ref() {
-            handle_property_init(
-                &llr::PropertyReference::Local { sub_component_path: vec![], property_index },
-                expression,
-                &mut init,
-                &ctx,
-            )
-        }
+    for (property_index, expression) in &global.init_values {
+        handle_property_init(
+            &llr::LocalMemberReference::from(property_index.clone()).into(),
+            expression,
+            &mut init,
+            &ctx,
+        )
     }
 
     for (i, _) in global.change_callbacks.iter() {
@@ -2687,9 +2669,10 @@ fn generate_global(
             }),
         ));
     }
+
     init.extend(global.change_callbacks.iter().map(|(p, e)| {
         let code = compile_expression(&e.borrow(), &ctx);
-        let prop = access_member(&llr::PropertyReference::Local { sub_component_path: vec![], property_index: *p }, &ctx);
+        let prop = access_member(&llr::LocalMemberReference::from(*p).into(), &ctx);
         prop.then(|prop| {
             format!("this->change_tracker{}.init(this, [this]([[maybe_unused]] auto self) {{ return {prop}.get(); }}, [this]([[maybe_unused]] auto self, auto) {{ {code}; }});", usize::from(*p))
         })
@@ -2960,146 +2943,93 @@ fn access_window_field(ctx: &EvaluationContext) -> String {
 }
 
 /// Returns the code that can access the given property (but without the set or get)
-///
-/// to be used like:
-/// ```ignore
-/// let access = access_member(...);
-/// format!("{}.get()", access)
-/// ```
-/// or for a function
-/// ```ignore
-/// let access = access_member(...);
-/// format!("{access}(...)")
-/// ```
-fn access_member(reference: &llr::PropertyReference, ctx: &EvaluationContext) -> MemberAccess {
-    fn in_native_item(
-        ctx: &EvaluationContext,
-        sub_component_path: &[llr::SubComponentInstanceIdx],
-        item_index: llr::ItemInstanceIdx,
-        prop_name: &str,
-    ) -> String {
-        let (compo_path, sub_component) = follow_sub_component_path(
-            ctx.compilation_unit,
-            ctx.current_sub_component.unwrap(),
-            sub_component_path,
-        );
-        let item_name = ident(&sub_component.items[item_index].name);
-        if prop_name.is_empty()
-            || matches!(
-                sub_component.items[item_index].ty.lookup_property(prop_name),
-                Some(Type::Function { .. })
-            )
-        {
-            // then this is actually a reference to the element itself
-            // (or a call to a builtin member function)
-            format!("->{compo_path}{item_name}")
-        } else {
-            let property_name = ident(prop_name);
-
-            format!("->{compo_path}{item_name}.{property_name}")
-        }
-    }
-
+fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> MemberAccess {
     match reference {
-        llr::PropertyReference::Local { sub_component_path, property_index } => {
-            if let Some(sub_component) = ctx.current_sub_component {
-                let (compo_path, sub_component) = follow_sub_component_path(
-                    ctx.compilation_unit,
-                    sub_component,
-                    sub_component_path,
-                );
-                let property_name = ident(&sub_component.properties[*property_index].name);
-                MemberAccess::Direct(format!("self->{compo_path}{property_name}"))
-            } else if let Some(current_global) = ctx.current_global() {
-                let property_name = ident(&current_global.properties[*property_index].name);
-                MemberAccess::Direct(format!("this->{property_name}"))
-            } else {
-                unreachable!()
-            }
-        }
-        llr::PropertyReference::Function { sub_component_path, function_index } => {
-            if let Some(sub_component) = ctx.current_sub_component {
-                let (compo_path, sub_component) = follow_sub_component_path(
-                    ctx.compilation_unit,
-                    sub_component,
-                    sub_component_path,
-                );
-                let name = ident(&sub_component.functions[*function_index].name);
-                MemberAccess::Direct(format!("self->{compo_path}fn_{name}"))
-            } else if let Some(current_global) = ctx.current_global() {
-                let name = ident(&current_global.functions[*function_index].name);
-                MemberAccess::Direct(format!("this->fn_{name}",))
-            } else {
-                unreachable!()
-            }
-        }
-        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
-            let x = in_native_item(ctx, sub_component_path, *item_index, prop_name);
-            MemberAccess::Direct(format!("self{x}"))
-        }
-        llr::PropertyReference::InParent { level, parent_reference } => {
-            let mut ctx = ctx;
+        llr::MemberReference::Relative { parent_level, local_reference } => {
             let mut path = MemberAccess::Direct("self".to_string());
-            for _ in 0..level.get() {
+            for _ in 0..*parent_level {
                 path = path.and_then(|x| format!("{x}->parent.lock()"));
-                ctx = ctx.parent.as_ref().unwrap().ctx;
             }
-
-            match &**parent_reference {
-                llr::PropertyReference::Local { sub_component_path, property_index } => {
-                    let sub_component = ctx.current_sub_component.unwrap();
-                    let (compo_path, sub_component) = follow_sub_component_path(
-                        ctx.compilation_unit,
-                        sub_component,
-                        sub_component_path,
-                    );
-                    let property_name = ident(&sub_component.properties[*property_index].name);
-                    path.with_member(format!("->{compo_path}{property_name}"))
+            if let Some(sub_component) = ctx.parent_sub_component_idx(*parent_level) {
+                let (compo_path, sub_component) = follow_sub_component_path(
+                    ctx.compilation_unit,
+                    sub_component,
+                    &local_reference.sub_component_path,
+                );
+                match &local_reference.reference {
+                    llr::LocalMemberIndex::Property(property_index) => {
+                        let property_name = ident(&sub_component.properties[*property_index].name);
+                        path.with_member(format!("->{compo_path}{property_name}"))
+                    }
+                    llr::LocalMemberIndex::Callback(callback_index) => {
+                        let callback_name = ident(&sub_component.callbacks[*callback_index].name);
+                        path.with_member(format!("->{compo_path}{callback_name}"))
+                    }
+                    llr::LocalMemberIndex::Function(function_index) => {
+                        let function_name = ident(&sub_component.functions[*function_index].name);
+                        path.with_member(format!("->{compo_path}fn_{function_name}"))
+                    }
+                    llr::LocalMemberIndex::Native { item_index, prop_name } => {
+                        let item_name = ident(&sub_component.items[*item_index].name);
+                        if prop_name.is_empty()
+                            || matches!(
+                                sub_component.items[*item_index].ty.lookup_property(prop_name),
+                                Some(Type::Function { .. })
+                            )
+                        {
+                            // then this is actually a reference to the element itself
+                            // (or a call to a builtin member function)
+                            path.with_member(format!("->{compo_path}{item_name}"))
+                        } else {
+                            let property_name = ident(prop_name);
+                            path.with_member(format!("->{compo_path}{item_name}.{property_name}"))
+                        }
+                    }
                 }
-                llr::PropertyReference::Function { sub_component_path, function_index } => {
-                    let sub_component = ctx.current_sub_component.unwrap();
-                    let (compo_path, sub_component) = follow_sub_component_path(
-                        ctx.compilation_unit,
-                        sub_component,
-                        sub_component_path,
-                    );
-                    let name = ident(&sub_component.functions[*function_index].name);
-                    path.with_member(format!("->{compo_path}fn_{name}"))
+            } else if let Some(current_global) = ctx.current_global() {
+                match &local_reference.reference {
+                    llr::LocalMemberIndex::Property(property_index) => {
+                        let property_name = ident(&current_global.properties[*property_index].name);
+                        MemberAccess::Direct(format!("this->{property_name}"))
+                    }
+                    llr::LocalMemberIndex::Function(function_index) => {
+                        let function_name = ident(&current_global.functions[*function_index].name);
+                        MemberAccess::Direct(format!("this->fn_{function_name}"))
+                    }
+                    llr::LocalMemberIndex::Callback(callback_index) => {
+                        let callback_name = ident(&current_global.callbacks[*callback_index].name);
+                        MemberAccess::Direct(format!("this->{callback_name}"))
+                    }
+                    _ => unreachable!(),
                 }
-                llr::PropertyReference::InNativeItem {
-                    sub_component_path,
-                    item_index,
-                    prop_name,
-                } => {
-                    let x = in_native_item(ctx, sub_component_path, *item_index, prop_name);
-                    path.with_member(x)
-                }
-                llr::PropertyReference::InParent { .. }
-                | llr::PropertyReference::Global { .. }
-                | llr::PropertyReference::GlobalFunction { .. } => {
-                    unreachable!()
-                }
+            } else {
+                unreachable!()
             }
         }
-        llr::PropertyReference::Global { global_index, property_index } => {
+        llr::MemberReference::Global { global_index, member } => {
             let global_access = &ctx.generator_state.global_access;
             let global = &ctx.compilation_unit.globals[*global_index];
             let global_id = format!("global_{}", concatenate_ident(&global.name));
-            let property_name = ident(
-                &ctx.compilation_unit.globals[*global_index].properties[*property_index].name,
-            );
-            MemberAccess::Direct(format!("{global_access}->{global_id}->{property_name}"))
-        }
-        llr::PropertyReference::GlobalFunction { global_index, function_index } => {
-            let global_access = &ctx.generator_state.global_access;
-            let global = &ctx.compilation_unit.globals[*global_index];
-            let global_id = format!("global_{}", concatenate_ident(&global.name));
-            let name = concatenate_ident(
-                &ctx.compilation_unit.globals[*global_index].functions[*function_index].name,
-            );
-            MemberAccess::Direct(format!("{global_access}->{global_id}->fn_{name}"))
+            let name = match member {
+                llr::LocalMemberIndex::Property(property_index) => ident(
+                    &ctx.compilation_unit.globals[*global_index].properties[*property_index].name,
+                ),
+                llr::LocalMemberIndex::Callback(callback_index) => ident(
+                    &ctx.compilation_unit.globals[*global_index].callbacks[*callback_index].name,
+                ),
+                llr::LocalMemberIndex::Function(function_index) => ident(&format!(
+                    "fn_{}",
+                    &ctx.compilation_unit.globals[*global_index].functions[*function_index].name,
+                )),
+                _ => unreachable!(),
+            };
+            MemberAccess::Direct(format!("{global_access}->{global_id}->{name}"))
         }
     }
+}
+
+fn access_local_member(reference: &llr::LocalMemberReference, ctx: &EvaluationContext) -> String {
+    access_member(&reference.clone().into(), ctx).unwrap()
 }
 
 /// Helper to access a member property/callback of a component.
@@ -3138,7 +3068,10 @@ impl MemberAccess {
         match self {
             MemberAccess::Direct(t) => f(&t),
             MemberAccess::Option(t) => {
-                format!("slint::private_api::optional_or_default(slint::private_api::optional_transform({t}, [&](auto&&x) {{ return {}; }}))", f("x"))
+                format!(
+                    "slint::private_api::optional_or_default(slint::private_api::optional_transform({t}, [&](auto&&x) {{ return {}; }}))",
+                    f("x")
+                )
             }
             MemberAccess::OptionWithMember(t, m) => {
                 format!(
@@ -3191,27 +3124,22 @@ impl MemberAccess {
 /// (or a InParent of InNativeItem )
 /// As well as the property name
 fn native_prop_info<'a, 'b>(
-    item_ref: &'b llr::PropertyReference,
+    item_ref: &'b llr::MemberReference,
     ctx: &'a EvaluationContext,
 ) -> (&'a NativeClass, &'b str) {
-    match item_ref {
-        llr::PropertyReference::InNativeItem { sub_component_path, item_index, prop_name } => {
-            let (_, sub_component) = follow_sub_component_path(
-                ctx.compilation_unit,
-                ctx.current_sub_component.unwrap(),
-                sub_component_path,
-            );
-            (&sub_component.items[*item_index].ty, prop_name)
-        }
-        llr::PropertyReference::InParent { level, parent_reference } => {
-            let mut ctx = ctx;
-            for _ in 0..level.get() {
-                ctx = ctx.parent.as_ref().unwrap().ctx;
-            }
-            native_prop_info(parent_reference, ctx)
-        }
-        _ => unreachable!(),
-    }
+    let llr::MemberReference::Relative { parent_level, local_reference } = item_ref else {
+        unreachable!()
+    };
+    let llr::LocalMemberIndex::Native { item_index, prop_name } = &local_reference.reference else {
+        unreachable!()
+    };
+
+    let (_, sub_component) = follow_sub_component_path(
+        ctx.compilation_unit,
+        ctx.parent_sub_component_idx(*parent_level).unwrap(),
+        &local_reference.sub_component_path,
+    );
+    (&sub_component.items[*item_index].ty, prop_name)
 }
 
 fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String {
@@ -3232,13 +3160,11 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             }
         }
         Expression::BoolLiteral(b) => b.to_string(),
-        Expression::PropertyReference(nr) => {
-            access_member(nr, ctx).get_property()
-        }
+        Expression::PropertyReference(nr) => access_member(nr, ctx).get_property(),
         Expression::BuiltinFunctionCall { function, arguments } => {
             compile_builtin_function_call(function.clone(), arguments, ctx)
         }
-        Expression::CallBackCall{ callback, arguments } => {
+        Expression::CallBackCall { callback, arguments } => {
             let f = access_member(callback, ctx);
             let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
             if expr.ty(ctx) == Type::Void {
@@ -3247,7 +3173,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 f.map_or_default(|f| format!("{f}.call({})", a.join(",")))
             }
         }
-        Expression::FunctionCall{ function, arguments } => {
+        Expression::FunctionCall { function, arguments } => {
             let f = access_member(function, ctx);
             let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
             if expr.ty(ctx) == Type::Void {
@@ -3261,11 +3187,19 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             let item_rc = access_item_rc(function, ctx);
             let window = access_window_field(ctx);
             let (native, name) = native_prop_info(function, ctx);
-            let function_name = format!("slint_{}_{}", native.class_name.to_lowercase(), ident(&name).to_lowercase());
+            let function_name = format!(
+                "slint_{}_{}",
+                native.class_name.to_lowercase(),
+                ident(&name).to_lowercase()
+            );
             if expr.ty(ctx) == Type::Void {
-                item.then(|item| format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})"))
+                item.then(|item| {
+                    format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})")
+                })
             } else {
-                item.map_or_default(|item| format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})"))
+                item.map_or_default(|item| {
+                    format!("{function_name}(&{item}, &{window}.handle(), &{item_rc})")
+                })
             }
         }
         Expression::ExtraBuiltinFunctionCall { function, arguments, return_ty: _ } => {
@@ -3278,17 +3212,16 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         }
         Expression::ReadLocalVariable { name, .. } => ident(name).to_string(),
         Expression::StructFieldAccess { base, name } => match base.ty(ctx) {
-            Type::Struct(s)=> {
-                struct_field_access(compile_expression(base, ctx), &s, name)
-            }
+            Type::Struct(s) => struct_field_access(compile_expression(base, ctx), &s, name),
             _ => panic!("Expression::ObjectAccess's base expression is not an Object type"),
         },
         Expression::ArrayIndex { array, index } => {
             format!(
                 "slint::private_api::access_array_index({}, {})",
-                compile_expression(array, ctx), compile_expression(index, ctx)
+                compile_expression(array, ctx),
+                compile_expression(index, ctx)
             )
-        },
+        }
         Expression::Cast { from, to } => {
             let f = compile_expression(from, ctx);
             match (from.ty(ctx), to) {
@@ -3299,7 +3232,9 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                     format!("slint::SharedString::from_number({f})")
                 }
                 (Type::Float32, Type::Model) | (Type::Int32, Type::Model) => {
-                    format!("std::make_shared<slint::private_api::UIntModel>(std::max<int>(0, {f}))")
+                    format!(
+                        "std::make_shared<slint::private_api::UIntModel>(std::max<int>(0, {f}))"
+                    )
                 }
                 (Type::Array(_), Type::Model) => f,
                 (Type::Float32, Type::Color) => {
@@ -3312,14 +3247,22 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                     format!("{f}.color()")
                 }
                 (Type::Struct(lhs), Type::Struct(rhs)) => {
-                    debug_assert_eq!(lhs.fields, rhs.fields, "cast of struct with deferent fields should be handled before llr");
+                    debug_assert_eq!(
+                        lhs.fields, rhs.fields,
+                        "cast of struct with deferent fields should be handled before llr"
+                    );
                     match (&lhs.name, &rhs.name) {
                         (None, Some(_)) => {
                             // Convert from an anonymous struct to a named one
                             format!(
                                 "[&](const auto &o){{ {struct_name} s; {fields} return s; }}({obj})",
                                 struct_name = to.cpp_type().unwrap(),
-                                fields = lhs.fields.keys().enumerate().map(|(i, n)| format!("s.{} = std::get<{}>(o); ", ident(n), i)).join(""),
+                                fields = lhs
+                                    .fields
+                                    .keys()
+                                    .enumerate()
+                                    .map(|(i, n)| format!("s.{} = std::get<{}>(o); ", ident(n), i))
+                                    .join(""),
                                 obj = f,
                             )
                         }
@@ -3332,7 +3275,6 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                         }
                         _ => f,
                     }
-
                 }
                 (Type::Array(..), Type::PathData)
                     if matches!(
@@ -3341,26 +3283,37 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                     ) =>
                 {
                     let path_elements = match from.as_ref() {
-                        Expression::Array { element_ty: _, values, as_model: _ } => values
-                            .iter()
-                            .map(|path_elem_expr| {
-                                let (field_count, qualified_elem_type_name) = match path_elem_expr.ty(ctx) {
-                                    Type::Struct(s) if s.name.is_some() => (s.fields.len(), s.name.as_ref().unwrap().clone()),
-                                    _ => unreachable!()
-                                };
+                        Expression::Array { element_ty: _, values, as_model: _ } => {
+                            values.iter().map(|path_elem_expr| {
+                                let (field_count, qualified_elem_type_name) =
+                                    match path_elem_expr.ty(ctx) {
+                                        Type::Struct(s) if s.name.is_some() => {
+                                            (s.fields.len(), s.name.as_ref().unwrap().clone())
+                                        }
+                                        _ => unreachable!(),
+                                    };
                                 // Turn slint::private_api::PathLineTo into `LineTo`
-                                let elem_type_name = qualified_elem_type_name.split("::").last().unwrap().strip_prefix("Path").unwrap();
+                                let elem_type_name = qualified_elem_type_name
+                                    .split("::")
+                                    .last()
+                                    .unwrap()
+                                    .strip_prefix("Path")
+                                    .unwrap();
                                 let elem_init = if field_count > 0 {
                                     compile_expression(path_elem_expr, ctx)
                                 } else {
                                     String::new()
                                 };
-                                format!("slint::private_api::PathElement::{elem_type_name}({elem_init})")
-                            }),
+                                format!(
+                                    "slint::private_api::PathElement::{elem_type_name}({elem_init})"
+                                )
+                            })
+                        }
                         _ => {
                             unreachable!()
                         }
-                    }.collect::<Vec<_>>();
+                    }
+                    .collect::<Vec<_>>();
                     if !path_elements.is_empty() {
                         format!(
                             r#"[&](){{
@@ -3377,10 +3330,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                     }
                 }
                 (Type::Struct { .. }, Type::PathData)
-                    if matches!(
-                        from.as_ref(),
-                        Expression::Struct { .. }
-                    ) =>
+                    if matches!(from.as_ref(), Expression::Struct { .. }) =>
                 {
                     let (events, points) = match from.as_ref() {
                         Expression::Struct { ty: _, values } => (
@@ -3399,57 +3349,62 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 }
                 (Type::Enumeration(e), Type::String) => {
                     let mut cases = e.values.iter().enumerate().map(|(idx, v)| {
-                        let c = compile_expression(&Expression::EnumerationValue(EnumerationValue{ value: idx, enumeration: e.clone() }), ctx);
+                        let c = compile_expression(
+                            &Expression::EnumerationValue(EnumerationValue {
+                                value: idx,
+                                enumeration: e.clone(),
+                            }),
+                            ctx,
+                        );
                         format!("case {c}: return {v:?};")
                     });
-                    format!("[&]() -> slint::SharedString {{ switch ({f}) {{ {} default: return {{}}; }} }}()", cases.join(" "))
+                    format!(
+                        "[&]() -> slint::SharedString {{ switch ({f}) {{ {} default: return {{}}; }} }}()",
+                        cases.join(" ")
+                    )
                 }
                 _ => f,
             }
         }
-        Expression::CodeBlock(sub) => {
-            match sub.len() {
-                0 => String::new(),
-                1 => compile_expression(&sub[0], ctx),
-                len => {
-                    let mut x = sub.iter().enumerate().map(|(i, e)| {
-                        if i == len - 1 {
-                            return_compile_expression(e, ctx, None) + ";"
-                        }
-                        else {
-                            compile_expression(e, ctx)
-                        }
-                    });
-                   format!("[&]{{ {} }}()", x.join(";"))
-                }
+        Expression::CodeBlock(sub) => match sub.len() {
+            0 => String::new(),
+            1 => compile_expression(&sub[0], ctx),
+            len => {
+                let mut x = sub.iter().enumerate().map(|(i, e)| {
+                    if i == len - 1 {
+                        return_compile_expression(e, ctx, None) + ";"
+                    } else {
+                        compile_expression(e, ctx)
+                    }
+                });
+                format!("[&]{{ {} }}()", x.join(";"))
             }
-        }
-        Expression::PropertyAssignment { property, value} => {
+        },
+        Expression::PropertyAssignment { property, value } => {
             let value = compile_expression(value, ctx);
             property_set_value_code(property, &value, ctx)
         }
         Expression::ModelDataAssignment { level, value } => {
             let value = compile_expression(value, ctx);
             let mut path = "self".to_string();
-            let mut ctx2 = ctx;
+            let EvaluationScope::SubComponent(mut sc, mut par) = ctx.current_scope else {
+                unreachable!()
+            };
             let mut repeater_index = None;
             for _ in 0..=*level {
-                let x = ctx2.parent.unwrap();
-                ctx2 = x.ctx;
+                let x = par.unwrap();
+                par = x.parent;
                 repeater_index = x.repeater_index;
+                sc = x.sub_component;
                 write!(path, "->parent.lock().value()").unwrap();
             }
             let repeater_index = repeater_index.unwrap();
-            let mut index_prop = llr::PropertyReference::Local {
-                sub_component_path: vec![],
-                property_index: ctx2.current_sub_component().unwrap().repeated[repeater_index]
-                    .index_prop
-                    .unwrap(),
-            };
-            if let Some(level) = NonZeroUsize::new(*level) {
-                index_prop =
-                    llr::PropertyReference::InParent { level, parent_reference: index_prop.into() };
-            }
+            let local_reference = ctx.compilation_unit.sub_components[sc].repeated[repeater_index]
+                .index_prop
+                .unwrap()
+                .into();
+            let index_prop =
+                llr::MemberReference::Relative { parent_level: *level, local_reference };
             let index_access = access_member(&index_prop, ctx).get_property();
             write!(path, "->repeater_{}", usize::from(repeater_index)).unwrap();
             format!("{path}.model_set_row_data({index_access}, {value})")
@@ -3459,7 +3414,9 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             let base_e = compile_expression(array, ctx);
             let index_e = compile_expression(index, ctx);
             let value_e = compile_expression(value, ctx);
-            format!("[&](auto index, const auto &base) {{ if (index >= 0. && std::size_t(index) < base->row_count()) base->set_row_data(index, {value_e}); }}({index_e}, {base_e})")
+            format!(
+                "[&](auto index, const auto &base) {{ if (index >= 0. && std::size_t(index) < base->row_count()) base->set_row_data(index, {value_e}); }}({index_e}, {base_e})"
+            )
         }
         Expression::BinaryExpression { lhs, rhs, op } => {
             let lhs_str = compile_expression(lhs, ctx);
@@ -3469,8 +3426,10 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
 
             if lhs_ty.as_unit_product().is_some() && (*op == '=' || *op == '!') {
                 let op = if *op == '=' { "<" } else { ">=" };
-                format!("(std::abs(float({lhs_str} - {rhs_str})) {op} std::numeric_limits<float>::epsilon())")
-            }  else {
+                format!(
+                    "(std::abs(float({lhs_str} - {rhs_str})) {op} std::numeric_limits<float>::epsilon())"
+                )
+            } else {
                 let mut buffer = [0; 3];
                 format!(
                     "({lhs_str} {op} {rhs_str})",
@@ -3491,21 +3450,31 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         Expression::UnaryOp { sub, op } => {
             format!("({op} {sub})", sub = compile_expression(sub, ctx), op = op,)
         }
-        Expression::ImageReference { resource_ref, nine_slice }  => {
+        Expression::ImageReference { resource_ref, nine_slice } => {
             let image = match resource_ref {
                 crate::expression_tree::ImageReference::None => r#"slint::Image()"#.to_string(),
-                crate::expression_tree::ImageReference::AbsolutePath(path) => format!(r#"slint::Image::load_from_path(slint::SharedString(u8"{}"))"#, escape_string(path.as_str())),
+                crate::expression_tree::ImageReference::AbsolutePath(path) => format!(
+                    r#"slint::Image::load_from_path(slint::SharedString(u8"{}"))"#,
+                    escape_string(path.as_str())
+                ),
                 crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
                     let symbol = format!("slint_embedded_resource_{resource_id}");
-                    format!(r#"slint::private_api::load_image_from_embedded_data({symbol}, "{}")"#, escape_string(extension))
+                    format!(
+                        r#"slint::private_api::load_image_from_embedded_data({symbol}, "{}")"#,
+                        escape_string(extension)
+                    )
                 }
-                crate::expression_tree::ImageReference::EmbeddedTexture{resource_id} => {
-                    format!("slint::private_api::image_from_embedded_textures(&slint_embedded_resource_{resource_id})")
-                },
+                crate::expression_tree::ImageReference::EmbeddedTexture { resource_id } => {
+                    format!(
+                        "slint::private_api::image_from_embedded_textures(&slint_embedded_resource_{resource_id})"
+                    )
+                }
             };
             match &nine_slice {
                 Some([a, b, c, d]) => {
-                    format!("([&] {{ auto image = {image}; image.set_nine_slice_edges({a}, {b}, {c}, {d}); return image; }})()")
+                    format!(
+                        "([&] {{ auto image = {image}; image.set_nine_slice_edges({a}, {b}, {c}, {d}); return image; }})()"
+                    )
                 }
                 None => image,
             }
@@ -3524,7 +3493,9 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         }
         Expression::Array { element_ty, values, as_model } => {
             let ty = element_ty.cpp_type().unwrap();
-            let mut val = values.iter().map(|e| format!("{ty} ( {expr} )", expr = compile_expression(e, ctx), ty = ty));
+            let mut val = values
+                .iter()
+                .map(|e| format!("{ty} ( {expr} )", expr = compile_expression(e, ctx), ty = ty));
             if *as_model {
                 format!(
                     "std::make_shared<slint::private_api::ArrayModel<{count},{ty}>>({val})",
@@ -3542,39 +3513,61 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             }
         }
         Expression::Struct { ty, values } => {
-            if ty.name.is_none()  {
+            if ty.name.is_none() {
                 let mut elem = ty.fields.iter().map(|(k, t)| {
                     values
                         .get(k)
                         .map(|e| compile_expression(e, ctx))
                         .map(|e| {
                             // explicit conversion to avoid warning C4244 (possible loss of data) with MSVC
-                            if t.as_unit_product().is_some() { format!("{}({e})", t.cpp_type().unwrap()) } else {e}
+                            if t.as_unit_product().is_some() {
+                                format!("{}({e})", t.cpp_type().unwrap())
+                            } else {
+                                e
+                            }
                         })
                         .unwrap_or_else(|| "(Error: missing member in object)".to_owned())
                 });
                 format!("std::make_tuple({})", elem.join(", "))
-            }else {
+            } else {
                 format!(
                     "[&]({args}){{ {ty} o{{}}; {fields}return o; }}({vals})",
                     args = (0..values.len()).map(|i| format!("const auto &a_{i}")).join(", "),
                     ty = Type::Struct(ty.clone()).cpp_type().unwrap(),
-                    fields = values.keys().enumerate().map(|(i, f)| format!("o.{} = a_{}; ", ident(f), i)).join(""),
+                    fields = values
+                        .keys()
+                        .enumerate()
+                        .map(|(i, f)| format!("o.{} = a_{}; ", ident(f), i))
+                        .join(""),
                     vals = values.values().map(|e| compile_expression(e, ctx)).join(", "),
                 )
             }
         }
-        Expression::EasingCurve(EasingCurve::Linear) => "slint::cbindgen_private::EasingCurve()".into(),
+        Expression::EasingCurve(EasingCurve::Linear) => {
+            "slint::cbindgen_private::EasingCurve()".into()
+        }
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => format!(
             "slint::cbindgen_private::EasingCurve(slint::cbindgen_private::EasingCurve::Tag::CubicBezier, {a}, {b}, {c}, {d})"
         ),
-        Expression::EasingCurve(EasingCurve::EaseInElastic) => "slint::cbindgen_private::EasingCurve::Tag::EaseInElastic".into(),
-        Expression::EasingCurve(EasingCurve::EaseOutElastic) => "slint::cbindgen_private::EasingCurve::Tag::EaseOutElastic".into(),
-        Expression::EasingCurve(EasingCurve::EaseInOutElastic) => "slint::cbindgen_private::EasingCurve::Tag::EaseInOutElastic".into(),
-        Expression::EasingCurve(EasingCurve::EaseInBounce) => "slint::cbindgen_private::EasingCurve::Tag::EaseInBounce".into(),
-        Expression::EasingCurve(EasingCurve::EaseOutBounce) => "slint::cbindgen_private::EasingCurve::Tag::EaseOutElastic".into(),
-        Expression::EasingCurve(EasingCurve::EaseInOutBounce) => "slint::cbindgen_private::EasingCurve::Tag::EaseInOutElastic".into(),
-        Expression::LinearGradient{angle, stops} => {
+        Expression::EasingCurve(EasingCurve::EaseInElastic) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseInElastic".into()
+        }
+        Expression::EasingCurve(EasingCurve::EaseOutElastic) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseOutElastic".into()
+        }
+        Expression::EasingCurve(EasingCurve::EaseInOutElastic) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseInOutElastic".into()
+        }
+        Expression::EasingCurve(EasingCurve::EaseInBounce) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseInBounce".into()
+        }
+        Expression::EasingCurve(EasingCurve::EaseOutBounce) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseOutElastic".into()
+        }
+        Expression::EasingCurve(EasingCurve::EaseInOutBounce) => {
+            "slint::cbindgen_private::EasingCurve::Tag::EaseInOutElastic".into()
+        }
+        Expression::LinearGradient { angle, stops } => {
             let angle = compile_expression(angle, ctx);
             let mut stops_it = stops.iter().map(|(color, stop)| {
                 let color = compile_expression(color, ctx);
@@ -3583,10 +3576,12 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             });
             format!(
                 "[&] {{ const slint::private_api::GradientStop stops[] = {{ {} }}; return slint::Brush(slint::private_api::LinearGradientBrush({}, stops, {})); }}()",
-                stops_it.join(", "), angle, stops.len()
+                stops_it.join(", "),
+                angle,
+                stops.len()
             )
         }
-        Expression::RadialGradient{ stops} => {
+        Expression::RadialGradient { stops } => {
             let mut stops_it = stops.iter().map(|(color, stop)| {
                 let color = compile_expression(color, ctx);
                 let position = compile_expression(stop, ctx);
@@ -3594,33 +3589,43 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             });
             format!(
                 "[&] {{ const slint::private_api::GradientStop stops[] = {{ {} }}; return slint::Brush(slint::private_api::RadialGradientBrush(stops, {})); }}()",
-                stops_it.join(", "), stops.len()
+                stops_it.join(", "),
+                stops.len()
             )
         }
-        Expression::ConicGradient{ stops} => {
+        Expression::ConicGradient { from_angle, stops } => {
+            let from_angle = compile_expression(from_angle, ctx);
             let mut stops_it = stops.iter().map(|(color, stop)| {
                 let color = compile_expression(color, ctx);
                 let position = compile_expression(stop, ctx);
                 format!("slint::private_api::GradientStop{{ {color}, float({position}), }}")
             });
             format!(
-                "[&] {{ const slint::private_api::GradientStop stops[] = {{ {} }}; return slint::Brush(slint::private_api::ConicGradientBrush(stops, {})); }}()",
-                stops_it.join(", "), stops.len()
+                "[&] {{ const slint::private_api::GradientStop stops[] = {{ {} }}; return slint::Brush(slint::private_api::ConicGradientBrush(float({}), stops, {})); }}()",
+                stops_it.join(", "),
+                from_angle,
+                stops.len()
             )
         }
         Expression::EnumerationValue(value) => {
-            let prefix = if value.enumeration.node.is_some() { "" } else {"slint::cbindgen_private::"};
+            let prefix =
+                if value.enumeration.node.is_some() { "" } else { "slint::cbindgen_private::" };
             format!(
                 "{prefix}{}::{}",
                 ident(&value.enumeration.name),
                 ident(&value.to_pascal_case()),
             )
         }
-        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } =>  {
+        Expression::LayoutCacheAccess { layout_cache_prop, index, repeater_index } => {
             let cache = access_member(layout_cache_prop, ctx);
             cache.map_or_default(|cache| {
                 if let Some(ri) = repeater_index {
-                    format!("slint::private_api::layout_cache_access({}.get(), {}, {})", cache, index, compile_expression(ri, ctx))
+                    format!(
+                        "slint::private_api::layout_cache_access({}.get(), {}, {})",
+                        cache,
+                        index,
+                        compile_expression(ri, ctx)
+                    )
                 } else {
                     format!("{cache}.get()[{index}]")
                 }
@@ -3648,14 +3653,14 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 }
                 _ => panic!("dialog layout unsorted cells not an array"),
             };
-            format!("slint::cbindgen_private::GridLayoutCellData {cv}_array [] = {{ {c} }};\
+            format!(
+                "slint::cbindgen_private::GridLayoutCellData {cv}_array [] = {{ {c} }};\
                     slint::cbindgen_private::slint_reorder_dialog_button_layout({cv}_array, {r});\
                     slint::cbindgen_private::Slice<slint::cbindgen_private::GridLayoutCellData> {cv} = slint::private_api::make_slice(std::span({cv}_array))",
-                    r = compile_expression(roles, ctx),
-                    cv = cells_variable,
-                    c = cells.join(", "),
-                )
-
+                r = compile_expression(roles, ctx),
+                cv = cells_variable,
+                c = cells.join(", "),
+            )
         }
         Expression::MinMax { ty, op, lhs, rhs } => {
             let ident = match op {
@@ -3678,11 +3683,15 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             match plural {
                 Some(plural) => {
                     let plural = compile_expression(plural, ctx);
-                    format!("slint::private_api::translate_from_bundle_with_plural(slint_translation_bundle_plural_{string_index}_str, slint_translation_bundle_plural_{string_index}_idx,  slint_translated_plural_rules, {args}, {plural})")
+                    format!(
+                        "slint::private_api::translate_from_bundle_with_plural(slint_translation_bundle_plural_{string_index}_str, slint_translation_bundle_plural_{string_index}_idx,  slint_translated_plural_rules, {args}, {plural})"
+                    )
                 }
-                None => format!("slint::private_api::translate_from_bundle(slint_translation_bundle_{string_index}, {args})"),
+                None => format!(
+                    "slint::private_api::translate_from_bundle(slint_translation_bundle_{string_index}, {args})"
+                ),
             }
-        },
+        }
     }
 }
 
@@ -3975,26 +3984,24 @@ fn compile_builtin_function_call(
             if let [llr::Expression::NumberLiteral(popup_index), close_policy, llr::Expression::PropertyReference(parent_ref)] =
                 arguments
             {
-                let mut parent_ctx = ctx;
                 let mut component_access = MemberAccess::Direct("self".into());
-                if let llr::PropertyReference::InParent { level, .. } = parent_ref {
-                    for _ in 0..level.get() {
-                        component_access = component_access.and_then(|x| format!("{x}->parent.lock()"));
-                        parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
-                    }
-                };
+                let llr::MemberReference::Relative { parent_level, .. } = parent_ref else {unreachable!()};
+                for _ in 0..*parent_level {
+                    component_access = component_access.and_then(|x| format!("{x}->parent.lock()"));
+                }
 
                 let window = access_window_field(ctx);
-                let current_sub_component = parent_ctx.current_sub_component().unwrap();
+                let current_sub_component = &ctx.compilation_unit.sub_components[ctx.parent_sub_component_idx(*parent_level).unwrap()];
                 let popup = &current_sub_component.popup_windows[*popup_index as usize];
                 let popup_window_id =
                     ident(&ctx.compilation_unit.sub_components[popup.item_tree.root].name);
                 let parent_component = access_item_rc(parent_ref, ctx);
+                let parent_ctx = ParentScope::new(ctx, None);
                 let popup_ctx = EvaluationContext::new_sub_component(
                     ctx.compilation_unit,
                     popup.item_tree.root,
                     CppGeneratorContext { global_access: "self->globals".into(), conditional_includes: ctx.generator_state.conditional_includes },
-                    Some(ParentCtx::new(ctx, None)),
+                    Some(&parent_ctx),
                 );
                 let position = compile_expression(&popup.position.borrow(), &popup_ctx);
                 let close_policy = compile_expression(close_policy, ctx);
@@ -4007,14 +4014,11 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::ClosePopupWindow => {
             if let [llr::Expression::NumberLiteral(popup_index), llr::Expression::PropertyReference(parent_ref)] = arguments {
-                let mut parent_ctx = ctx;
                 let mut component_access = MemberAccess::Direct("self".into());
-                if let llr::PropertyReference::InParent { level, .. } = parent_ref {
-                    for _ in 0..level.get() {
-                        component_access = component_access.and_then(|x| format!("{x}->parent.lock()"));
-                        parent_ctx = parent_ctx.parent.as_ref().unwrap().ctx;
-                    }
-                };
+                let llr::MemberReference::Relative { parent_level, .. } = parent_ref else {unreachable!()};
+                for _ in 0..*parent_level {
+                    component_access = component_access.and_then(|x| format!("{x}->parent.lock()"));
+                }
 
                 let window = access_window_field(ctx);
                 component_access.then(|component_access| format!("{window}.close_popup({component_access}->popup_id_{popup_index})"))
@@ -4386,13 +4390,11 @@ fn generate_translation(
 
     let ctx = EvaluationContext {
         compilation_unit,
-        current_sub_component: None,
-        current_global: None,
+        current_scope: EvaluationScope::Global(0.into()),
         generator_state: CppGeneratorContext {
             global_access: "\n#error \"language rule can't access state\";".into(),
             conditional_includes: &Default::default(),
         },
-        parent: None,
         argument_types: &[Type::Int32],
     };
     declarations.push(Declaration::Var(Var {
