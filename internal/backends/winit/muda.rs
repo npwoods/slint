@@ -257,7 +257,7 @@ impl MudaAdapter {
         let theme = match theme {
             i_slint_core::items::ColorScheme::Dark => muda::MenuTheme::Dark,
             i_slint_core::items::ColorScheme::Light => muda::MenuTheme::Light,
-            i_slint_core::items::ColorScheme::Unknown => muda::MenuTheme::Auto,
+            i_slint_core::items::ColorScheme::Unknown | _ => muda::MenuTheme::Auto,
         };
         if let RawWindowHandle::Win32(handle) = winit_window.window_handle().unwrap().as_raw() {
             unsafe { self.menu.set_theme_for_hwnd(handle.hwnd.get(), theme).unwrap() };
@@ -269,7 +269,7 @@ impl MudaAdapter {
         let menu_bar = muda::Menu::new();
         create_default_app_menu(&menu_bar)?;
         menu_bar.init_for_nsapp();
-        Ok(Self { entries: vec![], menu: menu_bar, tracker: None })
+        Ok(Self { entries: Vec::new(), menu: menu_bar, tracker: None })
     }
 
     #[cfg(target_os = "macos")]

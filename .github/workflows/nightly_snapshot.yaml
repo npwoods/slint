@@ -97,7 +97,7 @@ jobs:
                       artifact_name: slint-lsp-aarch64-pc-windows-msvc.exe
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: ${{ matrix.toolchain }}
@@ -117,15 +117,15 @@ jobs:
                   path: |
                       bin
 
-    build_vscode_lsp_macos_aarch64_bundle:
+    build_vscode_lsp_macos_x86_64:
         env:
             SLINT_NO_QT: 1
-        runs-on: macos-26
+        runs-on: macos-15-intel
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
-                  target: aarch64-apple-darwin
+                  target: x86_64-apple-darwin
             - name: Install cargo-bundle
               run: cargo install --version=0.6.0 cargo-bundle
             - name: Build Main LSP Bundle
@@ -135,18 +135,68 @@ jobs:
               run: |
                   mkdir bin
                   cp -a target/release/bundle/osx/Slint\ Live\ Preview.app bin
-            - uses: ./.github/actions/codesign
+            - name: "Upload LSP Artifact"
+              uses: actions/upload-artifact@v5
               with:
-                  binary: "bin/Slint Live Preview.app"
+                  name: vscode-lsp-binary-x86_64-apple-darwin
+                  path: |
+                      bin
+
+    build_vscode_lsp_macos_aarch64:
+        env:
+            SLINT_NO_QT: 1
+        runs-on: macos-26
+        steps:
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/setup-rust
+              with:
+                  target: aarch64-apple-darwin
+            - name: Build AArch64 LSP
+              run: cargo build --target aarch64-apple-darwin --features ${{ env.SLINT_BINARY_FEATURES }} --release -p slint-lsp
+            - name: Create artifact directory
+              run: |
+                  mkdir bin
+                  cp -a target/aarch64-apple-darwin/release/slint-lsp bin/slint-lsp-aarch64-apple-darwin
+            - name: "Upload LSP Artifact"
+              uses: actions/upload-artifact@v5
+              with:
+                  name: vscode-lsp-binary-aarch64-apple-darwin
+                  path: |
+                      bin
+
+    build_vscode_lsp_macos_bundle:
+        needs: [build_vscode_lsp_macos_x86_64, build_vscode_lsp_macos_aarch64]
+        runs-on: macos-15
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  path: "src"
+            - uses: actions/download-artifact@v6
+              with:
+                  name: vscode-lsp-binary-x86_64-apple-darwin
+            - uses: actions/download-artifact@v6
+              with:
+                  name: vscode-lsp-binary-aarch64-apple-darwin
+                  path: bin
+            - name: Add macOS AArch64 binary to bundle
+              run: |
+                  lipo -create -output tmp Slint\ Live\ Preview.app/Contents/MacOS/slint-lsp bin/slint-lsp-aarch64-apple-darwin
+                  mv tmp Slint\ Live\ Preview.app/Contents/MacOS/slint-lsp
+                  rm -rf bin
+            - uses: ./src/.github/actions/codesign
+              with:
+                  binary: "Slint Live Preview.app"
                   certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
                   certificate_password: ${{ secrets.APPLE_CERTIFICATE_P12_PASSWORD }}
                   keychain_password: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
                   developer_id: ${{ secrets.APPLE_DEV_ID }}
+            - name: "Remove temporary source checkout"
+              run: rm -rf src
             - name: "Upload LSP macOS bundle Artifact"
               uses: actions/upload-artifact@v5
               with:
                   name: vscode-lsp-binary-darwin
-                  path: bin
+                  path: .
 
     build_vscode_cross_linux_lsp:
         env:
@@ -158,7 +208,7 @@ jobs:
                     - aarch64-unknown-linux-gnu
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: ${{ matrix.target }}
@@ -182,14 +232,14 @@ jobs:
         needs:
             [
                 build_vscode_lsp_linux_windows,
-                build_vscode_lsp_macos_aarch64_bundle,
+                build_vscode_lsp_macos_bundle,
                 build_vscode_cross_linux_lsp,
                 check-for-secrets,
             ]
         runs-on: macos-14
         if: ${{ needs.check-for-secrets.outputs.has-openvsx-pat == 'yes' && needs.check-for-secrets.outputs.has-vscode-marketplace-pat == 'yes' }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: pnpm/action-setup@v4.2.0
               with:
                 version: 10.18.2
@@ -272,7 +322,7 @@ jobs:
     build-figma-plugin:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: actions/setup-node@v6
               with:
                 node-version: 20
@@ -303,7 +353,7 @@ jobs:
     #    if: github.event.inputs.private != 'true'
     #    runs-on: ubuntu-22.04
     #    steps:
-    #      - uses: actions/checkout@v5
+    #      - uses: actions/checkout@v6
     #      - name: Upload artifact
     #        uses: actions/upload-artifact@v5
     #        with:
@@ -329,7 +379,7 @@ jobs:
                 private-key: ${{ secrets.READ_WRITE_PRIVATE_KEY }}
                 repositories: website
             - name: Clone website directory
-              uses: actions/checkout@v5
+              uses: actions/checkout@v6
               with:
                 repository: slint-ui/website
                 ref: prod
@@ -361,7 +411,7 @@ jobs:
                   name: android-demo
                   path: android
 
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
               with:
                 path: "slint-src"
                 sparse-checkout: .
@@ -384,7 +434,7 @@ jobs:
                 repositories: www-releases
 
             - name: Clone www-releases/releases and slintpad directory
-              uses: actions/checkout@v5
+              uses: actions/checkout@v6
               if: ${{ github.event.inputs.release  == 'true' }}
               with:
                 repository: slint-ui/www-releases
@@ -395,7 +445,7 @@ jobs:
                   slintpad
 
             - name: Clone www-releases/snapshots directory
-              uses: actions/checkout@v5
+              uses: actions/checkout@v6
               if: ${{ github.event.inputs.release  != 'true' }}
               with:
                 repository: slint-ui/www-releases
@@ -567,7 +617,7 @@ jobs:
                   mv slint-lsp-windows*.zip artifacts/
                   mv slint-compiler-*.tar.gz artifacts/
                   mv figma-plugin.zip artifacts/
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
               with:
                 path: "slint-src"
                 sparse-checkout: docs
@@ -655,12 +705,13 @@ jobs:
             matrix:
                 include:
                     - os: ubuntu-22.04
-                      name: "Ubuntu 22.04 nightly"
-                      rust_version: "nightly"
-                      cache: false
-                    - os: windows-2022
-                      name: "Windows 2022 1.88"
+                      name: "Ubuntu 22.04 1.88"
                       rust_version: "1.88"
+                      cache: false
+                      extra_args: "--exclude plotter"
+                    - os: windows-2022
+                      name: "Windows 2022 nightly"
+                      rust_version: "nightly"
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
                       cache: false
                     - os: macos-14
@@ -682,7 +733,8 @@ jobs:
             CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/install-linux-dependencies
             - name: Install Android API level 30
               run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
             - name: Cache cargo-apk

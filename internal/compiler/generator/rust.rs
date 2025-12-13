@@ -14,7 +14,7 @@ Some convention used in the generated code:
 
 use crate::CompilerConfiguration;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp, OperatorClass};
-use crate::langtype::{Enumeration, EnumerationValue, Struct, Type};
+use crate::langtype::{Enumeration, EnumerationValue, Struct, StructName, Type};
 use crate::layout::Orientation;
 use crate::llr::{
     self, EvaluationContext as llr_EvaluationContext, EvaluationScope, Expression, ParentScope,
@@ -91,15 +91,14 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
         Type::Percent => Some(quote!(f32)),
         Type::Bool => Some(quote!(bool)),
         Type::Image => Some(quote!(sp::Image)),
+        Type::StyledText => Some(quote!(sp::StyledText)),
         Type::Struct(s) => {
-            if let Some(name) = &s.name {
-                Some(struct_name_to_tokens(name))
-            } else {
+            struct_name_to_tokens(&s.name).or_else(|| {
                 let elem =
                     s.fields.values().map(rust_primitive_type).collect::<Option<Vec<_>>>()?;
                 // This will produce a tuple
                 Some(quote!((#(#elem,)*)))
-            }
+            })
         }
         Type::Array(o) => {
             let inner = rust_primitive_type(o)?;
@@ -113,6 +112,11 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
         Type::LayoutCache => Some(quote!(
             sp::SharedVector<
                 sp::Coord,
+            >
+        )),
+        Type::ArrayOfU16 => Some(quote!(
+            sp::SharedVector<
+                u16,
             >
         )),
         _ => None,
@@ -282,8 +286,8 @@ pub fn generate_types(used_types: &[Type]) -> (Vec<Ident>, TokenStream) {
         .iter()
         .filter_map(|ty| match ty {
             Type::Struct(s) => match s.as_ref() {
-                Struct { fields, name: Some(name), node: Some(_), rust_attributes } => {
-                    Some((ident(name), generate_struct(name, fields, rust_attributes)))
+                Struct { fields, name: struct_name @ StructName::User { name, .. } } => {
+                    Some((ident(name), generate_struct(struct_name, fields)))
                 }
                 _ => None,
             },
@@ -411,15 +415,11 @@ fn generate_shared_globals(
     let global_names = llr
         .globals
         .iter()
-        .filter(|g| g.is_builtin || g.must_generate())
+        .filter(|g| g.must_generate())
         .map(|g| format_ident!("global_{}", ident(&g.name)))
         .collect::<Vec<_>>();
-    let global_types = llr
-        .globals
-        .iter()
-        .filter(|g| g.is_builtin || g.must_generate())
-        .map(global_inner_name)
-        .collect::<Vec<_>>();
+    let global_types =
+        llr.globals.iter().filter(|g| g.must_generate()).map(global_inner_name).collect::<Vec<_>>();
 
     let from_library_global_names = llr
         .globals
@@ -514,25 +514,27 @@ fn generate_shared_globals(
     }
 }
 
-fn generate_struct(
-    name: &str,
-    fields: &BTreeMap<SmolStr, Type>,
-    rust_attributes: &Option<Vec<SmolStr>>,
-) -> TokenStream {
-    let component_id = struct_name_to_tokens(name);
+fn generate_struct(name: &StructName, fields: &BTreeMap<SmolStr, Type>) -> TokenStream {
+    let component_id = struct_name_to_tokens(&name).unwrap();
     let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) =
         fields.iter().map(|(name, ty)| (ident(name), rust_primitive_type(ty).unwrap())).unzip();
 
-    let attributes = if let Some(feature) = rust_attributes {
-        let attr =
-            feature.iter().map(|f| match TokenStream::from_str(format!(r#"#[{f}]"#).as_str()) {
-                Ok(eval) => eval,
-                Err(_) => quote! {},
-            });
-        quote! { #(#attr)* }
-    } else {
-        quote! {}
-    };
+    let StructName::User { name, node } = name else { unreachable!("generating non-user struct") };
+
+    let attributes = node
+        .parent()
+        .and_then(crate::parser::syntax_nodes::StructDeclaration::new)
+        .and_then(|d| d.AtRustAttr())
+        .map(|n| match TokenStream::from_str(&n.text().to_string()) {
+            Ok(t) => quote!(#[#t]),
+            Err(_) => {
+                let source_location = crate::diagnostics::Spanned::to_source_location(&n);
+                let error = format!(
+                    "Error parsing @rust-attr for struct '{name}' declared at {source_location}"
+                );
+                quote!(compile_error!(#error);)
+            }
+        });
 
     quote! {
         #attributes
@@ -663,7 +665,7 @@ fn public_api(
     self_init: TokenStream,
     ctx: &EvaluationContext,
 ) -> TokenStream {
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in public_properties {
         let prop_ident = ident(&p.name);
         let prop = access_member(&p.prop, ctx).unwrap();
@@ -798,11 +800,11 @@ fn generate_sub_component(
         }))
         .collect::<Vec<_>>();
 
-    let mut declared_property_vars = vec![];
-    let mut declared_property_types = vec![];
-    let mut declared_callbacks = vec![];
-    let mut declared_callbacks_types = vec![];
-    let mut declared_callbacks_ret = vec![];
+    let mut declared_property_vars = Vec::new();
+    let mut declared_property_types = Vec::new();
+    let mut declared_callbacks = Vec::new();
+    let mut declared_callbacks_types = Vec::new();
+    let mut declared_callbacks_ret = Vec::new();
 
     for property in component.properties.iter() {
         let prop_ident = ident(&property.name);
@@ -828,9 +830,9 @@ fn generate_sub_component(
 
     let declared_functions = generate_functions(component.functions.as_ref(), &ctx);
 
-    let mut init = vec![];
-    let mut item_names = vec![];
-    let mut item_types = vec![];
+    let mut init = Vec::new();
+    let mut item_names = Vec::new();
+    let mut item_types = Vec::new();
 
     #[cfg(slint_debug_property)]
     init.push(quote!(
@@ -860,10 +862,10 @@ fn generate_sub_component(
         }
     }
 
-    let mut repeated_visit_branch: Vec<TokenStream> = vec![];
-    let mut repeated_element_components: Vec<TokenStream> = vec![];
-    let mut repeated_subtree_ranges: Vec<TokenStream> = vec![];
-    let mut repeated_subtree_components: Vec<TokenStream> = vec![];
+    let mut repeated_visit_branch: Vec<TokenStream> = Vec::new();
+    let mut repeated_element_components: Vec<TokenStream> = Vec::new();
+    let mut repeated_subtree_ranges: Vec<TokenStream> = Vec::new();
+    let mut repeated_subtree_components: Vec<TokenStream> = Vec::new();
 
     for (idx, repeated) in component.repeated.iter_enumerated() {
         extra_components.push(generate_repeated_component(
@@ -970,9 +972,9 @@ fn generate_sub_component(
         }
     }
 
-    let mut accessible_role_branch = vec![];
-    let mut accessible_string_property_branch = vec![];
-    let mut accessibility_action_branch = vec![];
+    let mut accessible_role_branch = Vec::new();
+    let mut accessible_string_property_branch = Vec::new();
+    let mut accessibility_action_branch = Vec::new();
     let mut supported_accessibility_actions = BTreeMap::<u32, BTreeSet<_>>::new();
     for ((index, what), expr) in &component.accessible_prop {
         let e = compile_expression(&expr.borrow(), &ctx);
@@ -1018,8 +1020,8 @@ fn generate_sub_component(
 
     let mut user_init_code: Vec<TokenStream> = Vec::new();
 
-    let mut sub_component_names: Vec<Ident> = vec![];
-    let mut sub_component_types: Vec<Ident> = vec![];
+    let mut sub_component_names: Vec<Ident> = Vec::new();
+    let mut sub_component_types: Vec<Ident> = Vec::new();
 
     for sub in &component.sub_components {
         let field_name = ident(&sub.name);
@@ -1429,11 +1431,11 @@ fn generate_global(
     compiler_config: &CompilerConfiguration,
     global_exports: &mut Vec<TokenStream>,
 ) -> TokenStream {
-    let mut declared_property_vars = vec![];
-    let mut declared_property_types = vec![];
-    let mut declared_callbacks = vec![];
-    let mut declared_callbacks_types = vec![];
-    let mut declared_callbacks_ret = vec![];
+    let mut declared_property_vars = Vec::new();
+    let mut declared_property_types = Vec::new();
+    let mut declared_callbacks = Vec::new();
+    let mut declared_callbacks_types = Vec::new();
+    let mut declared_callbacks_ret = Vec::new();
 
     for property in global.properties.iter() {
         declared_property_vars.push(ident(&property.name));
@@ -1447,8 +1449,8 @@ fn generate_global(
         declared_callbacks_ret.push(rust_primitive_type(&callback.ret_ty));
     }
 
-    let mut init = vec![];
-    let inner_component_id = format_ident!("Inner{}", ident(&global.name));
+    let mut init = Vec::new();
+    let inner_component_id = global_inner_name(global);
 
     #[cfg(slint_debug_property)]
     init.push(quote!(
@@ -1510,7 +1512,7 @@ fn generate_global(
         }
     }));
 
-    let pub_token = if compiler_config.library_name.is_some() {
+    let pub_token = if compiler_config.library_name.is_some() && !global.is_builtin {
         global_exports.push(quote! (#inner_component_id));
         quote!(pub)
     } else {
@@ -1539,35 +1541,37 @@ fn generate_global(
         )
     });
 
-    quote!(
-        #[derive(sp::FieldOffsets, Default)]
-        #[const_field_offset(sp::const_field_offset)]
-        #[repr(C)]
-        #[pin]
-        #pub_token struct #inner_component_id {
-            #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
-            #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
-            #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
-            globals : sp::OnceCell<sp::Weak<SharedGlobals>>,
-        }
-
-        impl #inner_component_id {
-            fn new() -> ::core::pin::Pin<sp::Rc<Self>> {
-                sp::Rc::pin(Self::default())
-            }
-            fn init(self: ::core::pin::Pin<sp::Rc<Self>>, globals: &sp::Rc<SharedGlobals>) {
-                #![allow(unused)]
-                let _ = self.globals.set(sp::Rc::downgrade(globals));
-                let self_rc = self;
-                let _self = self_rc.as_ref();
-                #(#init)*
+    let private_interface = (!global.is_builtin).then(|| {
+        quote!(
+            #[derive(sp::FieldOffsets, Default)]
+            #[const_field_offset(sp::const_field_offset)]
+            #[repr(C)]
+            #[pin]
+            #pub_token struct #inner_component_id {
+                #(#pub_token  #declared_property_vars: sp::Property<#declared_property_types>,)*
+                #(#pub_token  #declared_callbacks: sp::Callback<(#(#declared_callbacks_types,)*), #declared_callbacks_ret>,)*
+                #(#pub_token  #change_tracker_names : sp::ChangeTracker,)*
+                globals : sp::OnceCell<sp::Weak<SharedGlobals>>,
             }
 
-            #(#declared_functions)*
-        }
+            impl #inner_component_id {
+                fn new() -> ::core::pin::Pin<sp::Rc<Self>> {
+                    sp::Rc::pin(Self::default())
+                }
+                fn init(self: ::core::pin::Pin<sp::Rc<Self>>, globals: &sp::Rc<SharedGlobals>) {
+                    #![allow(unused)]
+                    let _ = self.globals.set(sp::Rc::downgrade(globals));
+                    let self_rc = self;
+                    let _self = self_rc.as_ref();
+                    #(#init)*
+                }
 
-        #public_interface
-    )
+                #(#declared_functions)*
+            }
+        )
+    });
+
+    quote!(#private_interface #public_interface)
 }
 
 fn generate_global_getters(
@@ -1651,8 +1655,8 @@ fn generate_item_tree(
             }
         }
     }));
-    let mut item_tree_array = vec![];
-    let mut item_array = vec![];
+    let mut item_tree_array = Vec::new();
+    let mut item_array = Vec::new();
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
         let (path, component) =
@@ -2127,10 +2131,16 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
             }
         }
         llr::MemberReference::Global { global_index, member } => {
-            let global_access = &ctx.generator_state.global_access;
             let global = &ctx.compilation_unit.globals[*global_index];
-            let global_id = format_ident!("global_{}", ident(&global.name));
-            in_global(global, member, quote!(#global_access.#global_id.as_ref()))
+            let s = if matches!(ctx.current_scope, EvaluationScope::Global(i) if i == *global_index)
+            {
+                quote!(_self)
+            } else {
+                let global_access = &ctx.generator_state.global_access;
+                let global_id = format_ident!("global_{}", ident(&global.name));
+                quote!(#global_access.#global_id.as_ref())
+            };
+            in_global(global, member, s)
         }
     }
 }
@@ -2295,17 +2305,17 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 (Type::Struct (lhs), Type::Struct (rhs)) => {
                     debug_assert_eq!(lhs.fields, rhs.fields, "cast of struct with deferent fields should be handled before llr");
                     match (&lhs.name, &rhs.name) {
-                        (None, Some(struct_name)) => {
+                        (StructName::None, targetstruct) if targetstruct.is_some() => {
                             // Convert from an anonymous struct to a named one
                             let fields = lhs.fields.iter().enumerate().map(|(index, (name, _))| {
                                 let index = proc_macro2::Literal::usize_unsuffixed(index);
                                 let name = ident(name);
                                 quote!(the_struct.#name =  obj.#index as _;)
                             });
-                            let id = struct_name_to_tokens(struct_name);
+                            let id = struct_name_to_tokens(targetstruct).unwrap();
                             quote!({ let obj = #f; let mut the_struct = #id::default(); #(#fields)* the_struct })
                         }
-                        (Some(_), None) => {
+                        (sourcestruct, StructName::None) if sourcestruct.is_some() => {
                             // Convert from a named struct to an anonymous one
                             let fields = lhs.fields.keys().map(|name| ident(name));
                             quote!({ let obj = #f; (#(obj.#fields,)*) })
@@ -2357,7 +2367,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                         let v = v.as_str();
                         quote!(#c => sp::SharedString::from(#v))
                     });
-                    quote!(match #f { #(#cases),* })
+                    quote!(match #f { #(#cases,)*  _ => sp::SharedString::default() })
                 }
                 (_, Type::Void) => {
                     quote!({#f;})
@@ -2585,10 +2595,10 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         }
         Expression::Struct { ty, values } => {
             let elem = ty.fields.keys().map(|k| values.get(k).map(|e| compile_expression(e, ctx)));
-            if let Some(name) = &ty.name {
-                let name_tokens: TokenStream = struct_name_to_tokens(name.as_str());
+            if ty.name.is_some() {
+                let name_tokens = struct_name_to_tokens(&ty.name).unwrap();
                 let keys = ty.fields.keys().map(|k| ident(k));
-                if name.starts_with("slint::private_api::") && name.ends_with("LayoutData") {
+                if matches!(&ty.name, StructName::BuiltinPrivate(private_type) if private_type.is_layout_data()) {
                     quote!(#name_tokens{#(#keys: #elem as _,)*})
                 } else {
                     quote!({ let mut the_struct = #name_tokens::default(); #(the_struct.#keys =  #elem as _;)* the_struct})
@@ -2710,21 +2720,6 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             sub_expression,
             ctx,
         ),
-        Expression::ComputeDialogLayoutCells { cells_variable, roles, unsorted_cells } => {
-            let cells_variable = ident(cells_variable);
-            let roles = compile_expression(roles, ctx);
-            let cells = match &**unsorted_cells {
-                Expression::Array { values, .. } => {
-                    values.iter().map(|v| compile_expression(v, ctx))
-                }
-                _ => panic!("dialog layout unsorted cells not an array"),
-            };
-            quote! {
-                let mut #cells_variable = [#(#cells),*];
-                sp::reorder_dialog_button_layout(&mut #cells_variable, &#roles);
-                let #cells_variable = sp::Slice::from_slice(&#cells_variable);
-            }
-        }
         Expression::MinMax { ty, op, lhs, rhs } => {
             let lhs = compile_expression(lhs, ctx);
             let t = rust_primitive_type(ty);
@@ -3397,17 +3392,32 @@ fn compile_builtin_function_call(
             let url = a.next().unwrap();
             quote!(sp::open_url(&#url))
         }
+        BuiltinFunction::EscapeMarkdown => {
+            let text = a.next().unwrap();
+            quote!(sp::escape_markdown(&#text))
+        }
+        BuiltinFunction::ParseMarkdown => {
+            let text = a.next().unwrap();
+            quote!(sp::parse_markdown(&#text))
+        }
     }
 }
 
-/// Return a TokenStream for a name (as in [`Type::Struct::name`])
-fn struct_name_to_tokens(name: &str) -> TokenStream {
-    // the name match the C++ signature so we need to change that to the rust namespace
-    let mut name = name.replace("slint::private_api::", "sp::").replace('-', "_");
-    if !name.contains("::") {
-        name.insert_str(0, "r#")
+fn struct_name_to_tokens(name: &StructName) -> Option<proc_macro2::TokenStream> {
+    match name {
+        StructName::None => None,
+        StructName::User { name, .. } => Some(proc_macro2::TokenTree::from(ident(name)).into()),
+        StructName::BuiltinPrivate(builtin_private_struct) => {
+            let name: &'static str = builtin_private_struct.into();
+            let name = format_ident!("{}", name);
+            Some(quote!(sp::#name))
+        }
+        StructName::BuiltinPublic(builtin_public_struct) => {
+            let name: &'static str = builtin_public_struct.into();
+            let name = format_ident!("{}", name);
+            Some(quote!(slint::#name))
+        }
     }
-    name.parse().unwrap()
 }
 
 fn box_layout_function(
@@ -3422,7 +3432,7 @@ fn box_layout_function(
     let inner_component_id = self::inner_component_id(ctx.current_sub_component().unwrap());
     let mut fixed_count = 0usize;
     let mut repeated_count = quote!();
-    let mut push_code = vec![];
+    let mut push_code = Vec::new();
     let mut repeater_idx = 0usize;
     for item in elements {
         match item {
@@ -3622,20 +3632,37 @@ pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<Toke
         .iter()
         .filter_map(|export| match &export.1 {
             Either::Left(component) if !component.is_global() => {
-                Some((&export.0.name, &component.id))
+                if export.0.name != component.id {
+                    Some((
+                        &export.0.name,
+                        proc_macro2::TokenTree::from(ident(&component.id)).into(),
+                    ))
+                } else {
+                    None
+                }
             }
             Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                    Some((&export.0.name, s.name.as_ref().unwrap()))
+                Type::Struct(s) if s.node().is_some() => {
+                    if let StructName::User { name, .. } = &s.name
+                        && *name == export.0.name
+                    {
+                        None
+                    } else {
+                        Some((&export.0.name, struct_name_to_tokens(&s.name).unwrap()))
+                    }
                 }
-                Type::Enumeration(en) => Some((&export.0.name, &en.name)),
+                Type::Enumeration(en) => {
+                    if export.0.name != en.name {
+                        Some((&export.0.name, proc_macro2::TokenTree::from(ident(&en.name)).into()))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             },
             _ => None,
         })
-        .filter(|(export_name, type_name)| export_name != type_name)
-        .map(|(export_name, type_name)| {
-            let type_id = ident(type_name);
+        .map(|(export_name, type_id)| {
             let export_id = ident(export_name);
             quote!(#type_id as #export_id)
         })

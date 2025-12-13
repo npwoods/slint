@@ -36,13 +36,13 @@ use corelib::items::{ItemRc, ItemRef};
 #[cfg(any(enable_accesskit, muda))]
 use crate::SlintEvent;
 use crate::{EventResult, SharedBackendData};
+use corelib::Property;
 use corelib::api::PhysicalSize;
 use corelib::layout::Orientation;
 use corelib::lengths::LogicalLength;
 use corelib::platform::{PlatformError, WindowEvent};
 use corelib::window::{WindowAdapter, WindowAdapterInternal, WindowInner};
-use corelib::Property;
-use corelib::{graphics::*, Coord};
+use corelib::{Coord, graphics::*};
 use i_slint_core::{self as corelib};
 use std::cell::OnceCell;
 #[cfg(any(enable_accesskit, muda))]
@@ -824,6 +824,7 @@ impl WinitWindowAdapter {
                 ColorScheme::Unknown => None,
                 ColorScheme::Dark => Some(winit::window::Theme::Dark),
                 ColorScheme::Light => Some(winit::window::Theme::Light),
+                _ => None,
             });
         }
     }
@@ -1353,6 +1354,7 @@ impl WindowAdapterInternal for WinitWindowAdapter {
             MouseCursor::NsResize => winit::window::CursorIcon::NsResize,
             MouseCursor::NeswResize => winit::window::CursorIcon::NeswResize,
             MouseCursor::NwseResize => winit::window::CursorIcon::NwseResize,
+            _ => winit::window::CursorIcon::Default,
         };
         if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
             winit_window.set_cursor_visible(cursor != MouseCursor::None);
@@ -1376,7 +1378,10 @@ impl WindowAdapterInternal for WinitWindowAdapter {
             };
             winit_window.set_ime_purpose(match props.input_type {
                 corelib::items::InputType::Password => winit::window::ImePurpose::Password,
-                _ => winit::window::ImePurpose::Normal,
+                corelib::items::InputType::Text
+                | corelib::items::InputType::Number
+                | corelib::items::InputType::Decimal
+                | _ => winit::window::ImePurpose::Normal,
             });
             winit_window.set_ime_cursor_area(
                 position_to_winit(&props.cursor_rect_origin.into()),
@@ -1405,10 +1410,6 @@ impl WindowAdapterInternal for WinitWindowAdapter {
             }
             _ => {}
         };
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 
     fn color_scheme(&self) -> ColorScheme {

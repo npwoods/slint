@@ -49,7 +49,8 @@ renderer-software = [
   "dep:softbuffer",
   "dep:imgref",
   "dep:rgb",
-  "i-slint-core/software-renderer-systemfonts",
+  "dep:i-slint-renderer-software",
+  "i-slint-renderer-software/std",
   "dep:bytemuck",
 ]
 accessibility = ["dep:accesskit", "dep:accesskit_winit"]
@@ -90,6 +91,7 @@ i-slint-renderer-femtovg = { workspace = true, features = ["default"], optional 
 i-slint-renderer-skia = { workspace = true, features = ["default"], optional = true }
 
 # For the software renderer
+i-slint-renderer-software = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true, default-features = false }
 imgref = { version = "1.6.1", optional = true }
 rgb = { version = "0.8.27", optional = true }

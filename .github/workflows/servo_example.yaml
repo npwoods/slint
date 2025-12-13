@@ -6,23 +6,17 @@ name: Servo example
 on:
   workflow_dispatch:
   workflow_call:
-    secrets:
-      ANDROID_KEYSTORE_BASE64:
-        required: true
-      ANDROID_KEYSTORE_PASSWORD:
-        required: true
 
 jobs:
   matrix_build:
     strategy:
       fail-fast: false
       matrix:
-        # os: [ubuntu-latest, macos-latest]
-        # removed ubuntu build for now as it failed cause related to yeslogic-fontconfig-sys and fontique dlopen feature conflict
-        os: [macos-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    name: servo ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         # required for servo
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -36,14 +30,13 @@ jobs:
         working-directory: examples/servo
         run: cargo build --release
   android_build:
-    runs-on: macos-latest
+    name: servo android
+    runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: false
-      CARGO_PROFILE_RELEASE_OPT_LEVEL: s
-      CARGO_APK_RELEASE_KEYSTORE: /Users/runner/.android/release.keystore
-      CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         # required for servo
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -55,17 +48,13 @@ jobs:
         uses: ./.github/actions/install-linux-dependencies
       - name: Install skia dependencies
         uses: ./.github/actions/install-skia-dependencies
-        # required for anroid
+        # required for android
       - name: Install API level
         run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
       - name: Install cargo-apk
         run: cargo install cargo-apk
-      - name: Decode keystore
-        run: |
-          mkdir -p /Users/runner/.android
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > $CARGO_APK_RELEASE_KEYSTORE
       - name: Build
         working-directory: examples/servo
         run: |
-          export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android30 --sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
-          cargo apk build --target aarch64-linux-android --lib --release
+          export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android30 --sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          cargo apk build --target aarch64-linux-android --lib

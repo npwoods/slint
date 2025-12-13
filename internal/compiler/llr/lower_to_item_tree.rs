@@ -6,7 +6,9 @@ use by_address::ByAddress;
 use super::lower_expression::{ExpressionLoweringCtx, ExpressionLoweringCtxInner};
 use crate::CompilerConfiguration;
 use crate::expression_tree::Expression as tree_Expression;
-use crate::langtype::{ElementType, Struct, Type};
+use crate::langtype::{
+    BuiltinPrivateStruct, BuiltinPublicStruct, ElementType, Struct, StructName, Type,
+};
 use crate::llr::item_tree::*;
 use crate::namedreference::NamedReference;
 use crate::object_tree::{self, Component, ElementRc, PropertyAnalysis, PropertyVisibility};
@@ -163,7 +165,7 @@ impl LoweredSubComponentMapping {
             LoweredElement::NativeItem { item_index } => MemberReference::Relative {
                 parent_level: 0,
                 local_reference: LocalMemberReference {
-                    sub_component_path: vec![],
+                    sub_component_path: Vec::new(),
                     reference: LocalMemberIndex::Native {
                         item_index: *item_index,
                         prop_name: from.name().clone(),
@@ -298,7 +300,7 @@ fn lower_sub_component(
                     ret_ty: function.return_type.clone(),
                     args: function.args.clone(),
                     // will be replaced later
-                    code: super::Expression::CodeBlock(vec![]),
+                    code: super::Expression::CodeBlock(Vec::new()),
                 });
                 index.into()
             } else if let Type::Callback(callback) = &x.property_type {
@@ -322,7 +324,10 @@ fn lower_sub_component(
                 NamedReference::new(element, p.clone()),
                 MemberReference::Relative {
                     parent_level: 0,
-                    local_reference: LocalMemberReference { sub_component_path: vec![], reference },
+                    local_reference: LocalMemberReference {
+                        sub_component_path: Vec::new(),
+                        reference,
+                    },
                 },
             );
         }
@@ -444,7 +449,7 @@ fn lower_sub_component(
 
             let is_state_info = matches!(
                 e.borrow().lookup_property(p).property_type,
-                Type::Struct(s) if s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo"))
+                Type::Struct(s) if matches!(s.name, StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo))
             );
 
             sub_component.property_init.push((
@@ -464,15 +469,14 @@ fn lower_sub_component(
             .borrow()
             .get(p)
             .is_none_or(|a| a.is_set || a.is_set_externally)
+            && let Some(anim) = binding.animation.as_ref()
         {
-            if let Some(anim) = binding.animation.as_ref() {
-                match super::lower_expression::lower_animation(anim, &mut ctx) {
-                    Animation::Static(anim) => {
-                        sub_component.animations.insert(prop.local(), anim);
-                    }
-                    Animation::Transition(_) => {
-                        // Cannot set a property with a transition anyway
-                    }
+            match super::lower_expression::lower_animation(anim, &mut ctx) {
+                Animation::Static(anim) => {
+                    sub_component.animations.insert(prop.local(), anim);
+                }
+                Animation::Transition(_) => {
+                    // Cannot set a property with a transition anyway
                 }
             }
         }
@@ -613,10 +617,7 @@ fn lower_geometry(
         values
             .insert(f.into(), super::Expression::PropertyReference(ctx.map_property_reference(v)));
     }
-    super::Expression::Struct {
-        ty: Rc::new(Struct { fields, name: None, node: None, rust_attributes: None }),
-        values,
-    }
+    super::Expression::Struct { ty: Rc::new(Struct { fields, name: StructName::None }), values }
 }
 
 fn get_property_analysis(elem: &ElementRc, p: &str) -> crate::object_tree::PropertyAnalysis {
@@ -701,7 +702,7 @@ fn lower_popup_component(
     let sc = lower_sub_component(&popup.component, ctx.state, Some(&ctx.inner), compiler_config);
     use super::Expression::PropertyReference as PR;
     let position = super::lower_expression::make_struct(
-        "LogicalPosition",
+        BuiltinPublicStruct::LogicalPosition,
         [
             ("x", Type::LogicalLength, PR(sc.mapping.map_property_reference(&popup.x, ctx.state))),
             ("y", Type::LogicalLength, PR(sc.mapping.map_property_reference(&popup.y, ctx.state))),
@@ -724,7 +725,7 @@ fn lower_timer(timer: &object_tree::Timer, ctx: &ExpressionLoweringCtx) -> Timer
         // TODO: this calls a callback instead of inlining the callback code directly
         triggered: super::Expression::CallBackCall {
             callback: ctx.map_property_reference(&timer.triggered),
-            arguments: vec![],
+            arguments: Vec::new(),
         }
         .into(),
     }
@@ -755,7 +756,7 @@ fn lower_global(
                 ret_ty: function.return_type.clone(),
                 args: function.args.clone(),
                 // will be replaced later
-                code: super::Expression::CodeBlock(vec![]),
+                code: super::Expression::CodeBlock(Vec::new()),
             });
             state.global_properties.insert(
                 nr.clone(),
@@ -904,7 +905,28 @@ fn lower_global_expressions(
         lowered.change_callbacks.insert(property_index, expression.into());
     }
 
-    lowered.public_properties = public_properties(global, &mapping, state);
+    if let Some(builtin) = global.root_element.borrow().native_class() {
+        if lowered.exported {
+            lowered.public_properties = builtin
+                .properties
+                .iter()
+                .map(|(p, c)| {
+                    let property_reference = mapping.map_property_reference(
+                        &NamedReference::new(&global.root_element, p.clone()),
+                        state,
+                    );
+                    PublicProperty {
+                        name: p.clone(),
+                        ty: c.ty.clone(),
+                        prop: property_reference,
+                        read_only: c.property_visibility == PropertyVisibility::Output,
+                    }
+                })
+                .collect()
+        }
+    } else {
+        lowered.public_properties = public_properties(global, &mapping, state);
+    }
 }
 
 fn make_tree(
@@ -944,13 +966,13 @@ fn make_tree(
             is_accessible: false,
             sub_component_path: sub_component_path.into(),
             item_index: itertools::Either::Right(usize::from(*repeated_index) as u32),
-            children: vec![],
+            children: Vec::new(),
         },
         LoweredElement::ComponentPlaceholder { repeated_index } => TreeNode {
             is_accessible: false,
             sub_component_path: sub_component_path.into(),
             item_index: itertools::Either::Right(*repeated_index + repeater_count),
-            children: vec![],
+            children: Vec::new(),
         },
     }
 }

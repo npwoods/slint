@@ -3,7 +3,7 @@
 
 use super::cpp::{Config, concatenate_ident, cpp_ast::*, ident};
 use crate::CompilerConfiguration;
-use crate::langtype::{EnumerationValue, Type};
+use crate::langtype::{EnumerationValue, StructName, Type};
 use crate::llr;
 use crate::object_tree::Document;
 use itertools::Itertools as _;
@@ -153,10 +153,11 @@ fn generate_public_component(
                 .join(", ")
         ),
         format!(
-            "auto live_preview = slint::private_api::live_preview::LiveReloadingComponent({main_file:?}, {:?}, include_paths, library_paths, {:?}, {:?});",
+            "auto live_preview = slint::private_api::live_preview::LiveReloadingComponent({main_file:?}, {:?}, include_paths, library_paths, {:?}, {:?}, {});",
             component.name,
             compiler_config.style.as_ref().unwrap_or(&String::new()),
-            compiler_config.translation_domain.as_ref().unwrap_or(&String::new())
+            compiler_config.translation_domain.as_ref().unwrap_or(&String::new()),
+            compiler_config.no_default_translation_context,
         ),
         format!(
             "auto self_rc = vtable::VRc<slint::private_api::ItemTreeVTable, {component_id}>::make(std::move(live_preview));"
@@ -183,7 +184,7 @@ fn generate_public_component(
             signature: "(slint::private_api::live_preview::LiveReloadingComponent live_preview)"
                 .into(),
             constructor_member_initializers: vec!["live_preview(std::move(live_preview))".into()],
-            statements: Some(vec![]),
+            statements: Some(Vec::new()),
             ..Default::default()
         }),
     ));
@@ -257,7 +258,7 @@ fn generate_global(file: &mut File, global: &llr::GlobalComponent) {
                 "(const slint::private_api::live_preview::LiveReloadingComponent &live_preview)"
                     .into(),
             constructor_member_initializers: vec!["live_preview(live_preview)".into()],
-            statements: Some(vec![]),
+            statements: Some(Vec::new()),
             ..Default::default()
         }),
     ));
@@ -500,8 +501,11 @@ fn convert_from_value_fn(ty: &Type) -> String {
 fn generate_value_conversions(file: &mut File, structs_and_enums: &[Type]) {
     for ty in structs_and_enums {
         match ty {
-            Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                let name = ident(&s.name.as_ref().unwrap());
+            Type::Struct(s) if s.node().is_some() => {
+                let StructName::User { name: struct_name, .. } = &s.name else {
+                    return;
+                };
+                let name = ident(&struct_name);
                 let mut to_statements = vec![
                     "using slint::private_api::live_preview::into_slint_value;".into(),
                     "slint::interpreter::Struct s;".into(),

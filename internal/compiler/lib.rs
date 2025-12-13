@@ -3,6 +3,7 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 // It would be nice to keep the compiler free of unsafe code
 #![deny(unsafe_code)]
 
@@ -142,6 +143,8 @@ pub struct CompilerConfiguration {
     /// When Some, this is the path where the translations are looked at to bundle the translations
     #[cfg(feature = "bundle-translations")]
     pub translation_path_bundle: Option<std::path::PathBuf>,
+    /// Disable the default translation context (the component name)
+    pub no_default_translation_context: bool,
 
     /// Do not generate the hook to create native menus
     pub no_native_menu: bool,
@@ -242,6 +245,7 @@ impl CompilerConfiguration {
             accessibility: true,
             enable_experimental,
             translation_domain: None,
+            no_default_translation_context: false,
             no_native_menu: false,
             cpp_namespace,
             error_on_binding_loop_with_window_layout: false,

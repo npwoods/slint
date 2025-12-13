@@ -289,7 +289,7 @@ pub struct StaticTextures {
 /// time of the file it points to.
 #[derive(PartialEq, Eq, Debug, Hash, Clone)]
 #[repr(C)]
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "ffi"))]
 pub struct CachedPath {
     path: SharedString,
     /// SystemTime since UNIX_EPOC as secs
@@ -318,7 +318,7 @@ pub enum ImageCacheKey {
     /// This variant indicates that no image cache key can be created for the image.
     /// For example this is the case for programmatically created images.
     Invalid = 0,
-    #[cfg(feature = "std")]
+    #[cfg(any(feature = "std", feature = "ffi"))]
     /// The image is identified by its path on the file system and the last modification time stamp.
     Path(CachedPath) = 1,
     /// The image is identified by a URL.
@@ -992,7 +992,7 @@ impl BorrowedOpenGLTextureBuilder {
     /// drivers. A valid texture id is one that was created by the same OpenGL context that is
     /// current during any of the invocations of the callback set on [`Window::set_rendering_notifier()`](crate::api::Window::set_rendering_notifier).
     /// OpenGL contexts between instances of [`slint::Window`](crate::api::Window) are not sharing resources. Consequently
-    /// [`slint::Image`](Self) objects created from borrowed OpenGL textures cannot be shared between
+    /// [`slint::Image`](Image) objects created from borrowed OpenGL textures cannot be shared between
     /// different windows.
     #[allow(unsafe_code)]
     pub unsafe fn new_gl_2d_rgba_texture(texture_id: core::num::NonZeroU32, size: IntSize) -> Self {

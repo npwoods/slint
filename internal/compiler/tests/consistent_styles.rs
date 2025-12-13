@@ -106,8 +106,8 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                         PropertyInfo {
                             ty: Type::Function(Rc::new(Function {
                                 return_type: Type::Void,
-                                args: vec![],
-                                arg_names: vec![],
+                                args: Vec::new(),
+                                arg_names: Vec::new(),
                             })),
                             vis: PropertyVisibility::Public,
                             pure: false,
@@ -118,8 +118,8 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                         PropertyInfo {
                             ty: Type::Function(Rc::new(Function {
                                 return_type: Type::Void,
-                                args: vec![],
-                                arg_names: vec![],
+                                args: Vec::new(),
+                                arg_names: Vec::new(),
                             })),
                             vis: PropertyVisibility::Public,
                             pure: false,
@@ -131,6 +131,7 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
             i_slint_compiler::langtype::ElementType::Native(_) => unreachable!(),
             i_slint_compiler::langtype::ElementType::Error => unreachable!(),
             i_slint_compiler::langtype::ElementType::Global => break,
+            i_slint_compiler::langtype::ElementType::Interface => break,
         };
         elem = e;
     }

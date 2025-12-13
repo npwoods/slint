@@ -5,24 +5,28 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_code)]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 #![no_std]
+#![debugger_visualizer(gdb_script_file = "gdb_pretty_printers.py")]
 
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
 #[cfg(all(not(feature = "std"), feature = "unsafe-single-threaded"))]
-pub(crate) mod unsafe_single_threaded;
+pub mod unsafe_single_threaded;
 #[cfg(all(not(feature = "std"), not(feature = "unsafe-single-threaded")))]
 compile_error!(
     "At least one of the following feature need to be enabled: `std` or `unsafe-single-threaded`"
 );
 use crate::items::OperatingSystemType;
 #[cfg(all(not(feature = "std"), feature = "unsafe-single-threaded"))]
-use crate::unsafe_single_threaded::thread_local;
+pub use crate::unsafe_single_threaded::thread_local;
 #[cfg(feature = "std")]
-use std::thread_local;
+pub use std::thread_local;
 
 pub mod accessibility;
 pub mod animations;
@@ -50,9 +54,8 @@ pub mod renderer;
 pub mod rtti;
 pub mod sharedvector;
 pub mod slice;
-#[cfg(feature = "software-renderer")]
-pub mod software_renderer;
 pub mod string;
+pub mod styled_text;
 pub mod tests;
 pub mod textlayout;
 pub mod timers;
@@ -171,4 +174,34 @@ pub fn open_url(url: &str) {
     if let Err(err) = webbrowser::open(url) {
         debug_log!("Error opening url {}: {}", url, err);
     }
+}
+
+pub fn escape_markdown(text: &str) -> alloc::string::String {
+    let mut out = alloc::string::String::with_capacity(text.len());
+
+    for c in text.chars() {
+        match c {
+            '*' => out.push_str("\\*"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '_' => out.push_str("\\_"),
+            '#' => out.push_str("\\#"),
+            '-' => out.push_str("\\-"),
+            '`' => out.push_str("\\`"),
+            '&' => out.push_str("\\&"),
+            _ => out.push(c),
+        }
+    }
+
+    out
+}
+
+#[cfg_attr(not(feature = "std"), allow(unused))]
+pub fn parse_markdown(text: &str) -> crate::api::StyledText {
+    #[cfg(feature = "std")]
+    {
+        crate::api::StyledText::parse(text).unwrap()
+    }
+    #[cfg(not(feature = "std"))]
+    Default::default()
 }

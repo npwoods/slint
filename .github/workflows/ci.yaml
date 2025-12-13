@@ -39,12 +39,13 @@ jobs:
         api_rs : ${{ steps.filter.outputs.api_rs }}
         tests : ${{ steps.filter.outputs.tests }}
         examples : ${{ steps.filter.outputs.examples }}
+        examples_mcu : ${{ steps.filter.outputs.examples_mcu }}
         vsce : ${{ steps.filter.outputs.vsce }}
         slintpad : ${{ steps.filter.outputs.slintpad }}
         updater_test : ${{ steps.filter.outputs.updater_test }}
         servo_example : ${{ steps.filter.outputs.servo_example }}
       steps:
-        - uses: actions/checkout@v5
+        - uses: actions/checkout@v6
         - uses: dorny/paths-filter@v3
           id: filter
           with:
@@ -53,17 +54,18 @@ jobs:
 
     build_and_test:
         needs: files-changed
-        if: needs.files-changed.outputs.slint == 'true'
+        if: needs.files-changed.outputs.slint == 'true' || needs.files-changed.outputs.examples == 'true'
         strategy:
             matrix:
                 include:
                     - os: ubuntu-22.04
-                      name: "Ubuntu 22.04 1.88"
-                      rust_version: "1.88"
-                      save_if: ${{ github.ref == 'refs/heads/master' }}
-                    - os: windows-2022
-                      name: "Windows 2022 beta"
+                      name: "Ubuntu 22.04 beta"
                       rust_version: "beta"
+                      save_if: ${{ github.ref == 'refs/heads/master' }}
+                      extra_args: "--exclude plotter"
+                    - os: windows-2022
+                      name: "Windows 2022 1.88"
+                      rust_version: "1.88"
                       save_if: ${{ github.ref == 'refs/heads/master' }}
                       extra_args: "--exclude ffmpeg --exclude gstreamer-player"
                     - os: macos-14
@@ -108,21 +110,21 @@ jobs:
     # For changes to Slint internals, do a quick test on Linux for Python only.
     python_test_linux:
         needs: files-changed
-        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_python == 'true'
+        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
         uses: ./.github/workflows/python_test_reusable.yaml
         with:
           name: "Python Linux"
           os: "ubuntu-22.04"
     python_test_macos:
         needs: files-changed
-        if: needs.files-changed.outputs.api_python == 'true'
+        if: needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
         uses: ./.github/workflows/python_test_reusable.yaml
         with:
           name: "Python macOS"
           os: "macos-14"
     python_test_windows:
         needs: files-changed
-        if: needs.files-changed.outputs.api_python == 'true'
+        if: needs.files-changed.outputs.api_python == 'true' || needs.files-changed.outputs.tests == 'true'
         uses: ./.github/workflows/python_test_reusable.yaml
         with:
           name: "Python Windows"
@@ -144,7 +146,7 @@ jobs:
         runs-on: ${{ matrix.os }}
 
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -187,7 +189,7 @@ jobs:
                       rust_version: "stable"
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -235,7 +237,7 @@ jobs:
             CARGO_INCREMENTAL: false
             CARGO_PROFILE_DEV_DEBUG: 0
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
               with:
                   force-gcc-10: true
@@ -268,7 +270,7 @@ jobs:
         if: needs.files-changed.outputs.vsce == 'true'
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: pnpm/action-setup@v4.2.0
               with:
                 version: 10.18.2
@@ -305,7 +307,7 @@ jobs:
     # test to compile the mcu backend for the arm target (no_std)
     mcu:
         needs: files-changed
-        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples == 'true' || needs.files-changed.outputs.api_rs == 'true'
+        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples_mcu == 'true' || needs.files-changed.outputs.api_rs == 'true'
         env:
             SLINT_FONT_SIZES: 8,11,10,12,13,14,15,16,18,20,22,24,32
             RUSTFLAGS: --cfg slint_int_coord -D warnings
@@ -322,7 +324,7 @@ jobs:
                     - feature: stm32h735g
                       target: thumbv7em-none-eabihf
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: ${{matrix.target}}
@@ -332,7 +334,7 @@ jobs:
     # test to compile the mcu backend for the arm target (no_std) using embassy
     mcu-embassy:
         needs: files-changed
-        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples == 'true' || needs.files-changed.outputs.api_rs == 'true'
+        if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.examples_mcu == 'true' || needs.files-changed.outputs.api_rs == 'true'
         env:
             SLINT_FONT_SIZES: 8,11,10,12,13,14,15,16,18,20,22,24,32
             RUSTFLAGS: --cfg slint_int_coord -D warnings
@@ -340,7 +342,7 @@ jobs:
             CARGO_PROFILE_RELEASE_OPT_LEVEL: s
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: thumbv8m.main-none-eabihf
@@ -353,7 +355,7 @@ jobs:
 #            RUSTFLAGS: -D warnings
 #        runs-on: ubuntu-22.04
 #        steps:
-#            - uses: actions/checkout@v5
+#            - uses: actions/checkout@v6
 #            - uses: dtolnay/rust-toolchain@stable
 #            - uses: esp-rs/xtensa-toolchain@v1.6
 #              with:
@@ -371,7 +373,7 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_cpp == 'true'
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   target: armv7-unknown-linux-gnueabihf
@@ -426,7 +428,7 @@ jobs:
                 from_version: ["0.3.0"]
         runs-on: ubuntu-22.04
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
               with:
                   fetch-depth: 0
             - uses: ./.github/actions/install-linux-dependencies
@@ -495,7 +497,7 @@ jobs:
             RUSTFLAGS: -D warnings
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
             - uses: ./.github/actions/setup-rust
             - name: run the formatter
@@ -528,7 +530,8 @@ jobs:
                   . ${IDF_PATH}/export.sh
                   cd $IDF_PYTHON_ENV_PATH
                   bin/pip install pydantic==2.11.10
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - run: apt-get update && apt-get install -y libfontconfig1-dev
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.6
               with:
@@ -548,7 +551,8 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true' || needs.files-changed.outputs.api_rs == 'true' || needs.files-changed.outputs.examples == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/install-linux-dependencies
             - name: Install Android API level 30
               run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
             - name: Cache cargo-apk
@@ -585,7 +589,7 @@ jobs:
         if: needs.files-changed.outputs.internal == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/setup-rust
               with:
                   toolchain: nightly
@@ -599,7 +603,7 @@ jobs:
         if: needs.files-changed.outputs.figma_inspector == 'true'
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: actions/setup-node@v6
               with:
                 node-version: 20
@@ -646,6 +650,3 @@ jobs:
         needs: files-changed
         if: needs.files-changed.outputs.servo_example == 'true'
         uses: ./.github/workflows/servo_example.yaml
-        secrets:
-            ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-            ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}

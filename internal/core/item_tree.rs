@@ -269,10 +269,20 @@ pub enum ParentItemTraversalMode {
 
 /// A ItemRc is holding a reference to a ItemTree containing the item, and the index of this item
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ItemRc {
     item_tree: vtable::VRc<ItemTreeVTable>,
     index: u32,
+}
+
+impl core::fmt::Debug for ItemRc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let comp_ref_pin = vtable::VRc::borrow_pin(&self.item_tree);
+        let mut debug = SharedString::new();
+        comp_ref_pin.as_ref().item_element_infos(self.index, &mut debug);
+
+        write!(f, "ItemRc{{ {:p}, {:?} {debug}}}", comp_ref_pin.as_ptr(), self.index)
+    }
 }
 
 impl ItemRc {
@@ -1479,7 +1489,7 @@ mod tests {
                 parent_index: 0,
                 item_array_index: 0,
             }],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
         VRc::into_dyn(component)
@@ -1550,7 +1560,7 @@ mod tests {
                     item_array_index: 3,
                 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
         VRc::into_dyn(component)
@@ -1660,7 +1670,7 @@ mod tests {
                 },
                 ItemTreeNode::DynamicTree { index: 0, parent_index: 0 },
             ],
-            subtrees: std::cell::RefCell::new(vec![vec![]]),
+            subtrees: std::cell::RefCell::new(vec![Vec::new()]),
             subtree_index: usize::MAX,
         });
         vtable::VRc::into_dyn(component)
@@ -1729,7 +1739,7 @@ mod tests {
                     item_array_index: 0,
                 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
 
@@ -1742,7 +1752,7 @@ mod tests {
                 parent_index: 2,
                 item_array_index: 0,
             }],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: 0,
         })]]);
 
@@ -1854,7 +1864,7 @@ mod tests {
                     item_array_index: 0,
                 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
 
@@ -1870,7 +1880,7 @@ mod tests {
                 },
                 ItemTreeNode::DynamicTree { index: 0, parent_index: 0 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
         let sub_component2 = VRc::new(TestItemTree {
@@ -1891,7 +1901,7 @@ mod tests {
                     item_array_index: 0,
                 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
 
@@ -2031,7 +2041,7 @@ mod tests {
                     item_array_index: 0,
                 },
             ],
-            subtrees: std::cell::RefCell::new(vec![]),
+            subtrees: std::cell::RefCell::new(Vec::new()),
             subtree_index: usize::MAX,
         });
 
@@ -2045,7 +2055,7 @@ mod tests {
                     parent_index: 1,
                     item_array_index: 0,
                 }],
-                subtrees: std::cell::RefCell::new(vec![]),
+                subtrees: std::cell::RefCell::new(Vec::new()),
                 subtree_index: 0,
             }),
             VRc::new(TestItemTree {
@@ -2057,7 +2067,7 @@ mod tests {
                     parent_index: 1,
                     item_array_index: 0,
                 }],
-                subtrees: std::cell::RefCell::new(vec![]),
+                subtrees: std::cell::RefCell::new(Vec::new()),
                 subtree_index: 1,
             }),
             VRc::new(TestItemTree {
@@ -2069,7 +2079,7 @@ mod tests {
                     parent_index: 1,
                     item_array_index: 0,
                 }],
-                subtrees: std::cell::RefCell::new(vec![]),
+                subtrees: std::cell::RefCell::new(Vec::new()),
                 subtree_index: 2,
             }),
         ]]);

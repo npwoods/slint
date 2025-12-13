@@ -61,13 +61,13 @@ fn previous_focus_item(item: ItemRc) -> ItemRc {
 /// experience unexpected behavior, or the intention of the developer calling functions on the [`Window`]
 /// API may not be fulfilled.
 ///
-/// Your implementation must hold a renderer, such as [`SoftwareRenderer`](crate::software_renderer::SoftwareRenderer).
+/// Your implementation must hold a renderer, such as `SoftwareRenderer` or `FemtoVGRenderer`.
 /// In the [`Self::renderer()`] function, you must return a reference to it.
 ///
 /// It is also required to hold a [`Window`] and return a reference to it in your
 /// implementation of [`Self::window()`].
 ///
-/// See also [`MinimalSoftwareWindow`](crate::software_renderer::MinimalSoftwareWindow)
+/// See also `slint::platform::software_renderer::MinimalSoftwareWindow`
 /// for a minimal implementation of this trait using the software renderer
 pub trait WindowAdapter {
     /// Returns the window API.
@@ -127,8 +127,6 @@ pub trait WindowAdapter {
     ///
     /// The `Renderer` trait is an internal trait that you are not expected to implement.
     /// In your implementation you should return a reference to an instance of one of the renderers provided by Slint.
-    ///
-    /// Currently, the only public struct that implement renderer is [`SoftwareRenderer`](crate::software_renderer::SoftwareRenderer).
     fn renderer(&self) -> &dyn Renderer;
 
     /// Re-implement this function to update the properties such as window title or layout constraints.
@@ -165,7 +163,7 @@ pub trait WindowAdapter {
 /// users to call or re-implement these functions.
 // TODO: add events for window receiving and loosing focus
 #[doc(hidden)]
-pub trait WindowAdapterInternal {
+pub trait WindowAdapterInternal: core::any::Any {
     /// This function is called by the generated code when a component and therefore its tree of items are created.
     fn register_item_tree(&self) {}
 
@@ -194,12 +192,6 @@ pub trait WindowAdapterInternal {
 
     /// This method allow editable input field to communicate with the platform about input methods
     fn input_method_request(&self, _: InputMethodRequest) {}
-
-    /// Return self as any so the backend can upcast
-    // TODO: consider using the as_any crate, or deriving the trait from Any to provide a better default
-    fn as_any(&self) -> &dyn core::any::Any {
-        &()
-    }
 
     /// Handle focus change
     // used for accessibility
@@ -2230,28 +2222,122 @@ pub mod ffi {
     }
 }
 
-#[cfg(feature = "software-renderer")]
-#[test]
-fn test_empty_window() {
-    // Test that when creating an empty window without a component, we don't panic when render() is called.
-    // This isn't typically done intentionally, but for example if we receive a paint event in Qt before a component
-    // is set, this may happen. Concretely as per #2799 this could happen with popups where the call to
-    // QWidget::show() with egl delivers an immediate paint event, before we've had a chance to call set_component.
-    // Let's emulate this scenario here using public platform API.
+/// This module contains the functions needed to interface with window handles from outside the Rust language.
+#[cfg(all(feature = "ffi", feature = "raw-window-handle-06"))]
+pub mod ffi_window {
+    #![allow(unsafe_code)]
+    #![allow(clippy::missing_safety_doc)]
 
-    let msw = crate::software_renderer::MinimalSoftwareWindow::new(
-        crate::software_renderer::RepaintBufferType::NewBuffer,
-    );
-    msw.window().request_redraw();
-    let mut region = None;
-    let render_called = msw.draw_if_needed(|renderer| {
-        let mut buffer =
-            crate::graphics::SharedPixelBuffer::<crate::graphics::Rgb8Pixel>::new(100, 100);
-        let stride = buffer.width() as usize;
-        region = Some(renderer.render(buffer.make_mut_slice(), stride));
-    });
-    assert!(render_called);
-    let region = region.unwrap();
-    assert_eq!(region.bounding_box_size(), PhysicalSize::default());
-    assert_eq!(region.bounding_box_origin(), PhysicalPosition::default());
+    use super::ffi::WindowAdapterRcOpaque;
+    use super::*;
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use std::sync::Arc;
+
+    /// Helper to grab the `HasWindowHandle` for the `WindowAdapter` behind `handle`.
+    fn has_window_handle(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> Option<Arc<dyn raw_window_handle_06::HasWindowHandle>> {
+        let window_adapter = unsafe { &*(handle as *const Rc<dyn WindowAdapter>) };
+        let window_adapter = window_adapter.internal(crate::InternalToken)?;
+        window_adapter.window_handle_06_rc().ok()
+    }
+
+    /// Helper to grab the `HasDisplayHandle` for the `WindowAdapter` behind `handle`.
+    fn has_display_handle(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> Option<Arc<dyn raw_window_handle_06::HasDisplayHandle>> {
+        let window_adapter = unsafe { &*(handle as *const Rc<dyn WindowAdapter>) };
+        let window_adapter = window_adapter.internal(crate::InternalToken)?;
+        window_adapter.display_handle_06_rc().ok()
+    }
+
+    /// Returns the `HWND` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_hwnd_win32(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Win32(win32) = window_handle.as_raw()
+        {
+            isize::from(win32.hwnd) as *mut c_void
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `HINSTANCE` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_hinstance_win32(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Win32(win32) = window_handle.as_raw()
+        {
+            win32
+                .hinstance
+                .map(|hinstance| isize::from(hinstance) as *mut c_void)
+                .unwrap_or_default()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `wl_surface` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_wlsurface_wayland(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::Wayland(wayland) = window_handle.as_raw()
+        {
+            wayland.surface.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `wl_display` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_wldisplay_wayland(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasDisplayHandle;
+
+        if let Some(has_display_handle) = has_display_handle(handle)
+            && let Ok(display_handle) = has_display_handle.display_handle()
+            && let raw_window_handle_06::RawDisplayHandle::Wayland(wayland) =
+                display_handle.as_raw()
+        {
+            wayland.display.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
+
+    /// Returns the `NSView` associated with this window, or null if it doesn't exist or isn't created yet.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_windowrc_nsview_appkit(
+        handle: *const WindowAdapterRcOpaque,
+    ) -> *mut c_void {
+        use raw_window_handle_06::HasWindowHandle;
+
+        if let Some(has_window_handle) = has_window_handle(handle)
+            && let Ok(window_handle) = has_window_handle.window_handle()
+            && let raw_window_handle_06::RawWindowHandle::AppKit(appkit) = window_handle.as_raw()
+        {
+            appkit.ns_view.as_ptr()
+        } else {
+            null_mut()
+        }
+    }
 }

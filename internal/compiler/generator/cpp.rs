@@ -458,14 +458,16 @@ pub mod cpp_ast {
 
 use crate::CompilerConfiguration;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp};
-use crate::langtype::{Enumeration, EnumerationValue, NativeClass, Type};
+use crate::langtype::{
+    BuiltinPrivateStruct, BuiltinPublicStruct, Enumeration, EnumerationValue, NativeClass,
+    StructName, Type,
+};
 use crate::layout::Orientation;
 use crate::llr::{
     self, EvaluationContext as llr_EvaluationContext, EvaluationScope, ParentScope,
     TypeResolutionContext as _,
 };
 use crate::object_tree::Document;
-use crate::parser::syntax_nodes;
 use cpp_ast::*;
 use itertools::{Either, Itertools};
 use std::cell::Cell;
@@ -488,6 +490,39 @@ struct CppGeneratorContext<'a> {
 
 type EvaluationContext<'a> = llr_EvaluationContext<'a, CppGeneratorContext<'a>>;
 
+impl CppType for StructName {
+    fn cpp_type(&self) -> Option<SmolStr> {
+        match self {
+            StructName::None => return None,
+            StructName::User { name, .. } => Some(ident(name)),
+            StructName::BuiltinPrivate(builtin_private) => builtin_private.cpp_type(),
+            StructName::BuiltinPublic(builtin_public) => builtin_public.cpp_type(),
+        }
+    }
+}
+
+impl CppType for BuiltinPrivateStruct {
+    fn cpp_type(&self) -> Option<SmolStr> {
+        let name: &'static str = self.into();
+        match self {
+            Self::PathMoveTo
+            | Self::PathLineTo
+            | Self::PathArcTo
+            | Self::PathCubicTo
+            | Self::PathQuadraticTo
+            | Self::PathClose => Some(format_smolstr!("slint::private_api::{}", name)),
+            _ => Some(format_smolstr!("slint::cbindgen_private::{}", name)),
+        }
+    }
+}
+
+impl CppType for BuiltinPublicStruct {
+    fn cpp_type(&self) -> Option<SmolStr> {
+        let name: &'static str = self.into();
+        Some(format_smolstr!("slint::{}", name))
+    }
+}
+
 impl CppType for Type {
     fn cpp_type(&self) -> Option<SmolStr> {
         match self {
@@ -503,20 +538,11 @@ impl CppType for Type {
             Type::Rem => Some("float".into()),
             Type::Percent => Some("float".into()),
             Type::Bool => Some("bool".into()),
-            Type::Struct(s) => match (&s.name, &s.node) {
-                (Some(name), Some(_)) => Some(ident(name)),
-                (Some(name), None) => Some(if name.starts_with("slint::") {
-                    name.clone()
-                } else {
-                    format_smolstr!("slint::cbindgen_private::{}", ident(name))
-                }),
-                _ => {
-                    let elem =
-                        s.fields.values().map(|v| v.cpp_type()).collect::<Option<Vec<_>>>()?;
+            Type::Struct(s) => s.name.cpp_type().or_else(|| {
+                let elem = s.fields.values().map(|v| v.cpp_type()).collect::<Option<Vec<_>>>()?;
 
-                    Some(format_smolstr!("std::tuple<{}>", elem.join(", ")))
-                }
-            },
+                Some(format_smolstr!("std::tuple<{}>", elem.join(", ")))
+            }),
             Type::Array(i) => {
                 Some(format_smolstr!("std::shared_ptr<slint::Model<{}>>", i.cpp_type()?))
             }
@@ -530,7 +556,9 @@ impl CppType for Type {
             }
             Type::Brush => Some("slint::Brush".into()),
             Type::LayoutCache => Some("slint::SharedVector<float>".into()),
+            Type::ArrayOfU16 => Some("slint::SharedVector<uint16_t>".into()),
             Type::Easing => Some("slint::cbindgen_private::EasingCurve".into()),
+            Type::StyledText => Some("slint::StyledText".into()),
             _ => None,
         }
     }
@@ -776,25 +804,25 @@ pub fn generate(
         }),
     ));
 
-    let mut init_global = vec![];
+    let mut init_global = Vec::new();
 
     for (idx, glob) in llr.globals.iter_enumerated() {
+        if !glob.must_generate() {
+            continue;
+        }
         let name = format_smolstr!("global_{}", concatenate_ident(&glob.name));
         let ty = if glob.is_builtin {
+            generate_global_builtin(&mut file, &conditional_includes, idx, glob, &llr);
             format_smolstr!("slint::cbindgen_private::{}", glob.name)
-        } else if glob.must_generate() {
+        } else {
             init_global.push(format!("{name}->init();"));
             generate_global(&mut file, &conditional_includes, idx, glob, &llr);
-            file.definitions.extend(glob.aliases.iter().map(|name| {
-                Declaration::TypeAlias(TypeAlias {
-                    old_name: ident(&glob.name),
-                    new_name: ident(name),
-                })
-            }));
             ident(&glob.name)
-        } else {
-            continue;
         };
+
+        file.definitions.extend(glob.aliases.iter().map(|name| {
+            Declaration::TypeAlias(TypeAlias { old_name: ident(&glob.name), new_name: ident(name) })
+        }));
 
         globals_struct.members.push((
             Access::Public,
@@ -886,13 +914,8 @@ pub fn generate_types(used_types: &[Type], config: &Config) -> File {
 
     for ty in used_types {
         match ty {
-            Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                generate_struct(
-                    &mut file,
-                    s.name.as_ref().unwrap(),
-                    &s.fields,
-                    s.node.as_ref().unwrap(),
-                );
+            Type::Struct(s) if s.node().is_some() => {
+                generate_struct(&mut file, &s.name, &s.fields);
             }
             Type::Enumeration(en) => {
                 generate_enum(&mut file, en);
@@ -1127,13 +1150,11 @@ fn embed_resource(
     }
 }
 
-fn generate_struct(
-    file: &mut File,
-    name: &str,
-    fields: &BTreeMap<SmolStr, Type>,
-    node: &syntax_nodes::ObjectType,
-) {
-    let name = ident(name);
+fn generate_struct(file: &mut File, name: &StructName, fields: &BTreeMap<SmolStr, Type>) {
+    let StructName::User { name: user_name, node } = name else {
+        panic!("internal error: Cannot generate anonymous struct");
+    };
+    let name = ident(user_name);
     let mut members = node
         .ObjectTypeMember()
         .map(|n| crate::parser::identifier_text(&n).unwrap())
@@ -1197,17 +1218,27 @@ fn generate_public_component(
         }),
     ));
 
-    for glob in unit.globals.iter().filter(|glob| glob.must_generate()) {
+    for glob in unit.globals.iter().filter(|glob| glob.must_generate() && !glob.is_builtin) {
         component_struct.friends.push(ident(&glob.name));
     }
 
     let mut global_accessor_function_body = Vec::new();
+    let mut builtin_globals = Vec::new();
     for glob in unit.globals.iter().filter(|glob| glob.exported && glob.must_generate()) {
-        let accessor_statement = format!(
-            "{0}if constexpr(std::is_same_v<T, {1}>) {{ return *m_globals.global_{1}.get(); }}",
-            if global_accessor_function_body.is_empty() { "" } else { "else " },
-            concatenate_ident(&glob.name),
-        );
+        let accessor_statement = if glob.is_builtin {
+            builtin_globals.push(format!("std::is_same_v<T, {}>", ident(&glob.name)));
+            format!(
+                "{0}if constexpr(std::is_same_v<T, {1}>) {{ return {1}(m_globals.global_{1}); }}",
+                if global_accessor_function_body.is_empty() { "" } else { "else " },
+                concatenate_ident(&glob.name),
+            )
+        } else {
+            format!(
+                "{0}if constexpr(std::is_same_v<T, {1}>) {{ return *m_globals.global_{1}.get(); }}",
+                if global_accessor_function_body.is_empty() { "" } else { "else " },
+                concatenate_ident(&glob.name),
+            )
+        };
         global_accessor_function_body.push(accessor_statement);
     }
     if !global_accessor_function_body.is_empty() {
@@ -1219,7 +1250,14 @@ fn generate_public_component(
             Access::Public,
             Declaration::Function(Function {
                 name: "global".into(),
-                signature: "() const -> const T&".into(),
+                signature: if builtin_globals.is_empty() {
+                    "() const -> const T&".into()
+                } else {
+                    format!(
+                        "() const -> std::conditional_t<{} , T, const T&>",
+                        builtin_globals.iter().join(" || ")
+                    )
+                },
                 statements: Some(global_accessor_function_body),
                 template_parameters: Some("typename T".into()),
                 ..Default::default()
@@ -2513,7 +2551,7 @@ fn generate_repeated_component(
 
     let access_prop = |idx: &llr::PropertyIdx| {
         access_member(
-            &llr::LocalMemberReference { sub_component_path: vec![], reference: (*idx).into() }
+            &llr::LocalMemberReference { sub_component_path: Vec::new(), reference: (*idx).into() }
                 .into(),
             &ctx,
         )
@@ -2684,7 +2722,7 @@ fn generate_global(
             name: ident(&global.name),
             signature: "(const class SharedGlobals *globals)".into(),
             is_constructor_or_destructor: true,
-            statements: Some(vec![]),
+            statements: Some(Vec::new()),
             constructor_member_initializers: vec!["globals(globals)".into()],
             ..Default::default()
         }),
@@ -2718,6 +2756,60 @@ fn generate_global(
         .members
         .extend(generate_functions(global.functions.as_ref(), &ctx).map(|x| (Access::Public, x)));
 
+    file.definitions.extend(global_struct.extract_definitions().collect::<Vec<_>>());
+    file.declarations.push(Declaration::Struct(global_struct));
+}
+
+fn generate_global_builtin(
+    file: &mut File,
+    conditional_includes: &ConditionalIncludes,
+    global_idx: llr::GlobalIdx,
+    global: &llr::GlobalComponent,
+    root: &llr::CompilationUnit,
+) {
+    let mut global_struct = Struct { name: ident(&global.name), ..Default::default() };
+    let ctx = EvaluationContext::new_global(
+        root,
+        global_idx,
+        CppGeneratorContext {
+            global_access: "\n#error binding in builtin global\n".into(),
+            conditional_includes,
+        },
+    );
+
+    global_struct.members.push((
+        Access::Public,
+        Declaration::Function(Function {
+            name: ident(&global.name),
+            signature: format!(
+                "(std::shared_ptr<slint::cbindgen_private::{}> builtin)",
+                ident(&global.name)
+            ),
+            is_constructor_or_destructor: true,
+            statements: Some(Vec::new()),
+            constructor_member_initializers: vec!["builtin(std::move(builtin))".into()],
+            ..Default::default()
+        }),
+    ));
+    global_struct.members.push((
+        Access::Private,
+        Declaration::Var(Var {
+            ty: format_smolstr!(
+                "std::shared_ptr<slint::cbindgen_private::{}>",
+                ident(&global.name)
+            ),
+            name: "builtin".into(),
+            ..Default::default()
+        }),
+    ));
+    global_struct.friends.push(SmolStr::new_static(SHARED_GLOBAL_CLASS));
+
+    generate_public_api_for_properties(
+        &mut global_struct.members,
+        &global.public_properties,
+        &global.private_properties,
+        &ctx,
+    );
     file.definitions.extend(global_struct.extract_definitions().collect::<Vec<_>>());
     file.declarations.push(Declaration::Struct(global_struct));
 }
@@ -3007,9 +3099,7 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
             }
         }
         llr::MemberReference::Global { global_index, member } => {
-            let global_access = &ctx.generator_state.global_access;
             let global = &ctx.compilation_unit.globals[*global_index];
-            let global_id = format!("global_{}", concatenate_ident(&global.name));
             let name = match member {
                 llr::LocalMemberIndex::Property(property_index) => ident(
                     &ctx.compilation_unit.globals[*global_index].properties[*property_index].name,
@@ -3023,7 +3113,17 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                 )),
                 _ => unreachable!(),
             };
-            MemberAccess::Direct(format!("{global_access}->{global_id}->{name}"))
+            if matches!(ctx.current_scope, EvaluationScope::Global(i) if i == *global_index) {
+                if global.is_builtin {
+                    MemberAccess::Direct(format!("builtin->{name}"))
+                } else {
+                    MemberAccess::Direct(format!("this->{name}"))
+                }
+            } else {
+                let global_access = &ctx.generator_state.global_access;
+                let global_id = format!("global_{}", concatenate_ident(&global.name));
+                MemberAccess::Direct(format!("{global_access}->{global_id}->{name}"))
+            }
         }
     }
 }
@@ -3252,7 +3352,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                         "cast of struct with deferent fields should be handled before llr"
                     );
                     match (&lhs.name, &rhs.name) {
-                        (None, Some(_)) => {
+                        (StructName::None, targetstruct) if targetstruct.is_some() => {
                             // Convert from an anonymous struct to a named one
                             format!(
                                 "[&](const auto &o){{ {struct_name} s; {fields} return s; }}({obj})",
@@ -3266,7 +3366,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                                 obj = f,
                             )
                         }
-                        (Some(_), None) => {
+                        (sourcestruct, StructName::None) if sourcestruct.is_some() => {
                             // Convert from a named struct to an anonymous one
                             format!(
                                 "[&](const auto &o){{ return std::make_tuple({}); }}({f})",
@@ -3288,7 +3388,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                                 let (field_count, qualified_elem_type_name) =
                                     match path_elem_expr.ty(ctx) {
                                         Type::Struct(s) if s.name.is_some() => {
-                                            (s.fields.len(), s.name.as_ref().unwrap().clone())
+                                            (s.fields.len(), s.name.cpp_type().unwrap().clone())
                                         }
                                         _ => unreachable!(),
                                     };
@@ -3645,23 +3745,6 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             sub_expression,
             ctx,
         ),
-        Expression::ComputeDialogLayoutCells { cells_variable, roles, unsorted_cells } => {
-            let cells_variable = ident(cells_variable);
-            let mut cells = match &**unsorted_cells {
-                Expression::Array { values, .. } => {
-                    values.iter().map(|v| compile_expression(v, ctx))
-                }
-                _ => panic!("dialog layout unsorted cells not an array"),
-            };
-            format!(
-                "slint::cbindgen_private::GridLayoutCellData {cv}_array [] = {{ {c} }};\
-                    slint::cbindgen_private::slint_reorder_dialog_button_layout({cv}_array, {r});\
-                    slint::cbindgen_private::Slice<slint::cbindgen_private::GridLayoutCellData> {cv} = slint::private_api::make_slice(std::span({cv}_array))",
-                r = compile_expression(roles, ctx),
-                cv = cells_variable,
-                c = cells.join(", "),
-            )
-        }
         Expression::MinMax { ty, op, lhs, rhs } => {
             let ident = match op {
                 MinMaxOp::Min => "min",
@@ -4209,7 +4292,15 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::OpenUrl => {
             let url = a.next().unwrap();
-            format!("slint::cbindgen_private::open_url({})", url)
+            format!("slint::cbindgen_private::slint_open_url({})", url)
+        }
+        BuiltinFunction::EscapeMarkdown => {
+            let text = a.next().unwrap();
+            format!("slint::private_api::escape_markdown({})", text)
+        }
+        BuiltinFunction::ParseMarkdown => {
+            let text = a.next().unwrap();
+            format!("slint::private_api::parse_markdown({})", text)
         }
     }
 }
@@ -4311,21 +4402,21 @@ pub fn generate_type_aliases(file: &mut File, doc: &Document) {
         .iter()
         .filter_map(|export| match &export.1 {
             Either::Left(component) if !component.is_global() => {
-                Some((&export.0.name, &component.id))
+                Some((&export.0.name, component.id.clone()))
             }
             Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.name.is_some() && s.node.is_some() => {
-                    Some((&export.0.name, s.name.as_ref().unwrap()))
+                Type::Struct(s) if s.node().is_some() => {
+                    Some((&export.0.name, s.name.cpp_type().unwrap()))
                 }
-                Type::Enumeration(en) => Some((&export.0.name, &en.name)),
+                Type::Enumeration(en) => Some((&export.0.name, en.name.clone())),
                 _ => None,
             },
             _ => None,
         })
-        .filter(|(export_name, type_name)| export_name != type_name)
+        .filter(|(export_name, type_name)| *export_name != type_name)
         .map(|(export_name, type_name)| {
             Declaration::TypeAlias(TypeAlias {
-                old_name: ident(type_name),
+                old_name: ident(&type_name),
                 new_name: ident(export_name),
             })
         });
@@ -4388,37 +4479,40 @@ fn generate_translation(
         }));
     }
 
-    let ctx = EvaluationContext {
-        compilation_unit,
-        current_scope: EvaluationScope::Global(0.into()),
-        generator_state: CppGeneratorContext {
-            global_access: "\n#error \"language rule can't access state\";".into(),
-            conditional_includes: &Default::default(),
-        },
-        argument_types: &[Type::Int32],
-    };
-    declarations.push(Declaration::Var(Var {
-        ty: format_smolstr!(
-            "const std::array<uintptr_t (*const)(int32_t), {}>",
-            translations.plural_rules.len()
-        ),
-        name: "slint_translated_plural_rules".into(),
-        init: Some(format!(
-            "{{ {} }}",
-            translations
-                .plural_rules
-                .iter()
-                .map(|s| match s {
-                    Some(s) => {
-                        format!(
-                            "[]([[maybe_unused]] int32_t arg_0) -> uintptr_t {{ return {}; }}",
-                            compile_expression(s, &ctx)
-                        )
-                    }
-                    None => "nullptr".into(),
-                })
-                .join(", ")
-        )),
-        ..Default::default()
-    }));
+    if !translations.plurals.is_empty() {
+        let ctx = EvaluationContext {
+            compilation_unit,
+            current_scope: EvaluationScope::Global(0.into()),
+            generator_state: CppGeneratorContext {
+                global_access: "\n#error \"language rule can't access state\";".into(),
+                conditional_includes: &Default::default(),
+            },
+            argument_types: &[Type::Int32],
+        };
+
+        declarations.push(Declaration::Var(Var {
+            ty: format_smolstr!(
+                "const std::array<uintptr_t (*const)(int32_t), {}>",
+                translations.plural_rules.len()
+            ),
+            name: "slint_translated_plural_rules".into(),
+            init: Some(format!(
+                "{{ {} }}",
+                translations
+                    .plural_rules
+                    .iter()
+                    .map(|s| match s {
+                        Some(s) => {
+                            format!(
+                                "[]([[maybe_unused]] int32_t arg_0) -> uintptr_t {{ return {}; }}",
+                                compile_expression(s, &ctx)
+                            )
+                        }
+                        None => "nullptr".into(),
+                    })
+                    .join(", ")
+            )),
+            ..Default::default()
+        }));
+    }
 }

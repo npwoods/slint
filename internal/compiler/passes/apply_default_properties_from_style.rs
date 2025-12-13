@@ -39,7 +39,6 @@ pub fn apply_default_properties_from_style(
                             &palette.root_element,
                             SmolStr::new_static("foreground"),
                         ))
-                        .into()
                     });
                     elem.set_binding_if_not_set("selection-background-color".into(), || {
                         Expression::Cast {
@@ -62,7 +61,7 @@ pub fn apply_default_properties_from_style(
                         }
                     });
                 }
-                "Text" | "MarkdownText" => {
+                "Text" | "StyledText" => {
                     elem.set_binding_if_not_set("color".into(), || Expression::Cast {
                         from: Expression::PropertyReference(NamedReference::new(
                             &palette.root_element,

@@ -305,39 +305,41 @@ mod grid_internal {
         assert_eq!(my_items[2].size, 100.);
     }
 
-    /// Create a vector of LayoutData for an array of GridLayoutCellData
+    /// Create a vector of LayoutData (e.g. one per row if Vertical) based on the constraints and organized data
+    /// Used by both solve_grid_layout() and grid_layout_info()
     pub fn to_layout_data(
-        data: &[GridLayoutCellData],
+        organized_data: &GridLayoutOrganizedData,
+        constraints: Slice<LayoutInfo>,
+        orientation: Orientation,
         spacing: Coord,
         size: Option<Coord>,
     ) -> Vec<LayoutData> {
-        let mut num = 0usize;
-        for cell in data {
-            num = num.max(cell.col_or_row as usize + cell.span.max(1) as usize);
-        }
+        assert!(organized_data.len() % 4 == 0);
+        assert!(constraints.len() * 4 == organized_data.len());
+        let num = organized_data.max_value(orientation) as usize;
         if num < 1 {
             return Default::default();
         }
         let mut layout_data =
             alloc::vec![grid_internal::LayoutData { stretch: 1., ..Default::default() }; num];
         let mut has_spans = false;
-        for cell in data {
-            let constraint = &cell.constraint;
+        for (idx, constraint) in constraints.iter().enumerate() {
             let mut max = constraint.max;
             if let Some(size) = size {
                 max = max.min(size * constraint.max_percent / 100 as Coord);
             }
-            for c in 0..(cell.span as usize) {
-                let cdata = &mut layout_data[cell.col_or_row as usize + c];
+            let (col_or_row, span) = organized_data.col_or_row_and_span(idx, orientation);
+            for c in 0..(span as usize) {
+                let cdata = &mut layout_data[col_or_row as usize + c];
                 cdata.max = cdata.max.min(max);
             }
-            if cell.span == 1 {
+            if span == 1 {
                 let mut min = constraint.min;
                 if let Some(size) = size {
                     min = min.max(size * constraint.min_percent / 100 as Coord);
                 }
                 let pref = constraint.preferred.min(max).max(min);
-                let cdata = &mut layout_data[cell.col_or_row as usize];
+                let cdata = &mut layout_data[col_or_row as usize];
                 cdata.min = cdata.min.max(min);
                 cdata.pref = cdata.pref.max(pref);
                 cdata.stretch = cdata.stretch.min(constraint.stretch);
@@ -346,53 +348,48 @@ mod grid_internal {
             }
         }
         if has_spans {
-            // Adjust minimum sizes
-            for cell in data.iter().filter(|cell| cell.span > 1) {
-                let span_data = &mut layout_data
-                    [(cell.col_or_row as usize)..(cell.col_or_row + cell.span) as usize];
-                let mut min = cell.constraint.min;
-                if let Some(size) = size {
-                    min = min.max(size * cell.constraint.min_percent / 100 as Coord);
-                }
-                grid_internal::layout_items(span_data, 0 as _, min, spacing);
-                for cdata in span_data {
-                    if cdata.min < cdata.size {
-                        cdata.min = cdata.size;
+            for (idx, constraint) in constraints.iter().enumerate() {
+                let (col_or_row, span) = organized_data.col_or_row_and_span(idx, orientation);
+                if span > 1 {
+                    let span_data =
+                        &mut layout_data[(col_or_row as usize)..(col_or_row + span) as usize];
+
+                    // Adjust minimum sizes
+                    let mut min = constraint.min;
+                    if let Some(size) = size {
+                        min = min.max(size * constraint.min_percent / 100 as Coord);
                     }
-                }
-            }
-            // Adjust maximum sizes
-            for cell in data.iter().filter(|cell| cell.span > 1) {
-                let span_data = &mut layout_data
-                    [(cell.col_or_row as usize)..(cell.col_or_row + cell.span) as usize];
-                let mut max = cell.constraint.max;
-                if let Some(size) = size {
-                    max = max.min(size * cell.constraint.max_percent / 100 as Coord);
-                }
-                grid_internal::layout_items(span_data, 0 as _, max, spacing);
-                for cdata in span_data {
-                    if cdata.max > cdata.size {
-                        cdata.max = cdata.size;
+                    grid_internal::layout_items(span_data, 0 as _, min, spacing);
+                    for cdata in span_data.iter_mut() {
+                        if cdata.min < cdata.size {
+                            cdata.min = cdata.size;
+                        }
                     }
-                }
-            }
-            // Adjust preferred sizes
-            for cell in data.iter().filter(|cell| cell.span > 1) {
-                let span_data = &mut layout_data
-                    [(cell.col_or_row as usize)..(cell.col_or_row + cell.span) as usize];
-                grid_internal::layout_items(span_data, 0 as _, cell.constraint.preferred, spacing);
-                for cdata in span_data {
-                    cdata.pref = cdata.pref.max(cdata.size).min(cdata.max).max(cdata.min);
-                }
-            }
-            // Adjust stretches
-            for cell in data.iter().filter(|cell| cell.span > 1) {
-                let span_data = &mut layout_data
-                    [(cell.col_or_row as usize)..(cell.col_or_row + cell.span) as usize];
-                let total_stretch: f32 = span_data.iter().map(|c| c.stretch).sum();
-                if total_stretch > cell.constraint.stretch {
-                    for cdata in span_data {
-                        cdata.stretch *= cell.constraint.stretch / total_stretch;
+
+                    // Adjust maximum sizes
+                    let mut max = constraint.max;
+                    if let Some(size) = size {
+                        max = max.min(size * constraint.max_percent / 100 as Coord);
+                    }
+                    grid_internal::layout_items(span_data, 0 as _, max, spacing);
+                    for cdata in span_data.iter_mut() {
+                        if cdata.max > cdata.size {
+                            cdata.max = cdata.size;
+                        }
+                    }
+
+                    // Adjust preferred sizes
+                    grid_internal::layout_items(span_data, 0 as _, constraint.preferred, spacing);
+                    for cdata in span_data.iter_mut() {
+                        cdata.pref = cdata.pref.max(cdata.size).min(cdata.max).max(cdata.min);
+                    }
+
+                    // Adjust stretches
+                    let total_stretch: f32 = span_data.iter().map(|c| c.stretch).sum();
+                    if total_stretch > constraint.stretch {
+                        for cdata in span_data.iter_mut() {
+                            cdata.stretch *= constraint.stretch / total_stretch;
+                        }
                     }
                 }
             }
@@ -422,27 +419,250 @@ pub struct Padding {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct GridLayoutData<'a> {
+/// The horizontal or vertical data for all cells of a GridLayout, used as input to solve_grid_layout()
+pub struct GridLayoutData {
     pub size: Coord,
     pub spacing: Coord,
     pub padding: Padding,
-    pub cells: Slice<'a, GridLayoutCellData>,
+    pub organized_data: GridLayoutOrganizedData,
 }
 
+/// The input data for a cell of a GridLayout, before row/col determination and before H/V split
+/// Used as input to organize_grid_layout()
 #[repr(C)]
-#[derive(Default, Debug)]
-pub struct GridLayoutCellData {
-    /// col, or row.
-    pub col_or_row: u16,
-    /// colspan or rowspan
-    pub span: u16,
-    pub constraint: LayoutInfo,
+#[derive(Default, Debug, Clone)]
+pub struct GridLayoutInputData {
+    /// whether this cell is the first one in a Row element
+    pub new_row: bool,
+    /// col and row number (u16::MAX means auto).
+    pub col: u16,
+    pub row: u16,
+    /// colspan and rowspan
+    pub colspan: u16,
+    pub rowspan: u16,
 }
 
-/// return, an array which is of size `data.cells.len() * 2` which for each cell we give the pos, size
-pub fn solve_grid_layout(data: &GridLayoutData) -> SharedVector<Coord> {
-    let mut layout_data =
-        grid_internal::to_layout_data(data.cells.as_slice(), data.spacing, Some(data.size));
+/// The organized layout data for a GridLayout, after row/col determination:
+/// For each cell, stores col, colspan, row, rowspan
+pub type GridLayoutOrganizedData = SharedVector<u16>;
+
+impl GridLayoutOrganizedData {
+    fn push_cell(&mut self, col: u16, colspan: u16, row: u16, rowspan: u16) {
+        self.push(col);
+        self.push(colspan);
+        self.push(row);
+        self.push(rowspan);
+    }
+
+    fn col_or_row_and_span(&self, index: usize, orientation: Orientation) -> (u16, u16) {
+        let offset = if orientation == Orientation::Horizontal { 0 } else { 2 };
+        (self[index * 4 + offset], self[index * 4 + offset + 1])
+    }
+
+    fn max_value(&self, orientation: Orientation) -> u16 {
+        let mut max = 0;
+        for idx in 0..self.len() / 4 {
+            let (col_or_row, span) = self.col_or_row_and_span(idx, orientation);
+            max = max.max(col_or_row + span.max(1));
+        }
+        max
+    }
+}
+
+/// Given the cells of a layout of a Dialog, re-order the buttons according to the platform
+/// This function assume that the `roles` contains the roles of the button which are the first cells in `input_data`
+pub fn organize_dialog_button_layout(
+    input_data: Slice<GridLayoutInputData>,
+    dialog_button_roles: Slice<DialogButtonRole>,
+) -> GridLayoutOrganizedData {
+    let mut organized_data = GridLayoutOrganizedData::default();
+    organized_data.reserve(input_data.len() * 4);
+
+    #[cfg(feature = "std")]
+    fn is_kde() -> bool {
+        // assume some Unix, check if XDG_CURRENT_DESKTOP starts with K
+        std::env::var("XDG_CURRENT_DESKTOP")
+            .ok()
+            .and_then(|v| v.as_bytes().first().copied())
+            .is_some_and(|x| x.eq_ignore_ascii_case(&b'K'))
+    }
+    #[cfg(not(feature = "std"))]
+    let is_kde = || true;
+
+    let expected_order: &[DialogButtonRole] = match crate::detect_operating_system() {
+        crate::items::OperatingSystemType::Windows => {
+            &[
+                DialogButtonRole::Reset,
+                DialogButtonRole::None, // spacer
+                DialogButtonRole::Accept,
+                DialogButtonRole::Action,
+                DialogButtonRole::Reject,
+                DialogButtonRole::Apply,
+                DialogButtonRole::Help,
+            ]
+        }
+        crate::items::OperatingSystemType::Macos | crate::items::OperatingSystemType::Ios => {
+            &[
+                DialogButtonRole::Help,
+                DialogButtonRole::Reset,
+                DialogButtonRole::Apply,
+                DialogButtonRole::Action,
+                DialogButtonRole::None, // spacer
+                DialogButtonRole::Reject,
+                DialogButtonRole::Accept,
+            ]
+        }
+        _ if is_kde() => {
+            // KDE variant
+            &[
+                DialogButtonRole::Help,
+                DialogButtonRole::Reset,
+                DialogButtonRole::None, // spacer
+                DialogButtonRole::Action,
+                DialogButtonRole::Accept,
+                DialogButtonRole::Apply,
+                DialogButtonRole::Reject,
+            ]
+        }
+        _ => {
+            // GNOME variant and fallback for WASM build
+            &[
+                DialogButtonRole::Help,
+                DialogButtonRole::Reset,
+                DialogButtonRole::None, // spacer
+                DialogButtonRole::Action,
+                DialogButtonRole::Accept,
+                DialogButtonRole::Apply,
+                DialogButtonRole::Reject,
+            ]
+        }
+    };
+
+    // Reorder the actual buttons according to expected_order
+    let mut column_for_input: Vec<usize> = Vec::with_capacity(dialog_button_roles.len());
+    for role in expected_order.iter() {
+        if role == &DialogButtonRole::None {
+            column_for_input.push(usize::MAX); // empty column, ensure nothing will match
+            continue;
+        }
+        for (idx, r) in dialog_button_roles.as_slice().iter().enumerate() {
+            if *r == *role {
+                column_for_input.push(idx);
+            }
+        }
+    }
+
+    for (input_index, cell) in input_data.as_slice().iter().enumerate() {
+        let col = column_for_input.iter().position(|&x| x == input_index);
+        if let Some(col) = col {
+            organized_data.push_cell(col as u16, cell.colspan, cell.row, cell.rowspan);
+        } else {
+            // This is used for the main window (which is the only cell which isn't a button)
+            // Given lower_dialog_layout(), this will always be a single cell at 0,0 with a colspan of number_of_buttons
+            organized_data.push_cell(cell.col, cell.colspan, cell.row, cell.rowspan);
+        }
+    }
+    organized_data
+}
+
+// Implement "auto" behavior for row/col numbers (unless specified in the slint file).
+pub fn organize_grid_layout(input_data: Slice<GridLayoutInputData>) -> GridLayoutOrganizedData {
+    let mut organized_data = GridLayoutOrganizedData::default();
+    organized_data.reserve(input_data.len() * 4);
+    let mut row = 0;
+    let mut col = 0;
+    let mut first = true;
+    let auto = u16::MAX;
+    for cell in input_data.as_slice().iter() {
+        if cell.new_row && !first {
+            row += 1;
+            col = 0;
+        }
+        first = false;
+        if cell.row != auto && row != cell.row {
+            row = cell.row;
+            col = 0;
+        }
+        if cell.col != auto {
+            col = cell.col;
+        }
+
+        organized_data.push_cell(col, cell.colspan, row, cell.rowspan);
+        col += 1;
+    }
+    organized_data
+}
+
+/// The layout cache generator inserts the pos and size into the result array (which becomes the layout cache property),
+/// including the indirections for repeated items (so that the x,y,width,height properties for repeated items
+/// can point to indices known at compile time, those that contain the indirections)
+/// Example: for repeater_indices=[1,4] (meaning that item at index 1 is repeated 4 times),
+/// result=[0.0, 80.0, 4.0, 5.0, 80.0, 80.0, 160.0, 80.0, 240.0, 80.0, 320.0, 80.0]
+///  i.e. pos1, width1, jump to idx 4, jump to idx 5, pos2, width2, pos3, width3, pos4, width4, pos5, width5
+struct LayoutCacheGenerator<'a> {
+    // Input
+    repeater_indices: &'a [u32],
+    // An always increasing counter, the index of the cell being added
+    counter: usize,
+    // The index/2 in result in which we should add the next repeated item
+    repeat_offset: usize,
+    // The index/2 in repeater_indices
+    next_rep: usize,
+    // The index/2 in result in which we should add the next non-repeated item
+    current_offset: usize,
+    // Output
+    result: &'a mut SharedVector<Coord>,
+}
+
+impl<'a> LayoutCacheGenerator<'a> {
+    fn new(repeater_indices: &'a [u32], result: &'a mut SharedVector<Coord>) -> Self {
+        let repeat_offset =
+            result.len() / 2 - repeater_indices.iter().skip(1).step_by(2).sum::<u32>() as usize;
+        Self { repeater_indices, counter: 0, repeat_offset, next_rep: 0, current_offset: 0, result }
+    }
+    fn add(&mut self, pos: Coord, size: Coord) {
+        let res = self.result.make_mut_slice();
+        let o = loop {
+            if let Some(nr) = self.repeater_indices.get(self.next_rep * 2) {
+                let nr = *nr as usize;
+                if nr == self.counter {
+                    for o in 0..2 {
+                        res[self.current_offset * 2 + o] = (self.repeat_offset * 2 + o) as _;
+                    }
+                    self.current_offset += 1;
+                }
+                if self.counter >= nr {
+                    if self.counter - nr == self.repeater_indices[self.next_rep * 2 + 1] as usize {
+                        self.next_rep += 1;
+                        continue;
+                    }
+                    self.repeat_offset += 1;
+                    break self.repeat_offset - 1;
+                }
+            }
+            self.current_offset += 1;
+            break self.current_offset - 1;
+        };
+        res[o * 2] = pos;
+        res[o * 2 + 1] = size;
+        self.counter += 1;
+    }
+}
+
+/// return, an array which is of size `data.cells.len() * 2` which for each cell stores:
+/// pos (x or y), size (width or height)
+pub fn solve_grid_layout(
+    data: &GridLayoutData,
+    constraints: Slice<LayoutInfo>,
+    orientation: Orientation,
+) -> SharedVector<Coord> {
+    let mut layout_data = grid_internal::to_layout_data(
+        &data.organized_data,
+        constraints,
+        orientation,
+        data.spacing,
+        Some(data.size),
+    );
 
     if layout_data.is_empty() {
         return Default::default();
@@ -455,13 +675,14 @@ pub fn solve_grid_layout(data: &GridLayoutData) -> SharedVector<Coord> {
         data.spacing,
     );
 
-    let mut result = SharedVector::with_capacity(4 * data.cells.len());
-    for cell in data.cells.iter() {
-        let cdata = &layout_data[cell.col_or_row as usize];
+    let mut result = SharedVector::with_capacity(2 * constraints.len());
+    for idx in 0..constraints.len() {
+        let (col_or_row, span) = data.organized_data.col_or_row_and_span(idx, orientation);
+        let cdata = &layout_data[col_or_row as usize];
         result.push(cdata.pos);
-        result.push(if cell.span > 0 {
-            let first_cell = &layout_data[cell.col_or_row as usize];
-            let last_cell = &layout_data[cell.col_or_row as usize + cell.span as usize - 1];
+        result.push(if span > 0 {
+            let first_cell = &layout_data[col_or_row as usize];
+            let last_cell = &layout_data[col_or_row as usize + span as usize - 1];
             last_cell.pos + last_cell.size - first_cell.pos
         } else {
             0 as Coord
@@ -471,11 +692,14 @@ pub fn solve_grid_layout(data: &GridLayoutData) -> SharedVector<Coord> {
 }
 
 pub fn grid_layout_info(
-    cells: Slice<GridLayoutCellData>,
+    organized_data: GridLayoutOrganizedData, // not & because the code generator doesn't support it in ExtraBuiltinFunctionCall
+    constraints: Slice<LayoutInfo>,
     spacing: Coord,
     padding: &Padding,
+    orientation: Orientation,
 ) -> LayoutInfo {
-    let layout_data = grid_internal::to_layout_data(cells.as_slice(), spacing, None);
+    let layout_data =
+        grid_internal::to_layout_data(&organized_data, constraints, orientation, spacing, None);
     if layout_data.is_empty() {
         return Default::default();
     }
@@ -507,9 +731,9 @@ pub struct BoxLayoutCellData {
 }
 
 /// Solve a BoxLayout
-pub fn solve_box_layout(data: &BoxLayoutData, repeater_indexes: Slice<u32>) -> SharedVector<Coord> {
+pub fn solve_box_layout(data: &BoxLayoutData, repeater_indices: Slice<u32>) -> SharedVector<Coord> {
     let mut result = SharedVector::<Coord>::default();
-    result.resize(data.cells.len() * 2 + repeater_indexes.len(), 0 as _);
+    result.resize(data.cells.len() * 2 + repeater_indices.len(), 0 as _);
 
     if data.cells.is_empty() {
         return result;
@@ -583,39 +807,9 @@ pub fn solve_box_layout(data: &BoxLayoutData, repeater_indexes: Slice<u32>) -> S
         }
     }
 
-    let res = result.make_mut_slice();
-
-    // The index/2 in result in which we should add the next repeated item
-    let mut repeat_offset =
-        res.len() / 2 - repeater_indexes.iter().skip(1).step_by(2).sum::<u32>() as usize;
-    // The index/2  in repeater_indexes
-    let mut next_rep = 0;
-    // The index/2 in result in which we should add the next non-repeated item
-    let mut current_offset = 0;
-    for (idx, layout) in layout_data.iter().enumerate() {
-        let o = loop {
-            if let Some(nr) = repeater_indexes.get(next_rep * 2) {
-                let nr = *nr as usize;
-                if nr == idx {
-                    for o in 0..2 {
-                        res[current_offset * 2 + o] = (repeat_offset * 2 + o) as _;
-                    }
-                    current_offset += 1;
-                }
-                if idx >= nr {
-                    if idx - nr == repeater_indexes[next_rep * 2 + 1] as usize {
-                        next_rep += 1;
-                        continue;
-                    }
-                    repeat_offset += 1;
-                    break repeat_offset - 1;
-                }
-            }
-            current_offset += 1;
-            break current_offset - 1;
-        };
-        res[o * 2] = layout.pos;
-        res[o * 2 + 1] = layout.size;
+    let mut generator = LayoutCacheGenerator::new(&repeater_indices, &mut result);
+    for layout in layout_data.iter() {
+        generator.add(layout.pos, layout.size);
     }
     result
 }
@@ -664,80 +858,6 @@ pub fn box_layout_info_ortho(cells: Slice<BoxLayoutCellData>, padding: &Padding)
     fold
 }
 
-/// Given the cells of a layout of a Dialog, re-order the button according to the platform
-///
-/// This function assume that the `roles` contains the roles of the button which are the first `cells`
-/// It will simply change the column field of the cell
-pub fn reorder_dialog_button_layout(cells: &mut [GridLayoutCellData], roles: &[DialogButtonRole]) {
-    fn add_buttons(
-        cells: &mut [GridLayoutCellData],
-        roles: &[DialogButtonRole],
-        idx: &mut u16,
-        role: DialogButtonRole,
-    ) {
-        for (cell, r) in cells.iter_mut().zip(roles.iter()) {
-            if *r == role {
-                cell.col_or_row = *idx;
-                *idx += 1;
-            }
-        }
-    }
-
-    #[cfg(feature = "std")]
-    fn is_kde() -> bool {
-        // assume some Unix, check if XDG_CURRENT_DESKTOP starts with K
-        std::env::var("XDG_CURRENT_DESKTOP")
-            .ok()
-            .and_then(|v| v.as_bytes().first().copied())
-            .is_some_and(|x| x.eq_ignore_ascii_case(&b'K'))
-    }
-    #[cfg(not(feature = "std"))]
-    let is_kde = || true;
-
-    let mut idx = 0;
-
-    match crate::detect_operating_system() {
-        crate::items::OperatingSystemType::Windows => {
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reset);
-            idx += 1;
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Accept);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Action);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reject);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Apply);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Help);
-        }
-        crate::items::OperatingSystemType::Macos | crate::items::OperatingSystemType::Ios => {
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Help);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reset);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Apply);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Action);
-            idx += 1;
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reject);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Accept);
-        }
-        _ if is_kde() => {
-            // KDE variant
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Help);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reset);
-            idx += 1;
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Action);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Accept);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Apply);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reject);
-        }
-        _ => {
-            // GNOME variant and fallback for everything else
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Help);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reset);
-            idx += 1;
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Action);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Apply);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Reject);
-            add_buttons(cells, roles, &mut idx, DialogButtonRole::Accept);
-        }
-    }
-}
-
 #[cfg(feature = "ffi")]
 pub(crate) mod ffi {
     #![allow(unsafe_code)]
@@ -745,29 +865,50 @@ pub(crate) mod ffi {
     use super::*;
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn slint_organize_grid_layout(
+        input_data: Slice<GridLayoutInputData>,
+        result: &mut GridLayoutOrganizedData,
+    ) {
+        *result = super::organize_grid_layout(input_data);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn slint_organize_dialog_button_layout(
+        input_data: Slice<GridLayoutInputData>,
+        dialog_button_roles: Slice<DialogButtonRole>,
+        result: &mut GridLayoutOrganizedData,
+    ) {
+        *result = super::organize_dialog_button_layout(input_data, dialog_button_roles);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn slint_solve_grid_layout(
         data: &GridLayoutData,
+        constraints: Slice<LayoutInfo>,
+        orientation: Orientation,
         result: &mut SharedVector<Coord>,
     ) {
-        *result = super::solve_grid_layout(data)
+        *result = super::solve_grid_layout(data, constraints, orientation)
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn slint_grid_layout_info(
-        cells: Slice<GridLayoutCellData>,
+        organized_data: &GridLayoutOrganizedData,
+        constraints: Slice<LayoutInfo>,
         spacing: Coord,
         padding: &Padding,
+        orientation: Orientation,
     ) -> LayoutInfo {
-        super::grid_layout_info(cells, spacing, padding)
+        super::grid_layout_info(organized_data.clone(), constraints, spacing, padding, orientation)
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn slint_solve_box_layout(
         data: &BoxLayoutData,
-        repeater_indexes: Slice<u32>,
+        repeater_indices: Slice<u32>,
         result: &mut SharedVector<Coord>,
     ) {
-        *result = super::solve_box_layout(data, repeater_indexes)
+        *result = super::solve_box_layout(data, repeater_indices)
     }
 
     #[unsafe(no_mangle)]
@@ -789,19 +930,71 @@ pub(crate) mod ffi {
     ) -> LayoutInfo {
         super::box_layout_info_ortho(cells, padding)
     }
+}
 
-    /// Calls [`reorder_dialog_button_layout`].
-    ///
-    /// Safety: `cells` must be a pointer to a mutable array of cell data, the array must have at
-    /// least `roles.len()` elements.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn slint_reorder_dialog_button_layout(
-        cells: *mut GridLayoutCellData,
-        roles: Slice<DialogButtonRole>,
-    ) {
-        reorder_dialog_button_layout(
-            unsafe { core::slice::from_raw_parts_mut(cells, roles.len()) },
-            &roles,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layout_cache_generator_2_fixed_cells() {
+        // 2 fixed cells
+        let mut result = SharedVector::<Coord>::default();
+        result.resize(2 * 2, 0 as _);
+        let mut generator = LayoutCacheGenerator::new(&[], &mut result);
+        generator.add(0., 50.); // fixed
+        generator.add(80., 50.); // fixed
+        assert_eq!(result.as_slice(), &[0., 50., 80., 50.]);
+    }
+
+    #[test]
+    fn test_layout_cache_generator_1_fixed_cell_1_repeater() {
+        // 4 cells: 1 fixed cell, 1 repeater with 3 repeated cells
+        let mut result = SharedVector::<Coord>::default();
+        let repeater_indices = &[1, 3];
+        result.resize(4 * 2 + repeater_indices.len(), 0 as _);
+        let mut generator = LayoutCacheGenerator::new(repeater_indices, &mut result);
+        generator.add(0., 50.); // fixed
+        generator.add(80., 50.); // repeated
+        generator.add(160., 50.);
+        generator.add(240., 50.);
+        assert_eq!(
+            result.as_slice(),
+            &[
+                0., 50., // fixed
+                4., 5., // jump to repeater data
+                80., 50., 160., 50., 240., 50. // repeater data
+            ]
+        );
+    }
+
+    #[test]
+    fn test_layout_cache_generator_4_repeaters() {
+        // 8 cells: 1 fixed cell, 1 empty repeater, 1 repeater with 4 repeated cells, 1 fixed cell, 1 repeater with 2 repeated cells, 1 empty repeater
+        let mut result = SharedVector::<Coord>::default();
+        let repeater_indices = &[1, 0, 1, 4, 6, 2, 8, 0];
+        result.resize(8 * 2 + repeater_indices.len(), 0 as _);
+        let mut generator = LayoutCacheGenerator::new(repeater_indices, &mut result);
+        generator.add(0., 50.); // fixed
+        generator.add(80., 10.); // repeated
+        generator.add(160., 10.);
+        generator.add(240., 10.);
+        generator.add(320., 10.); // end of second repeater
+        generator.add(400., 80.); // fixed
+        generator.add(500., 20.); // repeated
+        generator.add(600., 20.); // end of third repeater
+        assert_eq!(
+            result.as_slice(),
+            &[
+                0., 50., // fixed
+                12., 13., // jump to first (empty) repeater (not used)
+                12., 13., // jump to second repeater data
+                400., 80., // fixed
+                20., 21., // jump to third repeater data
+                0., 0., // slot for jumping to fourth repeater (currently empty)
+                80., 10., 160., 10., 240., 10., 320., 10., // first repeater data
+                500., 20., 600., 20. // second repeater data
+            ]
         );
     }
 }

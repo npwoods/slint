@@ -186,15 +186,6 @@ pub enum Expression {
         orientation: Orientation,
         sub_expression: Box<Expression>,
     },
-
-    ComputeDialogLayoutCells {
-        /// The local variable where the slice of cells is going to be stored
-        cells_variable: String,
-        roles: Box<Expression>,
-        /// This is an Expression::Array
-        unsorted_cells: Box<Expression>,
-    },
-
     MinMax {
         ty: Type,
         op: MinMaxOp,
@@ -224,7 +215,8 @@ impl Expression {
             | Type::InferredProperty
             | Type::InferredCallback
             | Type::ElementReference
-            | Type::LayoutCache => return None,
+            | Type::LayoutCache
+            | Type::ArrayOfU16 => return None,
             Type::Float32
             | Type::Duration
             | Type::Int32
@@ -247,7 +239,7 @@ impl Expression {
             Type::PathData => return None,
             Type::Array(element_ty) => Expression::Array {
                 element_ty: (**element_ty).clone(),
-                values: vec![],
+                values: Vec::new(),
                 as_model: true,
             },
             Type::Struct(s) => Expression::Struct {
@@ -267,6 +259,7 @@ impl Expression {
                 Expression::EnumerationValue(enumeration.clone().default_value())
             }
             Type::ComponentFactory => Expression::EmptyComponentFactory,
+            Type::StyledText => return None,
         })
     }
 
@@ -322,9 +315,6 @@ impl Expression {
             Self::EnumerationValue(e) => Type::Enumeration(e.enumeration.clone()),
             Self::LayoutCacheAccess { .. } => Type::LogicalLength,
             Self::BoxLayoutFunction { sub_expression, .. } => sub_expression.ty(ctx),
-            Self::ComputeDialogLayoutCells { .. } => {
-                Type::Array(super::lower_expression::grid_layout_cell_data_ty().into())
-            }
             Self::MinMax { ty, .. } => ty.clone(),
             Self::EmptyComponentFactory => Type::ComponentFactory,
             Self::TranslationReference { .. } => Type::String,
@@ -408,10 +398,6 @@ macro_rules! visit_impl {
             Expression::BoxLayoutFunction { elements, sub_expression, .. } => {
                 $visitor(sub_expression);
                 elements.$iter().filter_map(|x| x.$as_ref().left()).for_each($visitor);
-            }
-            Expression::ComputeDialogLayoutCells { roles, unsorted_cells, .. } => {
-                $visitor(roles);
-                $visitor(unsorted_cells);
             }
             Expression::MinMax { ty: _, op: _, lhs, rhs } => {
                 $visitor(lhs);
@@ -583,17 +569,17 @@ impl<'a, T> EvaluationContext<'a, T> {
 
             let animation = sc.animations.get(prop).map(|a| (a, map.clone()));
             let analysis = sc.prop_analysis.get(&prop.clone().into());
-            if let Some(a) = &analysis {
-                if let Some(init) = a.property_init {
-                    let u = use_count_and_ty();
-                    return PropertyInfoResult {
-                        analysis: Some(&a.analysis),
-                        binding: Some((&sc.property_init[init].1, map)),
-                        animation,
-                        ty: u.map_or(Type::Invalid, |x| x.1.clone()),
-                        use_count: u.map(|x| x.0),
-                    };
-                }
+            if let Some(a) = &analysis
+                && let Some(init) = a.property_init
+            {
+                let u = use_count_and_ty();
+                return PropertyInfoResult {
+                    analysis: Some(&a.analysis),
+                    binding: Some((&sc.property_init[init].1, map)),
+                    animation,
+                    ty: u.map_or(Type::Invalid, |x| x.1.clone()),
+                    use_count: u.map(|x| x.0),
+                };
             }
             let mut r = if let &[idx, ref rest @ ..] = prop.sub_component_path.as_slice() {
                 let prop2 = LocalMemberReference {
@@ -633,25 +619,25 @@ impl<'a, T> EvaluationContext<'a, T> {
             match r {
                 LocalMemberIndex::Property(index) => {
                     let property_decl = &g.properties[*index];
-                    return PropertyInfoResult {
+                    PropertyInfoResult {
                         analysis: Some(&g.prop_analysis[*index]),
                         binding,
                         animation: None,
                         ty: property_decl.ty.clone(),
                         use_count: Some(&property_decl.use_count),
-                    };
+                    }
                 }
                 LocalMemberIndex::Callback(index) => {
                     let callback_decl = &g.callbacks[*index];
-                    return PropertyInfoResult {
+                    PropertyInfoResult {
                         analysis: None,
                         binding,
                         animation: None,
                         ty: callback_decl.ty.clone(),
                         use_count: Some(&callback_decl.use_count),
-                    };
+                    }
                 }
-                _ => return PropertyInfoResult::default(),
+                _ => PropertyInfoResult::default(),
             }
         }
 
@@ -734,7 +720,7 @@ impl<'a, T> EvaluationContext<'a, T> {
                     // The `Path::elements` property is not in the NativeClass
                     return &Type::PathData;
                 }
-                &sc.items[*item_index].ty.lookup_property(prop_name).unwrap()
+                sc.items[*item_index].ty.lookup_property(prop_name).unwrap()
             }
         }
     }
@@ -787,7 +773,7 @@ impl ContextMap {
         if parent_level == 0 {
             ContextMap::Identity
         } else {
-            ContextMap::InSubElement { parent: parent_level, path: vec![] }
+            ContextMap::InSubElement { parent: parent_level, path: Vec::new() }
         }
     }
 
@@ -819,7 +805,7 @@ impl ContextMap {
                         },
                     }
                 }
-                MemberReference::Global { .. } => return p.clone(),
+                MemberReference::Global { .. } => p.clone(),
             },
             ContextMap::InGlobal(global_index) => match p {
                 MemberReference::Relative { parent_level, local_reference } => {

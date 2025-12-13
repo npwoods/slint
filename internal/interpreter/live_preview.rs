@@ -274,7 +274,7 @@ impl Watcher {
         let watcher_weak = Arc::downgrade(&arc);
         arc.lock().unwrap().watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                use notify::{event::ModifyKind as M, EventKind as K};
+                use notify::{EventKind as K, event::ModifyKind as M};
                 let Ok(event) = event else { return };
                 let Some(watcher) = watcher_weak.upgrade() else { return };
                 if matches!(event.kind, K::Modify(M::Data(_) | M::Any) | K::Create(_))
@@ -324,7 +324,7 @@ mod ffi {
     use super::*;
     use core::ffi::c_void;
     use i_slint_core::window::WindowAdapter;
-    use i_slint_core::{slice::Slice, SharedString, SharedVector};
+    use i_slint_core::{SharedString, SharedVector, slice::Slice};
     type LiveReloadingComponentInner = RefCell<LiveReloadingComponent>;
 
     #[unsafe(no_mangle)]
@@ -336,6 +336,7 @@ mod ffi {
         library_paths: &SharedVector<SharedString>,
         style: Slice<u8>,
         translation_domain: Slice<u8>,
+        no_default_translation_context: bool,
     ) -> *const LiveReloadingComponentInner {
         let mut compiler = Compiler::default();
         compiler.set_include_paths(
@@ -355,6 +356,9 @@ mod ffi {
             compiler
                 .set_translation_domain(std::str::from_utf8(&translation_domain).unwrap().into());
         }
+        if no_default_translation_context {
+            compiler.disable_default_translation_context();
+        }
         Rc::into_raw(
             LiveReloadingComponent::new(
                 compiler,
@@ -369,14 +373,14 @@ mod ffi {
     pub unsafe extern "C" fn slint_live_preview_clone(
         component: *const LiveReloadingComponentInner,
     ) {
-        Rc::increment_strong_count(component);
+        unsafe { Rc::increment_strong_count(component) };
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_live_preview_drop(
         component: *const LiveReloadingComponentInner,
     ) {
-        Rc::decrement_strong_count(component);
+        unsafe { Rc::decrement_strong_count(component) };
     }
 
     #[unsafe(no_mangle)]
@@ -434,7 +438,9 @@ mod ffi {
         user_data: *mut c_void,
         drop_user_data: Option<extern "C" fn(*mut c_void)>,
     ) {
-        let ud = crate::ffi::CallbackUserData::new(user_data, drop_user_data, callback_handler);
+        let ud = unsafe {
+            crate::ffi::CallbackUserData::new(user_data, drop_user_data, callback_handler)
+        };
         let handler = Rc::new(move |args: &[Value]| ud.call(args));
         let callback = std::str::from_utf8(&callback).unwrap();
         if let Some((global, prop)) = callback.split_once('.') {
@@ -456,6 +462,6 @@ mod ffi {
         );
         let borrow = component.borrow();
         let adapter = borrow.instance().inner.window_adapter_ref().unwrap();
-        core::ptr::write(out as *mut *const Rc<dyn WindowAdapter>, adapter as *const _)
+        unsafe { core::ptr::write(out as *mut *const Rc<dyn WindowAdapter>, adapter as *const _) };
     }
 }

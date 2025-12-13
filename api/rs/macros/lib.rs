@@ -215,8 +215,8 @@ fn fill_token_vec(stream: impl Iterator<Item = TokenTree>, vec: &mut Vec<parser:
                 });
             }
             TokenTree::Group(g) => {
-                use proc_macro::Delimiter::*;
                 use SyntaxKind::*;
+                use proc_macro::Delimiter::*;
                 let (l, r, sl, sr) = match g.delimiter() {
                     Parenthesis => (LParent, RParent, "(", ")"),
                     Brace => (LBrace, RBrace, "{", "}"),
@@ -349,7 +349,7 @@ pub fn slint(stream: TokenStream) -> TokenStream {
 
     let token_iter = extract_compiler_config(token_iter, &mut compiler_config);
 
-    let mut tokens = vec![];
+    let mut tokens = Vec::new();
     fill_token_vec(token_iter, &mut tokens);
 
     fn local_file(tokens: &[parser::Token]) -> Option<PathBuf> {

@@ -11,6 +11,7 @@ use interpreter::{
     CompilationResult, Compiler, ComponentDefinition, ComponentInstance, PyDiagnostic,
     PyDiagnosticLevel, PyValueType,
 };
+mod api_match;
 mod async_adapter;
 mod brush;
 mod errors;
@@ -88,7 +89,6 @@ fn init_translations(_py: Python<'_>, translations: Bound<PyAny>) -> PyResult<()
         } else {
             Some(Box::new(PyGettextTranslator(translations.unbind())))
         });
-        i_slint_core::translations::mark_all_translations_dirty();
     })
     .map_err(|e| errors::PyPlatformError(e))?;
     Ok(())
@@ -183,6 +183,7 @@ fn slint(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<models::PyModelBase>()?;
     m.add_class::<value::PyStruct>()?;
     m.add_class::<async_adapter::AsyncAdapter>()?;
+    m.add_class::<api_match::PyGeneratedAPI>()?;
     m.add_function(wrap_pyfunction!(run_event_loop, m)?)?;
     m.add_function(wrap_pyfunction!(quit_event_loop, m)?)?;
     m.add_function(wrap_pyfunction!(set_xdg_app_id, m)?)?;

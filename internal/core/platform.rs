@@ -11,8 +11,6 @@ use crate::SharedString;
 pub use crate::api::PlatformError;
 use crate::api::{LogicalPosition, LogicalSize};
 pub use crate::renderer::Renderer;
-#[cfg(feature = "software-renderer")]
-pub use crate::software_renderer;
 #[cfg(all(not(feature = "std"), feature = "unsafe-single-threaded"))]
 use crate::unsafe_single_threaded::OnceCell;
 pub use crate::window::{LayoutConstraints, WindowAdapter, WindowProperties};
@@ -78,7 +76,10 @@ pub trait Platform {
     /// If this function returns `None` (the default implementation), then it will
     /// not be possible to send event to the event loop and the function
     /// [`slint::invoke_from_event_loop()`](crate::api::invoke_from_event_loop) and
-    /// [`slint::quit_event_loop()`](crate::api::quit_event_loop) will panic
+    /// [`slint::quit_event_loop()`](crate::api::quit_event_loop) will panic. These
+    /// functions are used internally by `slint::spawn_local()`
+    /// and features like live_preview. Implementing this function is necessary for
+    /// aforementioned functionalities to work.
     fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
         None
     }

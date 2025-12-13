@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use i_slint_core::{
-    input::{key_codes, FocusEventResult, FocusReason, KeyEventType},
+    input::{FocusEventResult, FocusReason, KeyEventType, key_codes},
     items::PointerEventButton,
 };
 
@@ -201,6 +201,7 @@ impl Item for NativeSlider {
             option.rect = { QPoint{}, size };
             return style->hitTestComplexControl(QStyle::CC_Slider, &option, pos, widget);
         });
+        #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
         let result = match event {
             _ if !enabled => {
                 data.pressed = 0;

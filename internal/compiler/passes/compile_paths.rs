@@ -12,7 +12,7 @@
 use crate::EmbedResourcesKind;
 use crate::diagnostics::BuildDiagnostics;
 use crate::expression_tree::*;
-use crate::langtype::{Struct, Type};
+use crate::langtype::{BuiltinPrivateStruct, Struct, Type};
 use crate::object_tree::*;
 use smol_str::SmolStr;
 use std::cell::RefCell;
@@ -28,7 +28,7 @@ pub fn compile_paths(
     let path_type = path_type.as_builtin();
 
     recurse_elem_including_sub_components_no_borrow(component, &(), &mut |elem_, _| {
-        if !elem_.borrow().builtin_type().is_some_and(|bt| bt.name == "Path") {
+        if elem_.borrow().builtin_type().is_none_or(|bt| bt.name != "Path") {
             return;
         }
 
@@ -163,9 +163,7 @@ fn compile_path_from_string_literal(
             (SmolStr::new_static("y"), Type::Float32),
         ])
         .collect(),
-        name: Some("slint::private_api::Point".into()),
-        node: None,
-        rust_attributes: None,
+        name: BuiltinPrivateStruct::Point.into(),
     });
 
     let mut points = Vec::new();

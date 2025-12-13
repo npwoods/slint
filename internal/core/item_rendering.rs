@@ -163,6 +163,10 @@ pub fn render_item_children(
                || item.as_ref().clips_children()
                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+               // Transform and Opacity should also be applied regardless if the item itself is clipped or not
+               || ItemRef::downcast_pin::<Transform>(item).is_some()
+               || ItemRef::downcast_pin::<Opacity>(item).is_some()
+               || ItemRef::downcast_pin::<Layer>(item).is_some()
             {
                 item.as_ref().render(
                     &mut (renderer as &mut dyn ItemRenderer),
@@ -292,10 +296,16 @@ pub trait HasFont {
     fn font_request(self: Pin<&Self>, self_rc: &crate::items::ItemRc) -> FontRequest;
 }
 
+#[allow(missing_docs)]
+pub enum PlainOrStyledText {
+    Plain(SharedString),
+    Styled(crate::api::StyledText),
+}
+
 /// Trait for an item that represents an string towards the renderer
 #[allow(missing_docs)]
 pub trait RenderString: HasFont {
-    fn text(self: Pin<&Self>) -> SharedString;
+    fn text(self: Pin<&Self>) -> PlainOrStyledText;
 }
 
 /// Trait for an item that represents an Text towards the renderer
@@ -325,8 +335,8 @@ impl HasFont for (SharedString, Brush) {
 }
 
 impl RenderString for (SharedString, Brush) {
-    fn text(self: Pin<&Self>) -> SharedString {
-        self.0.clone()
+    fn text(self: Pin<&Self>) -> PlainOrStyledText {
+        PlainOrStyledText::Plain(self.0.clone())
     }
 }
 

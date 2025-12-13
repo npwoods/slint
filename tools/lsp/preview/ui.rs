@@ -14,7 +14,7 @@ use slint_interpreter::{DiagnosticLevel, PlatformError};
 use smol_str::SmolStr;
 
 use crate::common::{self, ComponentInformation};
-use crate::preview::{self, preview_data, properties, SelectionNotification};
+use crate::preview::{self, SelectionNotification, preview_data, properties};
 
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_prelude::*;
@@ -976,7 +976,7 @@ pub fn ui_set_preview_data(
         it: &mut dyn Iterator<Item = (&preview_data::PreviewDataKey, &preview_data::PreviewData)>,
     ) -> Option<PropertyContainer> {
         let (id, props) = it.filter_map(|(k, v)| Some((k, map_preview_data_property(k, v)?))).fold(
-            (None, vec![]),
+            (None, Vec::new()),
             move |mut acc, (key, value)| {
                 acc.0 = Some(acc.0.unwrap_or_else(|| key.container.clone()));
                 acc.1.push(value);
@@ -990,7 +990,7 @@ pub fn ui_set_preview_data(
         })
     }
 
-    let mut result: Vec<PropertyContainer> = vec![];
+    let mut result: Vec<PropertyContainer> = Vec::new();
 
     if let Some(c) = create_container(
         previewed_component.unwrap_or_else(|| "<MAIN>".to_string()),
@@ -1279,7 +1279,7 @@ fn insert_row_into_value_table(table: PropertyValueTable, insert_before: i32) {
     };
 
     let row_data = {
-        let mut result = vec![];
+        let mut result = Vec::new();
         if let Some(row) = vec_model.row_data(0) {
             result = row.iter().map(|pv| default_property_value(&pv)).collect::<Vec<_>>();
         }
@@ -1959,8 +1959,8 @@ export component Tester {{
             struct C2 { c2_1: string, c2_2: int }
             struct FooStruct { first: C1, second: C2 }
             "#,
-           "FooStruct",
-           "{ first: { c1_1: \"first of a kind\", c1_2: 23 }, second: { c2_1: \"second of a kind\", c2_2: 42 } }",
+            "FooStruct",
+            "{ first: { c1_1: \"first of a kind\", c1_2: 23 }, second: { c2_1: \"second of a kind\", c2_2: 42 } }",
             super::PreviewData {
                 name: "test".into(),
                 has_getter: true,
@@ -1969,44 +1969,42 @@ export component Tester {{
             },
             "{\n  \"first\": {\n    \"c1-1\": \"first of a kind\",\n    \"c1-2\": 23\n  },\n  \"second\": {\n    \"c2-1\": \"second of a kind\",\n    \"c2-2\": 42\n  }\n}",
             false,
-                vec![
-                    "first.c1-1".into(),
-                    "first.c1-2".into(),
-                    "second.c2-1".into(),
-                    "second.c2-2".into(),
-                ],
-             vec![
-                    vec![
-                        super::PropertyValue {
-                            display_string: "first of a kind".into(),
-                            code: "\"first of a kind\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "first of a kind".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "23".into(),
-                            code: "23".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 23,
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "second of a kind".into(),
-                            code: "\"second of a kind\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "second of a kind".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "42".into(),
-                            code: "42".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 42,
-                            ..Default::default()
-                        },
-                    ],
-                ]
+            vec![
+                "first.c1-1".into(),
+                "first.c1-2".into(),
+                "second.c2-1".into(),
+                "second.c2-2".into(),
+            ],
+            vec![vec![
+                super::PropertyValue {
+                    display_string: "first of a kind".into(),
+                    code: "\"first of a kind\"".into(),
+                    kind: super::PropertyValueKind::String,
+                    value_string: "first of a kind".into(),
+                    ..Default::default()
+                },
+                super::PropertyValue {
+                    display_string: "23".into(),
+                    code: "23".into(),
+                    kind: super::PropertyValueKind::Integer,
+                    value_int: 23,
+                    ..Default::default()
+                },
+                super::PropertyValue {
+                    display_string: "second of a kind".into(),
+                    code: "\"second of a kind\"".into(),
+                    kind: super::PropertyValueKind::String,
+                    value_string: "second of a kind".into(),
+                    ..Default::default()
+                },
+                super::PropertyValue {
+                    display_string: "42".into(),
+                    code: "42".into(),
+                    kind: super::PropertyValueKind::Integer,
+                    value_int: 42,
+                    ..Default::default()
+                },
+            ]],
         );
     }
 
@@ -2019,8 +2017,8 @@ export component Tester {{
             struct C2 { c2_1: string, c2_2: int }
             struct FooStruct { first: C1, second: C2 }
             "#,
-           "[FooStruct]",
-           "[{ first: { c1_1: \"first of a kind\", c1_2: 23 }, second: { c2_1: \"second of a kind\", c2_2: 42 } }, { first: { c1_1: \"row 2, 1\", c1_2: 3 }, second: { c2_1: \"row 2, 2\", c2_2: 2 } }]",
+            "[FooStruct]",
+            "[{ first: { c1_1: \"first of a kind\", c1_2: 23 }, second: { c2_1: \"second of a kind\", c2_2: 42 } }, { first: { c1_1: \"row 2, 1\", c1_2: 3 }, second: { c2_1: \"row 2, 2\", c2_2: 2 } }]",
             super::PreviewData {
                 name: "test".into(),
                 has_getter: true,
@@ -2029,74 +2027,74 @@ export component Tester {{
             },
             "[\n  {\n    \"first\": {\n      \"c1-1\": \"first of a kind\",\n      \"c1-2\": 23\n    },\n    \"second\": {\n      \"c2-1\": \"second of a kind\",\n      \"c2-2\": 42\n    }\n  },\n  {\n    \"first\": {\n      \"c1-1\": \"row 2, 1\",\n      \"c1-2\": 3\n    },\n    \"second\": {\n      \"c2-1\": \"row 2, 2\",\n      \"c2-2\": 2\n    }\n  }\n]",
             true,
+            vec![
+                "first.c1-1".into(),
+                "first.c1-2".into(),
+                "second.c2-1".into(),
+                "second.c2-2".into(),
+            ],
+            vec![
                 vec![
-                    "first.c1-1".into(),
-                    "first.c1-2".into(),
-                    "second.c2-1".into(),
-                   "second.c2-2".into(),
+                    super::PropertyValue {
+                        display_string: "first of a kind".into(),
+                        code: "\"first of a kind\"".into(),
+                        kind: super::PropertyValueKind::String,
+                        value_string: "first of a kind".into(),
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "23".into(),
+                        code: "23".into(),
+                        kind: super::PropertyValueKind::Integer,
+                        value_int: 23,
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "second of a kind".into(),
+                        code: "\"second of a kind\"".into(),
+                        kind: super::PropertyValueKind::String,
+                        value_string: "second of a kind".into(),
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "42".into(),
+                        code: "42".into(),
+                        kind: super::PropertyValueKind::Integer,
+                        value_int: 42,
+                        ..Default::default()
+                    },
                 ],
-               vec![
-                    vec![
-                        super::PropertyValue {
-                            display_string: "first of a kind".into(),
-                            code: "\"first of a kind\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "first of a kind".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "23".into(),
-                            code: "23".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 23,
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "second of a kind".into(),
-                            code: "\"second of a kind\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "second of a kind".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "42".into(),
-                            code: "42".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 42,
-                            ..Default::default()
-                        },
-                    ],
-                    vec![
-                        super::PropertyValue {
-                            display_string: "row 2, 1".into(),
-                            code: "\"row 2, 1\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "row 2, 1".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "3".into(),
-                            code: "3".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 3,
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "row 2, 2".into(),
-                            code: "\"row 2, 2\"".into(),
-                            kind: super::PropertyValueKind::String,
-                            value_string: "row 2, 2".into(),
-                            ..Default::default()
-                        },
-                        super::PropertyValue {
-                            display_string: "2".into(),
-                            code: "2".into(),
-                            kind: super::PropertyValueKind::Integer,
-                            value_int: 2,
-                            ..Default::default()
-                        },
-                    ],
-                ]
+                vec![
+                    super::PropertyValue {
+                        display_string: "row 2, 1".into(),
+                        code: "\"row 2, 1\"".into(),
+                        kind: super::PropertyValueKind::String,
+                        value_string: "row 2, 1".into(),
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "3".into(),
+                        code: "3".into(),
+                        kind: super::PropertyValueKind::Integer,
+                        value_int: 3,
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "row 2, 2".into(),
+                        code: "\"row 2, 2\"".into(),
+                        kind: super::PropertyValueKind::String,
+                        value_string: "row 2, 2".into(),
+                        ..Default::default()
+                    },
+                    super::PropertyValue {
+                        display_string: "2".into(),
+                        code: "2".into(),
+                        kind: super::PropertyValueKind::Integer,
+                        value_int: 2,
+                        ..Default::default()
+                    },
+                ],
+            ],
         );
     }
 

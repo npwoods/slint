@@ -97,12 +97,11 @@ pub struct GlobalComponent {
 
 impl GlobalComponent {
     pub fn must_generate(&self) -> bool {
-        !self.is_builtin
-            && !self.from_library
+        !self.from_library
             && (self.exported
                 || !self.functions.is_empty()
-                || self.properties.iter().any(|p| p.use_count.get() > 0))
-            || self.callbacks.iter().any(|c| c.use_count.get() > 0)
+                || self.properties.iter().any(|p| p.use_count.get() > 0)
+                || self.callbacks.iter().any(|c| c.use_count.get() > 0))
     }
 }
 
@@ -178,7 +177,7 @@ pub struct LocalMemberReference {
 
 impl<T: Into<LocalMemberIndex>> From<T> for LocalMemberReference {
     fn from(reference: T) -> Self {
-        Self { sub_component_path: vec![], reference: reference.into() }
+        Self { sub_component_path: Vec::new(), reference: reference.into() }
     }
 }
 

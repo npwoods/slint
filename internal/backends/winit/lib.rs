@@ -4,6 +4,8 @@
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
 #![warn(missing_docs)]
+#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
+#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 extern crate alloc;
 
@@ -902,7 +904,7 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     /// Invokes the specified callback with a reference to the [`winit::window::Window`] that exists for this Slint window
     /// and returns `Some(T)`; otherwise `None`.
     fn with_winit_window<T>(&self, callback: impl FnOnce(&winit::window::Window) -> T)
-        -> Option<T>;
+    -> Option<T>;
     /// Registers a window event filter callback for this Slint window.
     ///
     /// The callback is invoked in the winit event loop whenever a window event is received with a reference to the
@@ -913,7 +915,7 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     fn on_winit_window_event(
         &self,
         callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
-            + 'static,
+        + 'static,
     );
 
     /// Returns a future that resolves to the [`winit::window::Window`] for this Slint window.
@@ -968,7 +970,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
             .is_some_and(|adapter| adapter.winit_window().is_some())
     }
 
@@ -979,7 +981,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
             .and_then(|adapter| adapter.winit_window().map(|w| callback(&w)))
     }
 
@@ -990,7 +992,7 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
             let adapter_weak = i_slint_core::window::WindowInner::from_pub(self)
                 .window_adapter()
                 .internal(i_slint_core::InternalToken)
-                .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+                .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
                 .map(|wa| wa.self_weak.clone())
                 .ok_or_else(|| {
                     PlatformError::OtherError(
@@ -1004,12 +1006,12 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
     fn on_winit_window_event(
         &self,
         mut callback: impl FnMut(&i_slint_core::api::Window, &winit::event::WindowEvent) -> EventResult
-            + 'static,
+        + 'static,
     ) {
         if let Some(adapter) = i_slint_core::window::WindowInner::from_pub(self)
             .window_adapter()
             .internal(i_slint_core::InternalToken)
-            .and_then(|wa| wa.as_any().downcast_ref::<WinitWindowAdapter>())
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<WinitWindowAdapter>())
         {
             adapter
                 .window_event_filter

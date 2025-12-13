@@ -67,7 +67,6 @@ fn expression_cost(exp: &Expression, ctx: &EvaluationContext) -> isize {
         Expression::EnumerationValue(_) => 0,
         Expression::LayoutCacheAccess { .. } => PROPERTY_ACCESS_COST,
         Expression::BoxLayoutFunction { .. } => return isize::MAX,
-        Expression::ComputeDialogLayoutCells { .. } => return isize::MAX,
         Expression::MinMax { .. } => 10,
         Expression::EmptyComponentFactory => 10,
         Expression::TranslationReference { .. } => PROPERTY_ACCESS_COST + 2 * ALLOC_COST,
@@ -156,6 +155,7 @@ fn builtin_function_cost(function: &BuiltinFunction) -> isize {
         BuiltinFunction::StopTimer => 10,
         BuiltinFunction::RestartTimer => 10,
         BuiltinFunction::OpenUrl => isize::MAX,
+        BuiltinFunction::ParseMarkdown | BuiltinFunction::EscapeMarkdown => isize::MAX,
     }
 }
 
@@ -196,15 +196,15 @@ fn inline_simple_expressions_in_expression(expr: &mut Expression, ctx: &Evaluati
                         adjust_use_count(expr, ctx, 1);
                         if use_count == 1 {
                             adjust_use_count(&binding.expression.borrow(), &mapped_ctx, -1);
-                            binding.expression.replace(Expression::CodeBlock(vec![]));
+                            binding.expression.replace(Expression::CodeBlock(Vec::new()));
                         }
                     }
                 }
-            } else if let Some(use_count) = prop_info.use_count {
-                if let Some(e) = Expression::default_value_for_type(&prop_info.ty) {
-                    use_count.set(use_count.get() - 1);
-                    *expr = e;
-                }
+            } else if let Some(use_count) = prop_info.use_count
+                && let Some(e) = Expression::default_value_for_type(&prop_info.ty)
+            {
+                use_count.set(use_count.get() - 1);
+                *expr = e;
             }
         }
     };

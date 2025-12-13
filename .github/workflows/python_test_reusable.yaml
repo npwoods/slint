@@ -22,43 +22,38 @@ env:
     CARGO_PROFILE_DEV_DEBUG: 0
     CARGO_INCREMENTAL: false
     RUST_BACKTRACE: full
-    SLINT_BACKEND: winit
+    SLINT_BACKEND: testing
+    MATURIN_PEP517_ARGS: --features backend-testing
 
 jobs:
     python_test:
         name: ${{ inputs.name }}
         runs-on: ${{ inputs.os }}
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
-            - name: Install Qt
-              if: runner.os == 'Linux'
-              uses: jurplel/install-qt-action@v4
-              with:
-                  version: "5.15.2"
-                  setup-python: false
-                  cache: true
-            - name: Setup headless display
-              if: runner.os != 'macOS'
-              uses: pyvista/setup-headless-display-action@v4
             - uses: ./.github/actions/setup-rust
               with:
-                  key: x-napi-v2-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
+                  key: x-python-v0-${{ steps.node-install.outputs.node-version }} # the cache key consists of a manually bumpable version and the node version, as the cached rustc artifacts contain linking information where to find node.lib, which is in a versioned directory.
             - uses: actions/setup-python@v6
               with:
                   python-version: "3.12"
             - name: Install uv
               uses: astral-sh/setup-uv@v7
-            - uses: fjwillemsen/setup-nox2@v3.0.0
-            - name: Run python tests
+            - name: Build and sync environment
               working-directory: api/python/slint
-              run: nox --default-venv-backend uv
-            - name: Run mypy
+              run: uv sync
+            - name: Run ty
               working-directory: api/python/slint
-              run: uv run mypy -p tests -p slint
+              run: uvx ty check
             - name: Run ruff linter
               working-directory: api/python/slint
               run: uv tool run ruff check
             - name: Run ruff linter
               working-directory: api/python/briefcase
               run: uv tool run ruff check
+            - name: Run python tests
+              working-directory: api/python/slint
+              run: uv run pytest -s -v
+            - name: Run python test driver
+              run: cargo test -p test-driver-python

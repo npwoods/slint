@@ -3,6 +3,7 @@
 
 use i_slint_core::api::PhysicalSize;
 use i_slint_core::graphics::euclid::{Point2D, Size2D};
+use i_slint_core::item_rendering::PlainOrStyledText;
 use i_slint_core::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize};
 use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::{Renderer, RendererSealed};
@@ -111,10 +112,6 @@ pub struct TestingWindow {
 }
 
 impl WindowAdapterInternal for TestingWindow {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn input_method_request(&self, request: i_slint_core::window::InputMethodRequest) {
         self.ime_requests.borrow_mut().push(request)
     }
@@ -130,11 +127,7 @@ impl WindowAdapter for TestingWindow {
     }
 
     fn size(&self) -> PhysicalSize {
-        if self.size.get().width == 0 {
-            PhysicalSize::new(800, 600)
-        } else {
-            self.size.get()
-        }
+        if self.size.get().width == 0 { PhysicalSize::new(800, 600) } else { self.size.get() }
     }
 
     fn set_size(&self, size: i_slint_core::api::WindowSize) {
@@ -168,7 +161,11 @@ impl RendererSealed for TestingWindow {
         _max_width: Option<LogicalLength>,
         _text_wrap: TextWrap,
     ) -> LogicalSize {
-        LogicalSize::new(text_item.text().len() as f32 * 10., 10.)
+        if let PlainOrStyledText::Plain(text) = text_item.text() {
+            LogicalSize::new(text.len() as f32 * 10., 10.)
+        } else {
+            Default::default()
+        }
     }
 
     fn char_size(

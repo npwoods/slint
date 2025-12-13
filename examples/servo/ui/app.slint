@@ -7,22 +7,20 @@ import {
     Button,
     LineEdit,
 } from "std-widgets.slint";
-import { Webview } from "webview.slint";
+import { Webview } from "../src/webview/webview.slint";
 
-export { WebviewLogic } from "webview.slint";
+export { WebviewLogic } from "../src/webview/webview.slint";
 export { Palette } from "std-widgets.slint";
 
 export component MyApp inherits Window {
     preferred-width: 1224px;
     preferred-height: 768px;
 
-    callback back();
-    callback forward();
-    callback reload();
-
     VerticalBox {
-        padding: 0px;
-        spacing: 0px;
+        padding-left: root.safe-area-inset-left;
+        padding-top: root.safe-area-inset-top;
+        padding-right: root.safe-area-inset-right;
+        padding-bottom: root.safe-area-inset-bottom;
 
         HorizontalBox {
             height: 50px;
@@ -32,21 +30,21 @@ export component MyApp inherits Window {
             Button {
                 text: "Back";
                 clicked => {
-                    back();
+                    webview.back();
                 }
             }
 
             Button {
                 text: "Forward";
                 clicked => {
-                    forward();
+                    webview.forward();
                 }
             }
 
             Button {
                 text: "Reload";
                 clicked => {
-                    reload();
+                    webview.reload();
                 }
             }
 
@@ -70,6 +68,9 @@ export component MyApp inherits Window {
             webview := Webview {
                 width: 100%;
                 height: 100%;
+                changed current_url => {
+                    lineEdit.text = self.current_url;
+                }
             }
         }
     }

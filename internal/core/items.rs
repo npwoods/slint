@@ -1729,7 +1729,7 @@ declare_item_vtable! {
 }
 
 declare_item_vtable! {
-    fn slint_get_MarkdownTextVTable() -> MarkdownTextVTable for MarkdownText
+    fn slint_get_StyledTextItemVTable() -> StyledTextItemVTable for StyledTextItem
 }
 
 declare_item_vtable! {
@@ -1784,7 +1784,7 @@ macro_rules! declare_builtin_structs {
     ($(
         $(#[$struct_attr:meta])*
         struct $Name:ident {
-            @name = $inner_name:literal
+            @name = $inner_name:expr,
             export {
                 $( $(#[$pub_attr:meta])* $pub_field:ident : $pub_type:ty, )*
             }

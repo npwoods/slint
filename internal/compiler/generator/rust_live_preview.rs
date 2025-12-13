@@ -3,7 +3,7 @@
 
 use super::rust::{ident, rust_primitive_type};
 use crate::CompilerConfiguration;
-use crate::langtype::{Struct, Type};
+use crate::langtype::{Struct, StructName, Type};
 use crate::llr;
 use crate::object_tree::Document;
 use proc_macro2::TokenStream;
@@ -92,7 +92,7 @@ fn generate_public_component(
         quote!(#main_file)
     };
 
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in &llr.public_properties {
         let prop_name = p.name.as_str();
         let prop_ident = ident(&p.name);
@@ -172,6 +172,9 @@ fn generate_public_component(
         quote!((#n.to_string(), #p.into()))
     });
     let translation_domain = compiler_config.translation_domain.iter();
+    let no_default_translation_context = compiler_config
+        .no_default_translation_context
+        .then(|| quote!(compiler.disable_default_translation_context();));
     let style = compiler_config.style.iter();
 
     quote!(
@@ -184,6 +187,7 @@ fn generate_public_component(
                 compiler.set_library_paths([#(#library_paths.into()),*].into_iter().collect());
                 #(compiler.set_style(#style.to_string());)*
                 #(compiler.set_translation_domain(#translation_domain.to_string());)*
+                #no_default_translation_context
                 let instance = sp::live_preview::LiveReloadingComponent::new(compiler, #main_file.into(), #component_name.into())?;
                 let window_adapter = sp::WindowInner::from_pub(slint::ComponentHandle::window(instance.borrow().instance())).window_adapter();
                 sp::Ok(Self(instance, window_adapter))
@@ -247,7 +251,7 @@ fn generate_global(global: &llr::GlobalComponent, root: &llr::CompilationUnit) -
         return quote!();
     }
     let global_name = global.name.as_str();
-    let mut property_and_callback_accessors: Vec<TokenStream> = vec![];
+    let mut property_and_callback_accessors: Vec<TokenStream> = Vec::new();
     for p in &global.public_properties {
         let prop_name = p.name.as_str();
         let prop_ident = ident(&p.name);
@@ -396,7 +400,7 @@ fn generate_value_conversions(used_types: &[Type]) -> TokenStream {
         .iter()
         .filter_map(|ty| match ty {
             Type::Struct(s) => match s.as_ref() {
-                Struct { fields, name: Some(name), node: Some(_), .. } => {
+                Struct { fields, name: StructName::User { name, .. }, .. } => {
                     let ty = ident(name);
                     let convert_to_value = fields.values().map(convert_to_value_fn);
                     let convert_from_value = fields.values().map(convert_from_value_fn);

@@ -5,8 +5,7 @@
 
 use super::GlobalAnalysis;
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
-use crate::langtype::Type;
+use crate::langtype::{BuiltinPrivateStruct, ElementType, StructName, Type};
 use crate::object_tree::*;
 use smol_str::{ToSmolStr, format_smolstr};
 
@@ -26,7 +25,10 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
             if nr.is_constant()
                 && !match nr.ty() {
                     Type::Struct(s) => {
-                        s.name.as_ref().is_some_and(|name| name.ends_with("::StateInfo"))
+                        matches!(
+                            s.name,
+                            StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)
+                        )
                     }
                     _ => false,
                 }
@@ -131,11 +133,11 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
         }
         Expression::StructFieldAccess { base, name } => {
             let r = simplify_expression(base, ga);
-            if let Expression::Struct { values, .. } = &mut **base {
-                if let Some(e) = values.remove(name) {
-                    *expr = e;
-                    return simplify_expression(expr, ga);
-                }
+            if let Expression::Struct { values, .. } = &mut **base
+                && let Some(e) = values.remove(name)
+            {
+                *expr = e;
+                return simplify_expression(expr, ga);
             }
             r
         }
@@ -199,16 +201,15 @@ fn simplify_expression(expr: &mut Expression, ga: &GlobalAnalysis) -> bool {
             for arg in arguments.iter_mut() {
                 args_can_inline &= simplify_expression(arg, ga);
             }
-            if args_can_inline {
-                if let Some(inlined) = try_inline_function(function, arguments, ga) {
-                    *expr = inlined;
-                    return true;
-                }
+            if args_can_inline && let Some(inlined) = try_inline_function(function, arguments, ga) {
+                *expr = inlined;
+                return true;
             }
             false
         }
         Expression::ElementReference { .. } => false,
         Expression::LayoutCacheAccess { .. } => false,
+        Expression::OrganizeGridLayout { .. } => false,
         Expression::SolveLayout { .. } => false,
         Expression::ComputeLayoutInfo { .. } => false,
         _ => {
