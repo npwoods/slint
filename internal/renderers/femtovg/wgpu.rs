@@ -61,12 +61,7 @@ impl GraphicsBackend for WGPUBackend {
                 let mut device = self.device.borrow_mut();
                 let device = device.as_mut().unwrap();
 
-                self.surface
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .configure(device, self.surface_config.borrow().as_ref().unwrap());
-
+                surface.configure(device, self.surface_config.borrow().as_ref().unwrap());
                 surface.get_current_texture()?
             }
         };
@@ -156,7 +151,9 @@ impl FemtoVGRenderer<WGPUBackend> {
         let swapchain_format = swapchain_capabilities
             .formats
             .iter()
-            .find(|f| !f.is_srgb())
+            .find(|f| {
+                matches!(f, wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm)
+            })
             .copied()
             .unwrap_or_else(|| swapchain_capabilities.formats[0]);
         surface_config.format = swapchain_format;
