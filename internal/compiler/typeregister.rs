@@ -41,10 +41,10 @@ pub const RESERVED_LAYOUT_PROPERTIES: &[(&str, Type)] = &[
 ];
 
 pub const RESERVED_GRIDLAYOUT_PROPERTIES: &[(&str, Type)] = &[
-    ("col", Type::Float32),
-    ("row", Type::Float32),
-    ("colspan", Type::Float32),
-    ("rowspan", Type::Float32),
+    ("col", Type::Int32),
+    ("row", Type::Int32),
+    ("colspan", Type::Int32),
+    ("rowspan", Type::Int32),
 ];
 
 macro_rules! declare_enums {
@@ -597,6 +597,18 @@ impl TypeRegister {
         register.types.remove("DropEvent").unwrap(); // Also removed in xtask/src/slintdocs.rs
 
         register.elements.remove("StyledText").unwrap();
+        register.types.remove("styled-text").unwrap();
+
+        match register.elements.get_mut("Window").unwrap() {
+            ElementType::Builtin(b) => {
+                Rc::get_mut(b)
+                    .expect("Should not be shared at this point")
+                    .properties
+                    .remove("hide")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
 
         Rc::new(RefCell::new(register))
     }

@@ -10,9 +10,16 @@ description = "Run clang format fix on all C++ files"
 run = '''fd '.*\.(h|H|hpp|hxx|h\+\+|c|C|cpp|cxx|c\+\+)$' -0 | xargs -0 clang-format -i'''
 tools = { "pipx:clang-format" = "20.1.3" }
 
+["fix:rust:lockfile"]
+description = "Update the lockfile (if absolutely necessary)"
+# Use cargo build -p xtask to test if the lockfile needs upating.
+# The fix:legal:copyright task needs the xtask anyhow, so this has a double use.
+run = "cargo build --locked -p xtask || (echo \"### Updating Lockfile! ###\" && cargo update)"
+
 ["fix:legal:copyright"]
 description = "Run the check_license_headers --fix xtask"
 run = "cargo xtask check_license_headers --fix-it"
+depends = ["fix:rust:lockfile"]
 
 ["fix:python:format"]
 description = "Run ruff format"
@@ -33,6 +40,11 @@ description = "Run cargo fmt --all"
 run = "cargo fmt --all"
 dir = "examples/bevy"
 
+["fix:rust:format:bevy-hosts"]
+description = "Run cargo fmt --all"
+run = "cargo fmt --all"
+dir = "examples/bevy-hosts-slint"
+
 ["fix:rust:format:servo"]
 description = "Run cargo fmt --all"
 run = "cargo fmt --all"
@@ -44,7 +56,13 @@ run = "cargo fmt --all"
 dir = "examples/safe-ui"
 
 ["fix:rust:format:all"]
-depends = ["fix:rust:format:root", "fix:rust:format:bevy", "fix:rust:format:servo", "fix:rust:format:safeui"]
+depends = [
+  "fix:rust:format:root",
+  "fix:rust:format:bevy",
+  "fix:rust:format:bevy-hosts",
+  "fix:rust:format:servo",
+  "fix:rust:format:safeui",
+]
 
 ["fix:toml:format"]
 description = "Run taplo format"

@@ -7,9 +7,10 @@
 //! bevy [`App`] in a thread separate from the main thread and supply textures of the rendered
 //! scenes via channels.
 
-use slint::wgpu_26::wgpu;
+use slint::wgpu_27::wgpu;
 
 use bevy::{
+    camera::RenderTarget,
     prelude::*,
     render::{
         RenderApp, RenderPlugin,
@@ -47,13 +48,7 @@ pub async fn run_bevy_app_with_slint(
     (smol::channel::Receiver<wgpu::Texture>, smol::channel::Sender<ControlMessage>),
     slint::PlatformError,
 > {
-    #[allow(unused_mut)]
-    let mut backends = wgpu::Backends::from_env().unwrap_or_default();
-
-    // Skia’s Vulkan backend is currently broken on Windows.
-    // See: https://github.com/slint-ui/slint/issues/9320
-    #[cfg(target_family = "windows")]
-    backends.remove(wgpu::Backends::VULKAN);
+    let backends = wgpu::Backends::from_env().unwrap_or_default();
 
     let bevy::render::settings::RenderResources(
         render_device,
@@ -69,7 +64,7 @@ pub async fn run_bevy_app_with_slint(
     .await;
 
     let selector =
-        slint::BackendSelector::new().require_wgpu_26(slint::wgpu_26::WGPUConfiguration::Manual {
+        slint::BackendSelector::new().require_wgpu_27(slint::wgpu_27::WGPUConfiguration::Manual {
             instance: (**instance.0).clone(),
             adapter: (**adapter.0).clone(),
             device: render_device.wgpu_device().clone(),
@@ -155,12 +150,13 @@ pub async fn run_bevy_app_with_slint(
                         bevy::render::texture::ManualTextureView {
                             texture_view: texture_view.into(),
                             size: (next_back_buffer.width(), next_back_buffer.height()).into(),
-                            format: bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                            view_format:
+                                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                         },
                     );
-                    let mut cameras = world.query::<&mut Camera>();
+                    let mut cameras = world.query::<(&mut Camera, &mut RenderTarget)>();
                     if let Some(mut c) = cameras.iter_mut(world).next() {
-                        c.target = bevy::camera::RenderTarget::TextureView(texture_view_handle);
+                        *c.1 = bevy::camera::RenderTarget::TextureView(texture_view_handle);
                     }
                 }
 
@@ -174,18 +170,16 @@ pub async fn run_bevy_app_with_slint(
         app.set_runner(runner);
         app.insert_resource(BackBuffer(None));
         bevy_app_pre_default_plugins_callback(&mut app);
-        app.add_plugins(
-            DefaultPlugins.set(ImagePlugin::default_nearest()).set(RenderPlugin {
-                render_creation: RenderCreation::manual(
-                    render_device,
-                    render_queue,
-                    adapter_info,
-                    adapter,
-                    instance,
-                ),
-                ..default()
-            }), //.disable::<bevy::winit::WinitPlugin>(),
-        );
+        app.add_plugins(DefaultPlugins.set(RenderPlugin {
+            render_creation: RenderCreation::manual(
+                render_device,
+                render_queue,
+                adapter_info,
+                adapter,
+                instance,
+            ),
+            ..default()
+        }));
         app.add_plugins(SlintRenderToTexturePlugin(bevy_front_buffer_sender));
         app.add_plugins(ExtractResourcePlugin::<BackBuffer>::default());
 

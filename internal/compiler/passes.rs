@@ -36,6 +36,7 @@ mod lower_menus;
 mod lower_platform;
 mod lower_popups;
 mod lower_property_to_element;
+mod lower_repeated_rows;
 mod lower_shadows;
 mod lower_states;
 mod lower_tabwidget;
@@ -79,8 +80,10 @@ pub async fn run_passes(
     let style_metrics = {
         // Ignore import errors
         let mut build_diags_to_ignore = crate::diagnostics::BuildDiagnostics::default();
+        // Import from style-base.slint instead of std-widgets.slint to avoid loading
+        // the entire widget library just to get StyleMetrics.
         type_loader
-            .import_component("std-widgets.slint", "StyleMetrics", &mut build_diags_to_ignore)
+            .import_component("style-base.slint", "StyleMetrics", &mut build_diags_to_ignore)
             .await
             .unwrap_or_else(|| panic!("can't load style metrics"))
     };
@@ -88,8 +91,10 @@ pub async fn run_passes(
     let palette = {
         // Ignore import errors
         let mut build_diags_to_ignore = crate::diagnostics::BuildDiagnostics::default();
+        // Import from style-base.slint instead of std-widgets.slint to avoid loading
+        // the entire widget library just to get Palette.
         type_loader
-            .import_component("std-widgets.slint", "Palette", &mut build_diags_to_ignore)
+            .import_component("style-base.slint", "Palette", &mut build_diags_to_ignore)
             .await
             .unwrap_or_else(|| panic!("can't load palette"))
     };
@@ -178,6 +183,7 @@ pub async fn run_passes(
         if type_loader.compiler_config.accessibility {
             lower_accessibility::lower_accessibility_properties(component, diag);
         }
+        lower_repeated_rows::lower_repeated_rows(component, &global_type_registry.borrow());
         materialize_fake_properties::materialize_fake_properties(component);
     });
     for root_component in doc.exported_roots() {

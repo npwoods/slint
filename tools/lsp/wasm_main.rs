@@ -225,6 +225,7 @@ pub fn create(
             to_show: Default::default(),
             open_urls: Default::default(),
             to_preview,
+            pending_recompile: Default::default(),
         }),
         reentry_guard,
         rh: Rc::new(rh),
@@ -294,7 +295,7 @@ impl SlintServer {
                 // Nothing to do!
             }
             M::RequestState { .. } => {
-                crate::language::request_state(&self.ctx);
+                crate::language::send_state_to_preview(&self.ctx);
             }
             M::SendWorkspaceEdit { label, edit } => {
                 forward_workspace_edit(self.ctx.server_notifier.clone(), label, Ok(edit));
@@ -370,13 +371,13 @@ impl SlintServer {
     }
 
     #[wasm_bindgen]
-    pub fn reload_document(&self, content: String, uri: JsValue, version: i32) -> js_sys::Promise {
+    pub fn load_document(&self, content: String, uri: JsValue, version: i32) -> js_sys::Promise {
         let ctx = self.ctx.clone();
         let guard = self.reentry_guard.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             let _lock = ReentryGuard::lock(guard).await;
             let uri: lsp_types::Url = serde_wasm_bindgen::from_value(uri)?;
-            language::reload_document(
+            language::load_document(
                 &ctx,
                 content,
                 uri.clone(),

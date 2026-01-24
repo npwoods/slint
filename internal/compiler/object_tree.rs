@@ -944,9 +944,12 @@ pub fn pretty_print(
         }
     }
     for (name, expr) in &e.bindings {
-        let expr = expr.borrow();
         indent!();
         write!(f, "{name}: ")?;
+        let Ok(expr) = expr.try_borrow() else {
+            writeln!(f, "<borrowed>")?;
+            continue;
+        };
         expression_tree::pretty_print(f, &expr.expression)?;
         if expr.analysis.as_ref().is_some_and(|a| a.is_const) {
             write!(f, "/*const*/")?;
@@ -2208,7 +2211,7 @@ fn apply_uses_statement(
                     .and_then(|node| node.child_token(SyntaxKind::Identifier))
                     .map_or_else(
                         || parser::NodeOrToken::Node(uses_statement.child_id_node().into()),
-                        |token| parser::NodeOrToken::Token(token),
+                        parser::NodeOrToken::Token,
                     );
 
                 diag.push_error(
@@ -2764,6 +2767,13 @@ pub fn visit_all_named_references_in_element(
         pd.is_alias.as_mut().map(&mut vis);
     }
     elem.borrow_mut().property_declarations = property_declarations;
+
+    // Visit grid_layout_cell for repeated Row elements
+    let grid_layout_cell = elem.borrow_mut().grid_layout_cell.take();
+    if let Some(grid_layout_cell) = grid_layout_cell {
+        grid_layout_cell.borrow_mut().visit_named_references(&mut vis);
+        elem.borrow_mut().grid_layout_cell = Some(grid_layout_cell);
+    }
 }
 
 /// Visit all named reference in this component and sub component
@@ -2947,20 +2957,14 @@ impl Exports {
                 }
             };
 
-        let mut sorted_exports_with_duplicates: Vec<(ExportedName, _)> = Vec::new();
+        // Collect all exports from the three sources, then sort once (O(n log n))
+        // instead of insertion sort (O(n²))
+        let mut exports_with_duplicates: Vec<(ExportedName, Either<Rc<Component>, Type>)> =
+            Vec::new();
 
-        let mut extend_exports =
-            |it: &mut dyn Iterator<Item = (ExportedName, Either<Rc<Component>, Type>)>| {
-                for (name, compo_or_type) in it {
-                    let pos = sorted_exports_with_duplicates
-                        .partition_point(|(existing_name, _)| existing_name.name <= name.name);
-                    sorted_exports_with_duplicates.insert(pos, (name, compo_or_type));
-                }
-            };
-
-        extend_exports(
-            &mut doc
-                .ExportsList()
+        // Source 1: ExportSpecifiers
+        exports_with_duplicates.extend(
+            doc.ExportsList()
                 // re-export are handled in the TypeLoader::load_dependencies_recursively_impl
                 .filter(|exports| exports.ExportModule().is_none())
                 .flat_map(|exports| exports.ExportSpecifier())
@@ -2978,8 +2982,9 @@ impl Exports {
                 }),
         );
 
-        extend_exports(&mut doc.ExportsList().flat_map(|exports| exports.Component()).filter_map(
-            |component| {
+        // Source 2: Exported components
+        exports_with_duplicates.extend(
+            doc.ExportsList().flat_map(|exports| exports.Component()).filter_map(|component| {
                 let name_ident: SyntaxNode = component.DeclaredIdentifier().into();
                 let name =
                     parser::identifier_text(&component.DeclaredIdentifier()).unwrap_or_else(|| {
@@ -2991,12 +2996,12 @@ impl Exports {
                     resolve_export_to_inner_component_or_import(&name, &name_ident, diag)?;
 
                 Some((ExportedName { name, name_ident }, compo_or_type))
-            },
-        ));
+            }),
+        );
 
-        extend_exports(
-            &mut doc
-                .ExportsList()
+        // Source 3: Exported structs and enums
+        exports_with_duplicates.extend(
+            doc.ExportsList()
                 .flat_map(|exports| {
                     exports
                         .StructDeclaration()
@@ -3018,8 +3023,10 @@ impl Exports {
                 }),
         );
 
-        let mut sorted_deduped_exports = Vec::with_capacity(sorted_exports_with_duplicates.len());
-        let mut it = sorted_exports_with_duplicates.into_iter().peekable();
+        exports_with_duplicates.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+
+        let mut sorted_deduped_exports = Vec::with_capacity(exports_with_duplicates.len());
+        let mut it = exports_with_duplicates.into_iter().peekable();
         while let Some((exported_name, compo_or_type)) = it.next() {
             let mut warning_issued_on_first_occurrence = false;
 

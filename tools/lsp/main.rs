@@ -370,6 +370,8 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
             common::ByteFormat::Utf16
         },
         resource_url_mapper: None,
+        // The i_slint_compiler::CompilerConfiguration::default() will read the environment variable
+        enable_experimental: false,
     };
 
     let ctx = Rc::new(Context {
@@ -381,6 +383,7 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
         to_show: Default::default(),
         open_urls: Default::default(),
         to_preview,
+        pending_recompile: Default::default(),
     });
 
     let mut futures = Vec::<Pin<Box<dyn Future<Output = Result<()>>>>>::new();
@@ -402,6 +405,11 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
     };
 
     loop {
+        let recompile_timeout = if ctx.pending_recompile.borrow().is_empty() {
+            crossbeam_channel::never()
+        } else {
+            crossbeam_channel::after(std::time::Duration::from_millis(50))
+        };
         crossbeam_channel::select! {
             recv(connection.receiver) -> msg => {
                 match msg? {
@@ -436,6 +444,13 @@ fn main_loop(connection: Connection, init_param: InitializeParams, cli_args: Cli
                 #[cfg(feature = "preview-engine")]
                 futures.push(Box::pin(handle_preview_to_lsp_message(_msg?, &ctx)))
              },
+             recv(recompile_timeout) -> _ => {
+                 let pending_recompile = std::mem::take(&mut *ctx.pending_recompile.borrow_mut());
+
+                 for url in pending_recompile {
+                     futures.push(Box::pin(language::reload_document(&ctx, url)));
+                 }
+             }
         };
 
         let mut result = Ok(());
@@ -474,7 +489,7 @@ async fn handle_notification(req: lsp_server::Notification, ctx: &Rc<Context>) -
         }
         DidChangeTextDocument::METHOD => {
             let mut params: DidChangeTextDocumentParams = serde_json::from_value(req.params)?;
-            reload_document(
+            load_document(
                 ctx,
                 params.content_changes.pop().unwrap().text,
                 params.text_document.uri,
@@ -576,7 +591,7 @@ async fn handle_preview_to_lsp_message(
             }
         }
         M::RequestState { .. } => {
-            crate::language::request_state(ctx);
+            crate::language::send_state_to_preview(ctx);
         }
         M::SendWorkspaceEdit { label, edit } => {
             let _ = send_workspace_edit(ctx.server_notifier.clone(), label, Ok(edit)).await;

@@ -17,8 +17,9 @@ use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage,
     RenderRectangle, RenderText,
 };
-use i_slint_core::item_tree::ParentItemTraversalMode;
-use i_slint_core::item_tree::{ItemTreeRc, ItemTreeRef, ItemTreeWeak};
+use i_slint_core::item_tree::{
+    ItemTreeRc, ItemTreeRef, ItemTreeRefPin, ItemTreeWeak, ParentItemTraversalMode,
+};
 use i_slint_core::items::{
     self, ColorScheme, FillRule, ImageRendering, ItemRc, ItemRef, Layer, LineCap, LineJoin,
     MouseCursor, Opacity, PointerEventButton, RenderingResult, TextWrap,
@@ -1227,7 +1228,13 @@ impl QtItemRenderer<'_> {
         size: LogicalSize,
         image: Pin<&dyn i_slint_core::item_rendering::RenderImage>,
     ) {
-        let source_rect = image.source_clip();
+        let source_rect = image.source_clip().filter(|rect| {
+            let source_size = image.source().size().cast();
+            rect.origin.x != 0
+                || rect.origin.y != 0
+                || rect.size.width != source_size.width
+                || rect.size.height != source_size.height
+        });
 
         let pixmap: qttypes::QPixmap = self.cache.get_or_update_cache_entry(item_rc, || {
             let source = image.source();
@@ -1236,23 +1243,15 @@ impl QtItemRenderer<'_> {
 
             // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
             let scale_factor = ScaleFactor::new(self.scale_factor());
-            let t = (image.target_size() * scale_factor).cast();
-
             let source_size = if source.is_svg() {
-                let has_source_clipping = source_rect.map_or(false, |rect| {
-                    rect.origin.x != 0
-                        || rect.origin.y != 0
-                        || !rect.size.width != t.width
-                        || !rect.size.height != t.height
-                });
-                if has_source_clipping {
+                if source_rect.is_some() {
                     // Source size & clipping is not implemented yet
                     None
                 } else {
                     Some(
                         i_slint_core::graphics::fit(
                             image.image_fit(),
-                            t.cast(),
+                            (image.target_size() * scale_factor).cast(),
                             IntRect::from_size(origin.cast()),
                             scale_factor,
                             Default::default(), // We only care about the size, so alignments don't matter
@@ -1954,7 +1953,7 @@ fn into_qsize(logical_size: i_slint_core::api::LogicalSize) -> qttypes::QSize {
 }
 
 impl WindowAdapterInternal for QtWindow {
-    fn register_item_tree(&self) {
+    fn register_item_tree(&self, _: ItemTreeRefPin) {
         self.tree_structure_changed.replace(true);
     }
 

@@ -125,6 +125,20 @@ pub async fn lower_menus(
     type_loader: &mut crate::typeloader::TypeLoader,
     diag: &mut BuildDiagnostics,
 ) {
+    // First check if any MenuBar or ContextMenuArea is used - avoid loading std-widgets.slint if not needed
+    let mut has_menubar_or_context_menu = false;
+    doc.visit_all_used_components(|component| {
+        recurse_elem_including_sub_components_no_borrow(component, &(), &mut |elem, _| {
+            if matches!(&elem.borrow().builtin_type(), Some(b) if matches!(b.name.as_str(), "MenuBar" | "ContextMenuArea" | "ContextMenuInternal")) {
+                has_menubar_or_context_menu = true;
+            }
+        })
+    });
+
+    if !has_menubar_or_context_menu {
+        return;
+    }
+
     // Ignore import errors
     let mut build_diags_to_ignore = BuildDiagnostics::default();
 
@@ -248,8 +262,6 @@ fn process_context_menu(
             .clone()
             .into();
 
-        context_menu_elem.borrow_mut().base_type = components.context_menu_internal.clone();
-
         let mut menu_elem = None;
         context_menu_elem.borrow_mut().children.retain(|x| {
             if x.borrow().base_type == menu_element_type {
@@ -282,9 +294,10 @@ fn process_context_menu(
         }
 
         let children = std::mem::take(&mut menu_elem.borrow_mut().children);
-        let c = lower_menu_items(context_menu_elem, children, components);
+        let c = lower_menu_items(context_menu_elem, children, components, diag);
         let item_tree_root = Expression::ElementReference(Rc::downgrade(&c.root_element));
 
+        context_menu_elem.borrow_mut().base_type = components.context_menu_internal.clone();
         for (name, _) in &components.context_menu_internal.property_list() {
             if let Some(decl) = context_menu_elem.borrow().property_declarations.get(name) {
                 diag.push_error(format!("Cannot re-define internal property '{name}'"), &decl.node);
@@ -341,9 +354,8 @@ fn process_window(
     no_native_menu: bool,
     diag: &mut BuildDiagnostics,
 ) -> bool {
-    let mut window = win.borrow_mut();
     let mut menu_bar = None;
-    window.children.retain(|x| {
+    win.borrow_mut().children.retain(|x| {
         if matches!(&x.borrow().base_type, ElementType::Builtin(b) if b.name == "MenuBar") {
             if menu_bar.is_some() {
                 diag.push_error("Only one MenuBar is allowed in a Window".into(), &*x.borrow());
@@ -370,7 +382,7 @@ fn process_window(
 
     // Lower MenuItem's into a tree root
     let children = std::mem::take(&mut menu_bar.borrow_mut().children);
-    let c = lower_menu_items(&menu_bar, children, components);
+    let c = lower_menu_items(&menu_bar, children, components, diag);
     let item_tree_root = Expression::ElementReference(Rc::downgrade(&c.root_element));
 
     if !no_native_menu {
@@ -393,6 +405,7 @@ fn process_window(
         };
     }
 
+    let mut window = win.borrow_mut();
     let menubar_impl = Element {
         id: format_smolstr!("{}-menulayout", window.id),
         base_type: components.menubar_impl.clone(),
@@ -517,6 +530,7 @@ fn lower_menu_items(
     parent: &ElementRc,
     children: Vec<ElementRc>,
     components: &UsefulMenuComponents,
+    diag: &mut BuildDiagnostics,
 ) -> Rc<Component> {
     let component = Rc::new_cyclic(|component_weak| {
         let root_element = Rc::new(RefCell::new(Element {
@@ -556,13 +570,17 @@ fn lower_menu_items(
             ..Default::default()
         }
     });
-    parent
-        .borrow()
-        .enclosing_component
-        .upgrade()
-        .unwrap()
-        .menu_item_tree
-        .borrow_mut()
-        .push(component.clone());
+    let enclosing = parent.borrow().enclosing_component.upgrade().unwrap();
+
+    super::lower_popups::check_no_reference_to_popup(
+        parent,
+        &enclosing,
+        &Rc::downgrade(&component),
+        &NamedReference::new(parent, SmolStr::new_static("x")),
+        diag,
+    );
+
+    enclosing.menu_item_tree.borrow_mut().push(component.clone());
+
     component
 }

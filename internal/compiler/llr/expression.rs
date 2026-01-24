@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use super::{
-    GlobalIdx, GridLayoutRepeatedElement, LocalMemberIndex, LocalMemberReference, MemberReference,
-    RepeatedElementIdx, SubComponentIdx, SubComponentInstanceIdx,
+    GlobalIdx, GridLayoutRepeatedElement, LayoutRepeatedElement, LocalMemberIndex,
+    LocalMemberReference, MemberReference, RepeatedElementIdx, SubComponentIdx,
+    SubComponentInstanceIdx,
 };
 use crate::expression_tree::{BuiltinFunction, MinMaxOp, OperatorClass};
 use crate::langtype::Type;
@@ -12,6 +13,13 @@ use itertools::Either;
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+#[derive(Debug, Clone)]
+pub enum ArrayOutput {
+    Slice,
+    Model,
+    Vector,
+}
 
 #[derive(Debug, Clone)]
 pub enum Expression {
@@ -109,6 +117,14 @@ pub enum Expression {
         index: Box<Expression>,
         value: Box<Expression>,
     },
+    /// An assignment to a mutable slice element: `slice[idx] = value`
+    /// Unlike ArrayIndexAssignment, this writes directly to the slice without model semantics
+    SliceIndexAssignment {
+        /// Name of the slice variable (e.g., "result")
+        slice_name: SmolStr,
+        index: usize,
+        value: Box<Expression>,
+    },
 
     BinaryExpression {
         lhs: Box<Expression>,
@@ -137,8 +153,8 @@ pub enum Expression {
     Array {
         element_ty: Type,
         values: Vec<Expression>,
-        /// When true, this should be converted to a model. When false, this should stay as a slice
-        as_model: bool,
+        /// Choose what will be generated: a slice, a model, or a vector
+        output: ArrayOutput,
     },
     Struct {
         ty: Rc<crate::langtype::Struct>,
@@ -180,9 +196,11 @@ pub enum Expression {
         /// The local variable (as read with [`Self::ReadLocalVariable`]) that contains the cells
         cells_variable: String,
         /// The name for the local variable that contains the repeater indices
-        repeater_indices: Option<SmolStr>,
-        /// Either an expression of type LayoutItemInfo, or an index to the repeater
-        elements: Vec<Either<Expression, RepeatedElementIdx>>,
+        repeater_indices_var_name: Option<SmolStr>,
+        /// The name for the local variable that contains the repeater steps
+        repeater_steps_var_name: Option<SmolStr>,
+        /// Either an expression of type LayoutItemInfo, or information about the repeater
+        elements: Vec<Either<Expression, LayoutRepeatedElement>>,
         orientation: Orientation,
         sub_expression: Box<Expression>,
     },
@@ -192,7 +210,9 @@ pub enum Expression {
         /// The local variable (as read with [`Self::ReadLocalVariable`]) that contains the cells
         cells_variable: String,
         /// The name for the local variable that contains the repeater indices
-        repeater_indices: Option<SmolStr>,
+        repeater_indices_var_name: SmolStr,
+        /// The name for the local variable that contains the repeater steps
+        repeater_steps_var_name: SmolStr,
         /// Either an expression of type GridLayoutInputData, or information about the repeated element
         elements: Vec<Either<Expression, GridLayoutRepeatedElement>>,
         sub_expression: Box<Expression>,
@@ -252,7 +272,7 @@ impl Expression {
             Type::Array(element_ty) => Expression::Array {
                 element_ty: (**element_ty).clone(),
                 values: Vec::new(),
-                as_model: true,
+                output: ArrayOutput::Model,
             },
             Type::Struct(s) => Expression::Struct {
                 ty: s.clone(),
@@ -308,6 +328,7 @@ impl Expression {
             Self::PropertyAssignment { .. } => Type::Void,
             Self::ModelDataAssignment { .. } => Type::Void,
             Self::ArrayIndexAssignment { .. } => Type::Void,
+            Self::SliceIndexAssignment { .. } => Type::Void,
             Self::BinaryExpression { lhs, rhs: _, op } => {
                 if crate::expression_tree::operator_class(*op) != OperatorClass::ArithmeticOp {
                     Type::Bool
@@ -364,6 +385,9 @@ macro_rules! visit_impl {
             Expression::ArrayIndexAssignment { array, index, value } => {
                 $visitor(array);
                 $visitor(index);
+                $visitor(value);
+            }
+            Expression::SliceIndexAssignment { value, .. } => {
                 $visitor(value);
             }
             Expression::BinaryExpression { lhs, rhs, .. } => {
@@ -737,7 +761,10 @@ impl<'a, T> EvaluationContext<'a, T> {
                     // The `Path::elements` property is not in the NativeClass
                     return &Type::PathData;
                 }
-                sc.items[*item_index].ty.lookup_property(prop_name).unwrap()
+                let item = &sc.items[*item_index];
+                item.ty.lookup_property(prop_name).unwrap_or_else(|| {
+                    panic!("Failed to lookup property {prop_name} for {}", item.name)
+                })
             }
         }
     }

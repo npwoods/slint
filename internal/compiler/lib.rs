@@ -52,7 +52,7 @@ pub enum EmbedResourcesKind {
     Nothing,
     /// Only embed builtin resources
     OnlyBuiltinResources,
-    /// Do not embed resources, but list them in the Document as it they were embedded
+    /// Do not embed resources, but list them in the Document as if they were embedded
     ListAllResources,
     /// Embed all images resources (the content of their files)
     EmbedAllResources,
@@ -320,13 +320,7 @@ fn prepare_for_compile(
 
     diagnostics.enable_experimental = compiler_config.enable_experimental;
 
-    let global_type_registry = if compiler_config.enable_experimental {
-        crate::typeregister::TypeRegister::builtin_experimental()
-    } else {
-        crate::typeregister::TypeRegister::builtin()
-    };
-
-    typeloader::TypeLoader::new(global_type_registry, compiler_config, diagnostics)
+    typeloader::TypeLoader::new(compiler_config, diagnostics)
 }
 
 pub async fn compile_syntax_node(
