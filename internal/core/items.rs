@@ -189,6 +189,8 @@ pub struct ItemVTable {
         size: LogicalSize,
     ) -> RenderingResult,
 
+    /// Returns the rendering bounding rect for that particular item in the parent's item coordinate
+    /// (same coordinate system as the geometry)
     pub bounding_rect: extern "C" fn(
         core::pin::Pin<VRef<ItemVTable>>,
         window_adapter: &WindowAdapterRc,
@@ -1182,14 +1184,9 @@ impl Default for PropertyAnimation {
 pub struct WindowItem {
     pub width: Property<LogicalLength>,
     pub height: Property<LogicalLength>,
-    pub safe_area_inset_top: Property<LogicalLength>,
-    pub safe_area_inset_bottom: Property<LogicalLength>,
-    pub safe_area_inset_left: Property<LogicalLength>,
-    pub safe_area_inset_right: Property<LogicalLength>,
-    pub virtual_keyboard_x: Property<LogicalLength>,
-    pub virtual_keyboard_y: Property<LogicalLength>,
-    pub virtual_keyboard_width: Property<LogicalLength>,
-    pub virtual_keyboard_height: Property<LogicalLength>,
+    pub safe_area_insets: Property<crate::lengths::LogicalEdges>,
+    pub virtual_keyboard_position: Property<crate::lengths::LogicalPoint>,
+    pub virtual_keyboard_size: Property<crate::lengths::LogicalSize>,
     pub background: Property<Brush>,
     pub title: Property<SharedString>,
     pub no_frame: Property<bool>,

@@ -227,8 +227,8 @@ fn lower_grid_layout(
             let row_children = std::mem::take(&mut layout_child.borrow_mut().children);
             for row_child in row_children {
                 if let Some(binding) = row_child.borrow_mut().bindings.get("row") {
-                    diag.push_error(
-                        "The 'row' property cannot be used for elements inside a Row".to_string(),
+                    diag.push_warning(
+                        "The 'row' property cannot be used for elements inside a Row. This was accepted by previous versions of Slint, but may become an error in the future".to_string(),
                         &*binding.borrow(),
                     );
                 }
@@ -661,7 +661,7 @@ fn lower_box_layout(
     layout_cache_prop.element().borrow_mut().bindings.insert(
         layout_cache_prop.name().clone(),
         BindingExpression::new_with_span(
-            Expression::SolveLayout(Layout::BoxLayout(layout.clone()), orientation),
+            Expression::SolveBoxLayout(layout.clone(), orientation),
             span.clone(),
         )
         .into(),
@@ -669,10 +669,7 @@ fn lower_box_layout(
     layout_info_prop_h.element().borrow_mut().bindings.insert(
         layout_info_prop_h.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(
-                Layout::BoxLayout(layout.clone()),
-                Orientation::Horizontal,
-            ),
+            Expression::ComputeBoxLayoutInfo(layout.clone(), Orientation::Horizontal),
             span.clone(),
         )
         .into(),
@@ -680,7 +677,7 @@ fn lower_box_layout(
     layout_info_prop_v.element().borrow_mut().bindings.insert(
         layout_info_prop_v.name().clone(),
         BindingExpression::new_with_span(
-            Expression::ComputeLayoutInfo(Layout::BoxLayout(layout.clone()), Orientation::Vertical),
+            Expression::ComputeBoxLayoutInfo(layout.clone(), Orientation::Vertical),
             span,
         )
         .into(),
