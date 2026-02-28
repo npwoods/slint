@@ -74,7 +74,7 @@ impl Item for ComplexText {
     ) -> LayoutInfo {
         text_layout_info(
             self,
-            &self_rc,
+            self_rc,
             window_adapter,
             orientation,
             Self::FIELD_OFFSETS.width.apply_pin(self),
@@ -86,6 +86,7 @@ impl Item for ComplexText {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -95,6 +96,7 @@ impl Item for ComplexText {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -261,7 +263,7 @@ impl Item for StyledTextItem {
     ) -> LayoutInfo {
         text_layout_info(
             self,
-            &self_rc,
+            self_rc,
             window_adapter,
             orientation,
             Self::FIELD_OFFSETS.width.apply_pin(self),
@@ -273,6 +275,7 @@ impl Item for StyledTextItem {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -283,6 +286,7 @@ impl Item for StyledTextItem {
         event: &MouseEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventResult {
         match event {
             MouseEvent::Pressed {
@@ -294,11 +298,13 @@ impl Item for StyledTextItem {
                 let window_inner = WindowInner::from_pub(window_adapter.window());
                 let scale_factor = crate::lengths::ScaleFactor::new(window_inner.scale_factor());
                 if let Some(link) = crate::textlayout::sharedparley::link_under_cursor(
+                    &mut window_inner.context().font_context().borrow_mut(),
                     scale_factor,
                     self,
                     self_rc,
                     LogicalSize::from_lengths(self.width(), self.height()),
                     *position * scale_factor,
+                    None, // No cache available from item event handler
                 ) {
                     Self::FIELD_OFFSETS.link_clicked.apply_pin(self).call(&(link.into(),));
                 }
@@ -315,6 +321,7 @@ impl Item for StyledTextItem {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -483,6 +490,7 @@ impl Item for SimpleText {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardAndIgnore
     }
@@ -492,6 +500,7 @@ impl Item for SimpleText {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventResult {
         InputEventResult::EventIgnored
     }
@@ -800,6 +809,7 @@ impl Item for TextInput {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -809,10 +819,14 @@ impl Item for TextInput {
         event: &MouseEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
+        cursor: &mut super::MouseCursor,
     ) -> InputEventResult {
         if !self.enabled() {
             return InputEventResult::EventIgnored;
         }
+
+        *cursor = super::MouseCursor::Text;
+
         match event {
             MouseEvent::Pressed {
                 position, button: PointerEventButton::Left, click_count, ..
@@ -867,16 +881,8 @@ impl Item for TextInput {
                 );
                 self.paste_clipboard(window_adapter, self_rc, Clipboard::SelectionClipboard);
             }
-            MouseEvent::Exit => {
-                if let Some(x) = window_adapter.internal(crate::InternalToken) {
-                    x.set_mouse_cursor(super::MouseCursor::Default);
-                }
-                self.as_ref().pressed.set(0)
-            }
+            MouseEvent::Exit => self.as_ref().pressed.set(0),
             MouseEvent::Moved { position, .. } => {
-                if let Some(x) = window_adapter.internal(crate::InternalToken) {
-                    x.set_mouse_cursor(super::MouseCursor::Text);
-                }
                 let pressed = self.as_ref().pressed.get();
                 if pressed > 0 {
                     let clicked_offset =
@@ -884,7 +890,7 @@ impl Item for TextInput {
                     self.set_cursor_position(
                         clicked_offset,
                         true,
-                        if (pressed - 1) % 3 == 0 {
+                        if (pressed - 1).is_multiple_of(3) {
                             TextChangeNotify::TriggerCallbacks
                         } else {
                             TextChangeNotify::SkipCallbacks
@@ -999,11 +1005,13 @@ impl Item for TextInput {
                     None => (),
                 };
 
-                if let Some(keycode) = event.text.chars().next() {
-                    if keycode == key_codes::Return && !self.read_only() && self.single_line() {
-                        Self::FIELD_OFFSETS.accepted.apply_pin(self).call(&());
-                        return KeyEventResult::EventAccepted;
-                    }
+                if let Some(keycode) = event.text.chars().next()
+                    && keycode == key_codes::Return
+                    && !self.read_only()
+                    && self.single_line()
+                {
+                    Self::FIELD_OFFSETS.accepted.apply_pin(self).call(&());
+                    return KeyEventResult::EventAccepted;
                 }
 
                 // Only insert/interpreter non-control character strings
@@ -1917,7 +1925,7 @@ impl TextInput {
         let text = self.text();
 
         WindowInner::from_pub(window_adapter.window())
-            .ctx
+            .context()
             .platform()
             .set_clipboard_text(&text[anchor..cursor], clipboard);
     }
@@ -1932,8 +1940,10 @@ impl TextInput {
         self_rc: &ItemRc,
         clipboard: Clipboard,
     ) {
-        if let Some(text) =
-            WindowInner::from_pub(window_adapter.window()).ctx.platform().clipboard_text(clipboard)
+        if let Some(text) = WindowInner::from_pub(window_adapter.window())
+            .context()
+            .platform()
+            .clipboard_text(clipboard)
         {
             self.preedit_text.set(Default::default());
             self.insert(&text, window_adapter, self_rc);
@@ -2046,12 +2056,12 @@ impl TextInput {
                 true,
                 FocusReason::PointerClick,
             );
-        } else if !self.read_only() {
-            if let Some(w) = window_adapter.internal(crate::InternalToken) {
-                w.input_method_request(InputMethodRequest::Enable(
-                    self.ime_properties(window_adapter, self_rc),
-                ));
-            }
+        } else if !self.read_only()
+            && let Some(w) = window_adapter.internal(crate::InternalToken)
+        {
+            w.input_method_request(InputMethodRequest::Enable(
+                self.ime_properties(window_adapter, self_rc),
+            ));
         }
     }
 

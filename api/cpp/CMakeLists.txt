@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 # Select C++ and C as languages, as Corrosion needs ${CMAKE_C_COMPILER}
 # for linking
-project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.15.0)
+project(Slint HOMEPAGE_URL "https://slint.dev/" LANGUAGES C CXX VERSION 1.16.0)
 
 include(FeatureSummary)
 include(CMakeDependentOption)
@@ -74,6 +74,7 @@ endfunction()
 # defaults need to be kept in sync with the Rust bit (cpp/Cargo.toml and cbindgen.rs)
 
 define_cargo_feature(freestanding "Enable use of freestanding environment. This is only for bare-metal systems. Most other features are incompatible with this one" OFF)
+define_cargo_feature(libm "This feature enables floating point arithmetic emulation using the libm crate. Use this in MCU environments where the processor does not support floating point arithmetic." OFF)
 
 # Compat options (must be declared after the STD feature, but before the other renderer features)
 function(define_renderer_winit_compat_option renderer)
@@ -104,6 +105,7 @@ define_cargo_dependent_feature(renderer-skia "Enable support for the Skia based 
 define_cargo_dependent_feature(renderer-skia-opengl "Enable support for the Skia based rendering engine with its OpenGL backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-skia-vulkan "Enable support for the Skia based rendering engine with its Vulkan backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_feature(renderer-software "Enable support for the software renderer" ON)
+define_cargo_feature(software-renderer-path "Enable support for Path element rendering with the software renderer. This is implicitly enabled when SLINT_FEATURE_FREESTANDING is OFF. Enable this in bare-metal environments if you need support for Path elements" OFF)
 
 set(SLINT_BACKEND_QT_DEFAULT OFF)
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")

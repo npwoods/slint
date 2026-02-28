@@ -271,28 +271,14 @@ jobs:
                 xcrun simctl shutdown "${{ env.SIMULATOR_UDID }}" || echo "Simulator already shutdown"
 
 
-    bevy_example:
-        strategy:
-            matrix:
-                os: [ubuntu-22.04, macos-14, windows-2022]
-        runs-on: ${{ matrix.os }}
-        steps:
-            - uses: actions/checkout@v6
-            - uses: ./.github/actions/setup-rust
-            - uses: ./.github/actions/install-linux-dependencies
-              with:
-                  extra-packages: libwayland-dev libasound2-dev
-            - uses: ./.github/actions/install-skia-dependencies
-            - uses: ilammy/msvc-dev-cmd@v1
-            - name: Build Bevy Example
-              run: cargo build
-              working-directory: examples/bevy
-            - name: Build bevy-hosts-slint Example
-              run: cargo build
-              working-directory: examples/bevy-hosts-slint
-            - name: Build bevy-hosts-slint-gpu Example
-              run: cargo build
-              working-directory: examples/bevy-hosts-slint-gpu
+    bevy_examples:
+        uses: ./.github/workflows/bevy_examples.yaml
+        with:
+            # In the nightly CI run, run cargo update to test if any downstream dependency broke our build
+            # Do not update the cache though, as that would trash the cache for the next runner, which uses the non-updated
+            # lockfile.
+            update: true
+            save_if: false
 
     android_wgpu:
         runs-on: ubuntu-latest
@@ -328,3 +314,15 @@ jobs:
         with:
             name: "Node.js ${{ matrix.os }}"
             os: ${{ matrix.os }}
+
+    miri:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/setup-rust
+              with:
+                  toolchain: nightly
+                  key: miri
+                  components: miri
+            - name: Run Miri
+              run: cargo miri test -p vtable -p const-field-offset -p i-slint-common

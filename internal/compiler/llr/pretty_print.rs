@@ -305,6 +305,9 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
             Expression::StringLiteral(x) => write!(f, "{x:?}"),
             Expression::NumberLiteral(x) => write!(f, "{x:?}"),
             Expression::BoolLiteral(x) => write!(f, "{x:?}"),
+            Expression::KeyboardShortcutLiteral(shortcut) => {
+                write!(f, "@keys({shortcut})",)
+            }
             Expression::PropertyReference(x) => write!(f, "{}", DisplayPropertyRef(x, ctx)),
             Expression::FunctionParameterReference { index } => write!(f, "arg_{index}"),
             Expression::StoreLocalVariable { name, value } => {
@@ -418,7 +421,28 @@ impl<'a, T> Display for DisplayExpression<'a, T> {
                     entries_per_item
                 )
             }
+            Expression::GridRepeaterCacheAccess {
+                layout_cache_prop,
+                index,
+                repeater_index,
+                stride,
+                child_offset,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{0}[{0}[{1}] + {2} * {3} + {4}]",
+                    DisplayPropertyRef(layout_cache_prop, ctx),
+                    index,
+                    e(repeater_index),
+                    e(stride),
+                    child_offset
+                )
+            }
             Expression::WithLayoutItemInfo { .. } => write!(f, "WithLayoutItemInfo(TODO)",),
+            Expression::WithFlexBoxLayoutItemInfo { .. } => {
+                write!(f, "WithFlexBoxLayoutItemInfo(TODO)",)
+            }
             Expression::WithGridInputData { .. } => write!(f, "WithGridInputData(TODO)",),
             Expression::MinMax { ty: _, op, lhs, rhs } => match op {
                 MinMaxOp::Min => write!(f, "min({}, {})", e(lhs), e(rhs)),

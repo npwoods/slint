@@ -34,9 +34,6 @@ pub fn create_ui(
     to_lsp: &Rc<dyn common::PreviewToLsp>,
     style: &str,
 ) -> Result<PreviewUi, PlatformError> {
-    #[cfg(all(target_vendor = "apple", not(target_arch = "wasm32")))]
-    crate::preview::connector::native::init_apple_platform()?;
-
     let ui = PreviewUi::new()?;
 
     // styles:
@@ -191,6 +188,7 @@ pub fn set_diagnostics(ui: &PreviewUi, diagnostics: &[slint_interpreter::Diagnos
             let level = match d.level() {
                 DiagnosticLevel::Error => LogMessageLevel::Error,
                 DiagnosticLevel::Warning => LogMessageLevel::Warning,
+                DiagnosticLevel::Note => LogMessageLevel::Note,
                 _ => LogMessageLevel::Debug,
             };
 
@@ -201,6 +199,9 @@ pub fn set_diagnostics(ui: &PreviewUi, diagnostics: &[slint_interpreter::Diagnos
                 (_, DiagnosticLevel::Error) => DiagnosticSummary::Errors,
                 (DiagnosticSummary::Errors, DiagnosticLevel::Warning) => DiagnosticSummary::Errors,
                 (_, DiagnosticLevel::Warning) => DiagnosticSummary::Warnings,
+                // Ignore Note level diagnostics for the summary.
+                // If there is only a note, that's not relevant enough to bother the user.
+                (acc, DiagnosticLevel::Note) => acc,
                 // DiagnosticLevel is non-exhaustive:
                 (acc, _) => acc,
             }

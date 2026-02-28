@@ -21,19 +21,20 @@ fn main() {
         slint_safeui_core::slint_app_main()
     });
 
-    let window = MainWindow::new().unwrap();
-
+    let platform = i_slint_backend_selector::create_backend().unwrap();
+    let ctx = i_slint_backend_selector::SlintContext::new(platform);
+    let window = MainWindow::new_with_context(ctx.clone()).unwrap();
     let window_weak = window.as_weak();
 
-    slint::spawn_local(async move {
-        use desktop_platform::{HEIGHT_PIXELS, WIDTH_PIXELS};
+    ctx.spawn_local(async move {
+        use desktop_platform::{SCALED_HEIGHT, SCALED_WIDTH};
 
         loop {
             if let Ok(source_pixels) = pixel_receiver.recv().await
                 && let Some(window) = window_weak.upgrade()
             {
                 let mut pixel_buf: slint::SharedPixelBuffer<slint::Rgb8Pixel> =
-                    slint::SharedPixelBuffer::new(WIDTH_PIXELS, HEIGHT_PIXELS);
+                    slint::SharedPixelBuffer::new(SCALED_WIDTH, SCALED_HEIGHT);
                 let pixel_dest = pixel_buf.make_mut_slice();
                 pixel_dest.copy_from_slice(&source_pixels);
 

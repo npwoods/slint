@@ -47,7 +47,6 @@ figma_inspector:
 
 material_components:
  - 'ui-libraries/material/**'
- - *ci_config
 
 internal: &internal
  # The API specific tests don't depends on renderer or backend, but they do depend on the Qt widgets and the testing backend
@@ -115,4 +114,8 @@ updater_test:
 
 servo_example:
  - 'examples/servo/**'
+ - *ci_config
+
+bevy_examples:
+ - 'examples/bevy/**'
  - *ci_config

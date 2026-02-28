@@ -5,6 +5,7 @@
 This module contains path related types and functions for the run-time library.
 */
 
+#[cfg(feature = "std")]
 use crate::debug_log;
 use crate::items::PathEvent;
 #[cfg(feature = "rtti")]
@@ -263,8 +264,10 @@ impl PathDataIterator {
 #[derive(Clone, Debug, PartialEq)]
 /// PathData represents a path described by either high-level elements or low-level
 /// events and coordinates.
+#[derive(Default)]
 pub enum PathData {
     /// None is the variant when the path is empty.
+    #[default]
     None,
     /// The Elements variant is used to make a Path from shared arrays of elements.
     Elements(crate::SharedVector<PathElement>),
@@ -272,13 +275,8 @@ pub enum PathData {
     /// associated coordinates.
     Events(crate::SharedVector<PathEvent>, crate::SharedVector<lyon_path::math::Point>),
     /// The Commands variant describes the path as a series of SVG encoded path commands.
+    #[cfg(feature = "std")]
     Commands(crate::SharedString),
-}
-
-impl Default for PathData {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl PathData {
@@ -293,6 +291,7 @@ impl PathData {
                 PathData::Events(events, coordinates) => {
                     LyonPathIteratorVariant::FromEvents(events, coordinates)
                 }
+                #[cfg(feature = "std")]
                 PathData::Commands(commands) => {
                     let mut builder = lyon_path::Path::builder();
                     let mut parser = lyon_extra::parser::PathParser::new();

@@ -106,7 +106,7 @@ pub mod cpp_ast {
 
     use smol_str::{SmolStr, format_smolstr};
 
-    thread_local!(static INDENTATION : Cell<u32> = Cell::new(0));
+    thread_local!(static INDENTATION : Cell<u32> = const { Cell::new(0) });
     fn indent(f: &mut Formatter<'_>) -> Result<(), Error> {
         INDENTATION.with(|i| {
             for _ in 0..(i.get()) {
@@ -157,7 +157,7 @@ pub mod cpp_ast {
                             Some(Declaration::Var(Var {
                                 ty: var.ty.clone(),
                                 name: var.name.clone(),
-                                array_size: var.array_size.clone(),
+                                array_size: var.array_size,
                                 init: std::mem::take(&mut var.init),
                                 is_extern: false,
                                 ..Default::default()
@@ -530,6 +530,9 @@ impl CppType for Type {
             Type::Float32 => Some("float".into()),
             Type::Int32 => Some("int".into()),
             Type::String => Some("slint::SharedString".into()),
+            Type::KeyboardShortcutType => {
+                Some("slint::cbindgen_private::types::KeyboardShortcut".into())
+            }
             Type::Color => Some("slint::Color".into()),
             Type::Duration => Some("std::int64_t".into()),
             Type::Angle => Some("float".into()),
@@ -576,7 +579,7 @@ fn remove_parentheses(expr: &str) -> &str {
     if expr.starts_with('(') && expr.ends_with(')') {
         let mut level = 0;
         // check that the opening and closing parentheses are on the same level
-        for byte in expr[1..expr.len() - 1].as_bytes() {
+        for byte in &expr.as_bytes()[1..expr.len() - 1] {
             match byte {
                 b')' if level == 0 => return expr,
                 b')' => level -= 1,
@@ -2279,7 +2282,7 @@ fn generate_sub_component(
                 "   if (!self->{name}.running() || self->{name}.interval() != interval)"
             ));
             update_timers.push(format!("       self->{name}.start(slint::TimerMode::Repeated, interval, [self] {{ {callback}; }});"));
-            update_timers.push(format!("}} else {{ self->{name}.stop(); }}").into());
+            update_timers.push(format!("}} else {{ self->{name}.stop(); }}"));
             target_struct.members.push((
                 field_access,
                 Declaration::Var(Var { ty: "slint::Timer".into(), name, ..Default::default() }),
@@ -3307,12 +3310,14 @@ fn native_prop_info<'a, 'b>(
     (&sub_component.items[*item_index].ty, prop_name)
 }
 
+fn shared_string_literal(string: &str) -> String {
+    format!(r#"slint::SharedString(u8"{}")"#, escape_string(string))
+}
+
 fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String {
     use llr::Expression;
     match expr {
-        Expression::StringLiteral(s) => {
-            format!(r#"slint::SharedString(u8"{}")"#, escape_string(s.as_str()))
-        }
+        Expression::StringLiteral(s) => shared_string_literal(s),
         Expression::NumberLiteral(num) => {
             if !num.is_finite() {
                 // just print something
@@ -3325,6 +3330,22 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             }
         }
         Expression::BoolLiteral(b) => b.to_string(),
+        Expression::KeyboardShortcutLiteral(ks) => {
+            format!(
+                "[&](const slint::SharedString &key, bool alt, bool control, bool shift, bool meta, bool ignoreShift, bool ignoreAlt) {{
+                    slint::cbindgen_private::types::KeyboardShortcut out;
+                    slint::cbindgen_private::slint_keyboard_shortcut(&key, alt, control, shift, meta, ignoreShift, ignoreAlt, &out);
+                    return out;
+                }}({}, {}, {}, {}, {}, {}, {})",
+                shared_string_literal(&ks.key),
+                ks.modifiers.alt,
+                ks.modifiers.control,
+                ks.modifiers.shift,
+                ks.modifiers.meta,
+                ks.ignore_shift,
+                ks.ignore_alt,
+            )
+        }
         Expression::PropertyReference(nr) => access_member(nr, ctx).get_property(),
         Expression::BuiltinFunctionCall { function, arguments } => {
             compile_builtin_function_call(function.clone(), arguments, ctx)
@@ -3527,6 +3548,9 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                         "[&]() -> slint::SharedString {{ switch ({f}) {{ {} default: return {{}}; }} }}()",
                         cases.join(" ")
                     )
+                }
+                (Type::KeyboardShortcutType, Type::String) => {
+                    format!("slint::private_api::keyboard_shortcut_to_string({f})")
                 }
                 _ => f,
             }
@@ -3808,6 +3832,38 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                 }
             })
         }
+        Expression::GridRepeaterCacheAccess {
+            layout_cache_prop,
+            index,
+            repeater_index,
+            stride,
+            child_offset,
+            inner_repeater_index,
+            entries_per_item,
+        } => {
+            let cache = access_member(layout_cache_prop, ctx);
+            cache.map_or_default(|cache| {
+                let stride_val = compile_expression(stride, ctx);
+                let col_offset = if let Some(inner_ri) = inner_repeater_index {
+                    format!(
+                        "{} + {} * {}",
+                        child_offset,
+                        compile_expression(inner_ri, ctx),
+                        entries_per_item
+                    )
+                } else {
+                    child_offset.to_string()
+                };
+                format!(
+                    "slint::private_api::layout_cache_grid_repeater_access({}.get(), {}, {}, {}, {})",
+                    cache,
+                    index,
+                    compile_expression(repeater_index, ctx),
+                    stride_val,
+                    col_offset
+                )
+            })
+        }
         Expression::WithLayoutItemInfo {
             cells_variable,
             repeater_indices_var_name,
@@ -3821,6 +3877,20 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             repeater_steps_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             *orientation,
+            sub_expression,
+            ctx,
+        ),
+        Expression::WithFlexBoxLayoutItemInfo {
+            cells_h_variable,
+            cells_v_variable,
+            repeater_indices_var_name,
+            elements,
+            sub_expression,
+        } => generate_with_flexbox_layout_item_info(
+            cells_h_variable,
+            cells_v_variable,
+            repeater_indices_var_name.as_ref().map(SmolStr::as_str),
+            elements.as_ref(),
             sub_expression,
             ctx,
         ),
@@ -3896,6 +3966,15 @@ fn compile_builtin_function_call(
         BuiltinFunction::GetWindowScaleFactor => {
             format!("{}.scale_factor()", access_window_field(ctx))
         }
+        BuiltinFunction::KeyboardShortcutMatches => {
+            let [shortcut, key_event] = arguments else {
+                panic!("internal error: incorrect number of arguments to KeyboardShortcut::matches");
+            };
+            let shortcut = compile_expression(shortcut, ctx);
+            let key_event = compile_expression(key_event, ctx);
+
+            format!("[&]() -> bool {{ auto shortcut = {shortcut}; auto keyEvent = {key_event}; return slint_keyboard_shortcut_matches(&shortcut, &keyEvent); }}()")
+        },
         BuiltinFunction::GetWindowDefaultFontSize => {
             "slint::private_api::get_resolved_default_font_size(*this)".to_string()
         }
@@ -4394,13 +4473,14 @@ fn compile_builtin_function_call(
                 panic!("internal error: invalid args to RetartTimer {arguments:?}")
             }
         }
-        BuiltinFunction::EscapeMarkdown => {
-            let text = a.next().unwrap();
-            format!("slint::private_api::escape_markdown({})", text)
-        }
         BuiltinFunction::ParseMarkdown => {
-            let text = a.next().unwrap();
-            format!("slint::private_api::parse_markdown({})", text)
+            let format_string = a.next().unwrap();
+            let args = a.next().unwrap();
+            format!("slint::private_api::parse_markdown({}, {})", format_string, args)
+        }
+        BuiltinFunction::StringToStyledText => {
+            let string = a.next().unwrap();
+            format!("slint::private_api::string_to_styled_text({})", string)
         }
     }
 }
@@ -4502,6 +4582,74 @@ fn generate_with_layout_item_info(
         "[&]{{ {ri} {rs} {push_code} slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{} = slint::private_api::make_slice(std::span(cells_vector)); return {}; }}()",
         ident(cells_variable),
         compile_expression(sub_expression, ctx)
+    )
+}
+
+fn generate_with_flexbox_layout_item_info(
+    cells_h_variable: &str,
+    cells_v_variable: &str,
+    repeated_indices_var_name: Option<&str>,
+    elements: &[Either<(llr::Expression, llr::Expression), llr::LayoutRepeatedElement>],
+    sub_expression: &llr::Expression,
+    ctx: &llr_EvaluationContext<CppGeneratorContext>,
+) -> String {
+    let repeated_indices_var_name = repeated_indices_var_name.map(ident);
+    let mut push_code =
+        "std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_v;".to_owned();
+    let mut repeater_idx = 0usize;
+
+    for item in elements {
+        match item {
+            Either::Left((value_h, value_v)) => {
+                write!(
+                    push_code,
+                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }});",
+                    compile_expression(value_h, ctx),
+                    compile_expression(value_v, ctx)
+                )
+                .unwrap();
+            }
+            Either::Right(repeater) => {
+                let repeater_index = usize::from(repeater.repeater_index);
+                write!(push_code, "self->repeater_{repeater_index}.ensure_updated(self);").unwrap();
+
+                if let Some(ri) = &repeated_indices_var_name {
+                    write!(
+                        push_code,
+                        "{ri}_array[{c}] = cells_vector_h.size();",
+                        c = repeater_idx * 2
+                    )
+                    .unwrap();
+                    write!(
+                        push_code,
+                        "{ri}_array[{c}] = self->repeater_{repeater_index}.len();",
+                        c = repeater_idx * 2 + 1,
+                    )
+                    .unwrap();
+                }
+                repeater_idx += 1;
+                write!(
+                    push_code,
+                    "self->repeater_{repeater_index}.for_each([&](const auto &sub_comp){{ cells_vector_h.push_back(sub_comp->layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt)); cells_vector_v.push_back(sub_comp->layout_item_info(slint::cbindgen_private::Orientation::Vertical, std::nullopt)); }});"
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    let ri = repeated_indices_var_name.as_ref().map_or(String::new(), |ri| {
+        write!(
+            push_code,
+            "slint::cbindgen_private::Slice<int> {ri} = slint::private_api::make_slice(std::span({ri}_array));"
+        )
+        .unwrap();
+        format!("std::array<int, {}> {ri}_array;", 2 * repeater_idx)
+    });
+    format!(
+        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); return {}; }}()",
+        compile_expression(sub_expression, ctx),
+        cells_h = ident(cells_h_variable),
+        cells_v = ident(cells_v_variable),
     )
 }
 

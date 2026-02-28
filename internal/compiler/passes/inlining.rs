@@ -3,6 +3,8 @@
 
 //! Inline each object_tree::Component within the main Component
 
+#![allow(clippy::mutable_key_type)] // pass uses identity-based keys backed by interior mutability
+
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::{BindingExpression, Expression, NamedReference};
 use crate::langtype::{ElementType, Type};
@@ -598,6 +600,12 @@ fn fixup_element_references(expr: &mut Expression, mapping: &Mapping) {
         | Expression::ComputeGridLayoutInfo { layout, .. } => {
             for e in &mut layout.elems {
                 fxe(&mut e.item.element);
+            }
+        }
+        Expression::SolveFlexBoxLayout(layout)
+        | Expression::ComputeFlexBoxLayoutInfo(layout, _) => {
+            for e in &mut layout.elems {
+                fxe(&mut e.element);
             }
         }
         Expression::RepeaterModelReference { element }

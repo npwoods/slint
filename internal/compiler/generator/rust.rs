@@ -108,6 +108,7 @@ pub fn rust_primitive_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
             let i = ident(&e.name);
             if e.node.is_some() { Some(quote!(#i)) } else { Some(quote!(sp::#i)) }
         }
+        Type::KeyboardShortcutType => Some(quote!(sp::KeyboardShortcut)),
         Type::Brush => Some(quote!(slint::Brush)),
         Type::LayoutCache => Some(quote!(
             sp::SharedVector<
@@ -206,7 +207,7 @@ pub fn generate(
         .map(|sub_compo| generate_sub_component(*sub_compo, &llr, None, None, false))
         .collect::<Vec<_>>();
     let public_components =
-        llr.public_components.iter().map(|p| generate_public_component(p, &llr));
+        llr.public_components.iter().map(|p| generate_public_component(p, &llr, compiler_config));
 
     let popup_menu =
         llr.popup_menu.as_ref().map(|p| generate_item_tree(&p.item_tree, &llr, None, None, true));
@@ -314,6 +315,7 @@ pub fn generate_types(used_types: &[Type]) -> (Vec<Ident>, TokenStream) {
 fn generate_public_component(
     llr: &llr::PublicComponent,
     unit: &llr::CompilationUnit,
+    compiler_config: &CompilerConfiguration,
 ) -> TokenStream {
     let public_component_id = ident(&llr.name);
     let inner_component_id = inner_component_id(&unit.sub_components[llr.item_tree.root]);
@@ -344,16 +346,30 @@ fn generate_public_component(
     #[cfg(not(feature = "bundle-translations"))]
     let init_bundle_translations = quote!();
 
+    let experimental = compiler_config.enable_experimental;
+
     quote!(
         #component
         pub struct #public_component_id(sp::VRc<sp::ItemTreeVTable, #inner_component_id>);
 
         impl #public_component_id {
             pub fn new() -> ::core::result::Result<Self, slint::PlatformError> {
+                slint::private_unstable_api::ensure_backend()?;
                 let inner = #inner_component_id::new()?;
                 #init_bundle_translations
                 // ensure that the window exist as this point so further call to window() don't panic
                 inner.globals.get().unwrap().window_adapter_ref()?;
+                #inner_component_id::user_init(sp::VRc::map(inner.clone(), |x| x));
+                ::core::result::Result::Ok(Self(inner))
+            }
+
+            #[cfg(#experimental)]
+            pub fn new_with_context(ctx: sp::SlintContext) -> ::core::result::Result<Self, slint::PlatformError> {
+                let inner = #inner_component_id::new()?;
+                #init_bundle_translations
+
+                inner.globals.get().unwrap().create_window_from_context(ctx)?;
+
                 #inner_component_id::user_init(sp::VRc::map(inner.clone(), |x| x));
                 ::core::result::Result::Ok(Self(inner))
             }
@@ -383,7 +399,7 @@ fn generate_public_component(
 
             fn run(&self) -> ::core::result::Result<(), slint::PlatformError> {
                 self.show()?;
-                slint::run_event_loop()?;
+                sp::WindowInner::from_pub(self.window()).context().run_event_loop()?;
                 self.hide()?;
                 ::core::result::Result::Ok(())
             }
@@ -448,6 +464,8 @@ fn generate_shared_globals(
         .collect::<Vec<_>>();
     let pub_token = if compiler_config.library_name.is_some() { quote!(pub) } else { quote!() };
 
+    let experimental = compiler_config.enable_experimental;
+
     let (library_shared_globals_names, library_shared_globals_types): (Vec<_>, Vec<_>) = doc
         .imports
         .iter()
@@ -505,6 +523,17 @@ fn generate_shared_globals(
                     #apply_constant_scale_factor
                     ::core::result::Result::Ok(adapter)
                 })
+            }
+
+            #[cfg(#experimental)]
+            fn create_window_from_context(&self, ctx: sp::SlintContext) -> sp::Result<(), slint::PlatformError> {
+                let adapter = ctx.platform().create_window_adapter()?;
+                sp::WindowInner::from_pub(adapter.window()).set_context(ctx);
+                let root_rc = self.root_item_tree_weak.upgrade().unwrap();
+                sp::WindowInner::from_pub(adapter.window()).set_component(&root_rc);
+                #apply_constant_scale_factor
+                self.window_adapter.set(adapter).map_err(|_|()).expect("The window shouldn't be initialized before this call");
+                sp::Ok(())
             }
 
             fn maybe_window_adapter_impl(&self) -> sp::Option<sp::Rc<dyn sp::WindowAdapter>> {
@@ -1741,7 +1770,6 @@ fn generate_item_tree(
         impl #inner_component_id {
             fn new(#(parent: #parent_component_type,)* #globals_arg) -> ::core::result::Result<sp::VRc<sp::ItemTreeVTable, Self>, slint::PlatformError> {
                 #![allow(unused)]
-                slint::private_unstable_api::ensure_backend()?;
                 let mut _self = Self::default();
                 #(_self.parent = parent.clone() as #parent_component_type;)*
                 let self_rc = sp::VRc::new(_self);
@@ -2365,6 +2393,27 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let s = s.as_str();
             quote!(sp::SharedString::from(#s))
         }
+        Expression::KeyboardShortcutLiteral(shortcut) => {
+                let key = &*shortcut.key;
+                let alt = shortcut.modifiers.alt;
+                let control = shortcut.modifiers.control;
+                let shift = shortcut.modifiers.shift;
+                let meta = shortcut.modifiers.meta;
+                let ignore_shift = shortcut.ignore_shift;
+                let ignore_alt = shortcut.ignore_alt;
+
+                quote!(
+                    sp::make_keyboard_shortcut(
+                        #key.into(),
+                        sp::KeyboardModifiers {
+                            alt: #alt,
+                            control: #control,
+                            shift: #shift,
+                            meta: #meta
+                        },
+                        #ignore_shift,
+                        #ignore_alt))
+        },
         Expression::NumberLiteral(n) if n.is_finite() => quote!(#n),
         Expression::NumberLiteral(_) => quote!(0.),
         Expression::BoolLiteral(b) => quote!(#b),
@@ -2466,6 +2515,9 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                         quote!(#c => sp::SharedString::from(#v))
                     });
                     quote!(match #f { #(#cases,)*  _ => sp::SharedString::default() })
+                }
+                (Type::KeyboardShortcutType, Type::String) => {
+                    quote!(sp::ToSharedString::to_shared_string(&#f))
                 }
                 (_, Type::Void) => {
                     quote!({#f;})
@@ -2819,6 +2871,29 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 }
             })
         }
+        Expression::GridRepeaterCacheAccess {
+            layout_cache_prop,
+            index,
+            repeater_index,
+            stride,
+            child_offset,
+            inner_repeater_index,
+            entries_per_item,
+        } => access_member(layout_cache_prop, ctx).map_or_default(|cache| {
+            let offset = compile_expression(repeater_index, ctx);
+            let stride_val = compile_expression(stride, ctx);
+            let inner_offset = inner_repeater_index.as_ref().map(|inner_ri| {
+                let inner_offset = compile_expression(inner_ri, ctx);
+                quote!(+ #inner_offset as usize * #entries_per_item)
+            });
+
+            quote!({
+                let cache = #cache.get();
+                let base = cache[#index] as usize;
+                let data_idx = base + #offset as usize * (#stride_val as usize) + #child_offset #inner_offset;
+                *cache.get(data_idx).unwrap_or(&(0 as _))
+            })
+        }),
         Expression::WithLayoutItemInfo {
             cells_variable,
             repeater_indices_var_name,
@@ -2832,6 +2907,21 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             repeater_steps_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             *orientation,
+            sub_expression,
+            ctx,
+        ),
+
+        Expression::WithFlexBoxLayoutItemInfo {
+            cells_h_variable,
+            cells_v_variable,
+            repeater_indices_var_name,
+            elements,
+            sub_expression,
+        } => generate_with_flexbox_layout_item_info(
+            cells_h_variable,
+            cells_v_variable,
+            repeater_indices_var_name.as_ref().map(SmolStr::as_str),
+            elements.as_ref(),
             sub_expression,
             ctx,
         ),
@@ -2923,6 +3013,15 @@ fn compile_builtin_function_call(
                 )
             } else {
                 panic!("internal error: invalid args to SetFocusItem {arguments:?}")
+            }
+        }
+        BuiltinFunction::KeyboardShortcutMatches => {
+            if let [shortcut, event] = arguments {
+                let shortcut = compile_expression(&shortcut, ctx);
+                let event = compile_expression(&event, ctx);
+                quote!(#shortcut.matches(&#event))
+            } else {
+                panic!("internal error: invalid args to KeyboardShortcut::matches {arguments:?}")
             }
         }
         BuiltinFunction::ClearFocusItem => {
@@ -3532,13 +3631,14 @@ fn compile_builtin_function_call(
                 panic!("internal error: invalid args to RestartTimer {arguments:?}")
             }
         }
-        BuiltinFunction::EscapeMarkdown => {
-            let text = a.next().unwrap();
-            quote!(sp::escape_markdown(&#text))
-        }
         BuiltinFunction::ParseMarkdown => {
-            let text = a.next().unwrap();
-            quote!(sp::parse_markdown(&#text))
+            let format_string = a.next().unwrap();
+            let args = a.next().unwrap();
+            quote!(sp::parse_markdown::<sp::StyledText>(&#format_string, &#args))
+        }
+        BuiltinFunction::StringToStyledText => {
+            let string = a.next().unwrap();
+            quote!(sp::string_to_styled_text(#string.to_string()))
         }
     }
 }
@@ -3572,6 +3672,8 @@ fn generate_common_repeater_code(
     repeater_steps_var_name: &Option<Ident>,
     repeater_count_code: &mut TokenStream,
     repeated_item_count: usize, // >1 for repeated Rows
+    // The name of the items vector to use for measuring length (e.g., "items_vec" or "items_vec_h")
+    items_vec_name: &str,
     ctx: &EvaluationContext,
 ) -> TokenStream {
     let repeater_id = format_ident!("repeater{}", usize::from(repeater_index));
@@ -3582,12 +3684,13 @@ fn generate_common_repeater_code(
     );
     *repeater_count_code = quote!(#repeater_count_code + _self.#repeater_id.len());
 
+    let items_vec_ident = ident(items_vec_name);
     let mut repeater_code = quote!();
     if let Some(ri) = repeated_indices_var_name {
         let ri_idx = *repeated_indices_size;
         repeater_code = quote!(
-            #ri[#ri_idx] = items_vec.len() as u32;
-            #ri[#ri_idx + 1] = internal_vec.len() as u32;
+            #ri[#ri_idx] = #items_vec_ident.len() as u32;
+            #ri[#ri_idx + 1] = _self.#repeater_id.len() as u32;
         );
         *repeated_indices_size += 2;
         if let Some(rs) = repeater_steps_var_name {
@@ -3600,7 +3703,6 @@ fn generate_common_repeater_code(
         #inner_component_id::FIELD_OFFSETS.#repeater_id.apply_pin(_self).ensure_updated(
             || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into() }
         );
-        let internal_vec = _self.#repeater_id.instances_vec();
         #repeater_code
     )
 }
@@ -3655,17 +3757,22 @@ fn generate_with_grid_input_data(
                     &repeater_steps_var_name,
                     &mut repeated_count_code,
                     repeated_item_count,
+                    "items_vec",
                     ctx,
                 );
 
                 let new_row = repeater.new_row;
+                let repeater_id = format_ident!("repeater{}", usize::from(repeater.repeater_index));
                 let loop_code = quote!({
+                    let len = _self.#repeater_id.len();
                     let start_offset = items_vec.len();
-                    items_vec.extend(core::iter::repeat_with(Default::default).take(internal_vec.len() * #repeated_item_count));
-                    for (i, sub_comp) in internal_vec.iter().enumerate() {
-                        let offset = start_offset + i * #repeated_item_count;
-                        sub_comp.as_pin_ref().grid_layout_input_data(new_row, &mut items_vec[offset..offset + #repeated_item_count]);
-                        new_row = false;
+                    items_vec.extend(core::iter::repeat_with(Default::default).take(len * #repeated_item_count));
+                    for i in 0..len {
+                        if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
+                            let offset = start_offset + i * #repeated_item_count;
+                            sub_comp.as_pin_ref().grid_layout_input_data(new_row, &mut items_vec[offset..offset + #repeated_item_count]);
+                            new_row = false;
+                        }
                     }
                 });
                 push_code.push(quote!(
@@ -3730,21 +3837,27 @@ fn generate_with_layout_item_info(
                     &repeater_steps_var_name,
                     &mut repeated_count_code,
                     repeated_item_count,
+                    "items_vec",
                     ctx,
                 );
+                let repeater_id = format_ident!("repeater{}", usize::from(repeater.repeater_index));
                 let loop_code = match repeater.repeated_children_count {
                     None => {
                         quote!(
-                            for sub_comp in &internal_vec {
-                                items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, None));
+                            for i in 0.._self.#repeater_id.len() {
+                                if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
+                                    items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, None));
+                                }
                             }
                         )
                     }
                     Some(count) if count > 0 => {
                         quote!(
-                            for sub_comp in &internal_vec {
-                                for child_idx in 0..#count {
-                                    items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, Some(child_idx)));
+                            for i in 0.._self.#repeater_id.len() {
+                                if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
+                                    for child_idx in 0..#count {
+                                        items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, Some(child_idx)));
+                                    }
                                 }
                             }
                         )
@@ -3778,6 +3891,85 @@ fn generate_with_layout_item_info(
         let #cells_variable = sp::Slice::from_slice(&items_vec);
         #ri_from_slice
         #rs_from_slice
+        #sub_expression
+    } }
+}
+
+fn generate_with_flexbox_layout_item_info(
+    cells_h_variable: &str,
+    cells_v_variable: &str,
+    repeated_indices_var_name: Option<&str>,
+    elements: &[Either<(Expression, Expression), llr::LayoutRepeatedElement>],
+    sub_expression: &Expression,
+    ctx: &EvaluationContext,
+) -> TokenStream {
+    let repeated_indices_var_name = repeated_indices_var_name.map(ident);
+    let mut fixed_count = 0usize;
+    let mut repeated_count_code = quote!();
+    let mut push_code = Vec::new();
+    let mut repeated_indices_size = 0usize;
+
+    for item in elements {
+        match item {
+            Either::Left((value_h, value_v)) => {
+                let value_h = compile_expression(value_h, ctx);
+                let value_v = compile_expression(value_v, ctx);
+                fixed_count += 1;
+                push_code.push(quote!(
+                    items_vec_h.push(#value_h);
+                    items_vec_v.push(#value_v);
+                ))
+            }
+            Either::Right(repeater) => {
+                let common_push_code = self::generate_common_repeater_code(
+                    repeater.repeater_index,
+                    &repeated_indices_var_name,
+                    &mut repeated_indices_size,
+                    &None, // No repeater_steps for flexbox
+                    &mut repeated_count_code,
+                    1,             // repeated_item_count
+                    "items_vec_h", // Use items_vec_h for length tracking (same as items_vec_v)
+                    ctx,
+                );
+                let repeater_id = format_ident!("repeater{}", usize::from(repeater.repeater_index));
+                let loop_code = quote!(for i in 0.._self.#repeater_id.len() {
+                    if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
+                        items_vec_h.push(
+                            sub_comp.as_pin_ref().layout_item_info(sp::Orientation::Horizontal, None),
+                        );
+                        items_vec_v.push(
+                            sub_comp.as_pin_ref().layout_item_info(sp::Orientation::Vertical, None),
+                        );
+                    }
+                });
+                push_code.push(quote!(
+                    #common_push_code
+                    #loop_code
+                ));
+            }
+        }
+    }
+
+    let ri_init_code = generate_common_repeater_indices_init_code(
+        &repeated_indices_var_name,
+        repeated_indices_size,
+        &None,
+    );
+
+    let ri_from_slice =
+        repeated_indices_var_name.map(|ri| quote!(let #ri = sp::Slice::from_slice(&#ri);));
+    let cells_h_variable = ident(cells_h_variable);
+    let cells_v_variable = ident(cells_v_variable);
+    let sub_expression = compile_expression(sub_expression, ctx);
+
+    quote! { {
+        #ri_init_code
+        let mut items_vec_h = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
+        let mut items_vec_v = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
+        #(#push_code)*
+        let #cells_h_variable = sp::Slice::from_slice(&items_vec_h);
+        let #cells_v_variable = sp::Slice::from_slice(&items_vec_v);
+        #ri_from_slice
         #sub_expression
     } }
 }

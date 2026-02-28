@@ -193,13 +193,48 @@ box_layout_info_ortho(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> 
     return cbindgen_private::slint_box_layout_info_ortho(cells, &padding);
 }
 
-/// Access the layout cache of an item within a repeater
+inline SharedVector<float> solve_flexbox_layout(const cbindgen_private::FlexBoxLayoutData &data,
+                                                cbindgen_private::Slice<int> repeater_indices)
+{
+    SharedVector<float> result;
+    cbindgen_private::Slice<uint32_t> ri =
+            make_slice(reinterpret_cast<uint32_t *>(repeater_indices.ptr), repeater_indices.len);
+    cbindgen_private::slint_solve_flexbox_layout(&data, ri, &result);
+    return result;
+}
+
+inline cbindgen_private::LayoutInfo
+flexbox_layout_info(cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_h,
+                    cbindgen_private::Slice<cbindgen_private::LayoutItemInfo> cells_v,
+                    float spacing_h, float spacing_v, const cbindgen_private::Padding &padding_h,
+                    const cbindgen_private::Padding &padding_v,
+                    cbindgen_private::Orientation orientation,
+                    cbindgen_private::FlexDirection direction, float constraint_size)
+{
+    return cbindgen_private::slint_flexbox_layout_info(cells_h, cells_v, spacing_h, spacing_v,
+                                                       &padding_h, &padding_v, orientation,
+                                                       direction, constraint_size);
+}
+
+/// Access the layout cache of an item within a repeater (standard cache)
 template<typename T>
 inline T layout_cache_access(const SharedVector<T> &cache, int offset, int repeater_index,
                              int entries_per_item)
 {
     size_t idx = size_t(cache[offset]) + repeater_index * entries_per_item;
     return idx < cache.size() ? cache[idx] : 0;
+}
+
+/// Access the layout cache of an item within a grid repeater (two-level indirection cache)
+/// Formula: cache[cache[jump_index] + repeater_index * stride + child_offset]
+template<typename T>
+inline T layout_cache_grid_repeater_access(const SharedVector<T> &cache, size_t jump_index,
+                                           size_t repeater_index, size_t stride,
+                                           size_t child_offset)
+{
+    size_t base = jump_index < cache.size() ? size_t(cache[jump_index]) : 0;
+    size_t data_idx = base + repeater_index * stride + child_offset;
+    return data_idx < cache.size() ? cache[data_idx] : 0;
 }
 
 template<typename VT, typename ItemType>
@@ -271,17 +306,18 @@ inline SharedString translate(const SharedString &original, const SharedString &
     return result;
 }
 
-inline SharedString escape_markdown(const SharedString &text)
+inline StyledText parse_markdown(const SharedString &format_string,
+                                 cbindgen_private::Slice<StyledText> args)
 {
-    SharedString result = text;
-    cbindgen_private::slint_escape_markdown(&result);
+    StyledText result;
+    cbindgen_private::slint_parse_markdown(&format_string, args, &result);
     return result;
 }
 
-inline StyledText parse_markdown(const SharedString &text)
+inline StyledText string_to_styled_text(SharedString text)
 {
     StyledText result;
-    cbindgen_private::slint_parse_markdown(&text, &result);
+    cbindgen_private::slint_string_to_styled_text(text, &result);
     return result;
 }
 
@@ -310,6 +346,13 @@ translate_from_bundle_with_plural(std::span<const char8_t *const> strs,
                        plural_rules.size());
     cbindgen_private::slint_translate_from_bundle_with_plural(
             strs_slice, indices_slice, plural_rules_slice, arguments, n, &result);
+    return result;
+}
+
+inline SharedString keyboard_shortcut_to_string(const cbindgen_private::KeyboardShortcut &shortcut)
+{
+    SharedString result;
+    cbindgen_private::slint_keyboard_shortcut_to_string(&shortcut, &result);
     return result;
 }
 
@@ -363,6 +406,15 @@ cbindgen_private::Flickable::Flickable()
 cbindgen_private::Flickable::~Flickable()
 {
     slint_flickable_data_free(&data);
+}
+
+cbindgen_private::FocusScope::FocusScope()
+{
+    slint_maybe_shortcut_list_init(&shortcuts);
+}
+cbindgen_private::FocusScope::~FocusScope()
+{
+    slint_maybe_shortcut_list_free(&shortcuts);
 }
 
 cbindgen_private::NativeStyleMetrics::NativeStyleMetrics(void *)

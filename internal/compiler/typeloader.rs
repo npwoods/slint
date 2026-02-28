@@ -18,6 +18,7 @@ use crate::{fileaccess, langtype, layout, parser};
 use core::future::Future;
 use itertools::Itertools;
 
+#[allow(clippy::large_enum_variant)]
 enum LoadedDocument {
     Document(Document),
     /// A dependency of this file has changed, so we need to re-analyze it.
@@ -861,6 +862,25 @@ impl Snapshotter {
                     .map(|e| Box::new(self.snapshot_expression(e))),
                 entries_per_item: *entries_per_item,
             },
+            Expression::GridRepeaterCacheAccess {
+                layout_cache_prop,
+                index,
+                repeater_index,
+                stride,
+                child_offset,
+                inner_repeater_index,
+                entries_per_item,
+            } => Expression::GridRepeaterCacheAccess {
+                layout_cache_prop: layout_cache_prop.snapshot(self),
+                index: *index,
+                repeater_index: Box::new(self.snapshot_expression(repeater_index)),
+                stride: Box::new(self.snapshot_expression(stride)),
+                child_offset: *child_offset,
+                inner_repeater_index: inner_repeater_index
+                    .as_ref()
+                    .map(|e| Box::new(self.snapshot_expression(e))),
+                entries_per_item: *entries_per_item,
+            },
             Expression::MinMax { ty, op, lhs, rhs } => Expression::MinMax {
                 ty: ty.clone(),
                 lhs: Box::new(self.snapshot_expression(lhs)),
@@ -1208,6 +1228,7 @@ impl TypeLoader {
         }
     }
 
+    #[allow(clippy::await_holding_refcell_ref)] // false positive: explicit drop() before await
     async fn ensure_document_loaded<'a: 'b, 'b>(
         state: &'a RefCell<BorrowedTypeLoader<'a>>,
         file_to_import: &'b str,
@@ -1429,6 +1450,7 @@ impl TypeLoader {
     /// Load a file, and its dependency, running the full set of passes.
     ///
     /// the path must be the canonical path
+    #[allow(clippy::await_holding_refcell_ref)] // requires mutable typeloader+diag through async pass pipeline
     pub async fn load_root_file(
         &mut self,
         path: &Path,

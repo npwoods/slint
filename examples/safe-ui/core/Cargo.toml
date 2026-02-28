@@ -3,7 +3,7 @@
 
 [package]
 name = "slint-safeui-core"
-version = "1.15.0"
+version = "1.16.0"
 edition = "2024"
 publish = false
 build = "build.rs"
@@ -16,6 +16,8 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 default = []
+libm = ["slint/libm"]
+std = ["slint/std"]
 panic-handler = []
 pixel-bgra8888 = []
 pixel-rgb565 = []
@@ -23,7 +25,7 @@ pixel-rgb888 = []
 
 [dependencies]
 bytemuck = "1.24.0"
-slint = { path = "../../../api/rs/slint", default-features = false, features = ["compat-1-2", "renderer-software", "libm", "unsafe-single-threaded"] }
+slint = { path = "../../../api/rs/slint", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded"] }
 
 [build-dependencies]
 bindgen = "0.72.1"

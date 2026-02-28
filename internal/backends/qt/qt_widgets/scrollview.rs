@@ -109,6 +109,7 @@ impl Item for NativeScrollView {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -118,6 +119,7 @@ impl Item for NativeScrollView {
         event: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &i_slint_core::items::ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         let size: qttypes::QSize = get_size!(self_rc);
         let mut data = self.data();
@@ -252,6 +254,9 @@ impl Item for NativeScrollView {
                     }
                     InputEventResult::EventAccepted
                 }
+                MouseEvent::PinchGesture { .. }
+                | MouseEvent::RotationGesture { .. }
+                | MouseEvent::DoubleTapGesture { .. } => InputEventResult::EventIgnored,
                 MouseEvent::DragMove(..) | MouseEvent::Drop(..) => InputEventResult::EventIgnored,
             };
             self.data.set(data);

@@ -19,10 +19,24 @@ pub enum Orientation {
     Vertical,
 }
 
+#[derive(Clone, Debug, Copy, Eq, PartialEq, Default)]
+pub enum FlexDirection {
+    /// Items are laid out in rows (horizontal primary axis)
+    #[default]
+    Row,
+    /// Items are laid out in rows in reverse order (horizontal primary axis, right to left)
+    RowReverse,
+    /// Items are laid out in columns (vertical primary axis)
+    Column,
+    /// Items are laid out in columns in reverse order (vertical primary axis, bottom to top)
+    ColumnReverse,
+}
+
 #[derive(Clone, Debug, derive_more::From)]
 pub enum Layout {
     GridLayout(GridLayout),
     BoxLayout(BoxLayout),
+    FlexBoxLayout(FlexBoxLayout),
 }
 
 impl Layout {
@@ -31,6 +45,7 @@ impl Layout {
         match self {
             Layout::GridLayout(grid) => grid.visit_named_references(visitor),
             Layout::BoxLayout(l) => l.visit_named_references(visitor),
+            Layout::FlexBoxLayout(l) => l.visit_named_references(visitor),
         }
     }
 }
@@ -533,6 +548,34 @@ impl BoxLayout {
     }
 }
 
+/// Internal representation of a FlexBoxLayout (row or column direction with wrapping)
+#[derive(Debug, Clone)]
+pub struct FlexBoxLayout {
+    pub elems: Vec<LayoutItem>,
+    pub geometry: LayoutGeometry,
+    pub direction: Option<NamedReference>,
+    pub align_content: Option<NamedReference>,
+    pub align_items: Option<NamedReference>,
+}
+
+impl FlexBoxLayout {
+    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+        for cell in &mut self.elems {
+            cell.constraints.visit_named_references(visitor);
+        }
+        self.geometry.visit_named_references(visitor);
+        if let Some(e) = self.direction.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.align_content.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.align_items.as_mut() {
+            visitor(&mut *e)
+        }
+    }
+}
+
 /// Get the implicit layout info of a particular element
 pub fn implicit_layout_info_call(elem: &ElementRc, orientation: Orientation) -> Expression {
     let mut elem_it = elem.clone();
@@ -622,7 +665,10 @@ pub fn is_layout(base_type: &ElementType) -> bool {
     match base_type {
         ElementType::Component(c) => is_layout(&c.root_element.borrow().base_type),
         ElementType::Builtin(be) => {
-            matches!(be.name.as_str(), "GridLayout" | "HorizontalLayout" | "VerticalLayout")
+            matches!(
+                be.name.as_str(),
+                "GridLayout" | "HorizontalLayout" | "VerticalLayout" | "FlexBoxLayout"
+            )
         }
         _ => false,
     }

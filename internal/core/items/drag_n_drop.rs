@@ -53,6 +53,7 @@ impl Item for DragArea {
         event: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         if !self.enabled() {
             self.cancel();
@@ -94,6 +95,9 @@ impl Item for DragArea {
             MouseEvent::Pressed { .. } | MouseEvent::Released { .. } => {
                 InputEventFilterResult::ForwardAndIgnore
             }
+            MouseEvent::PinchGesture { .. }
+            | MouseEvent::RotationGesture { .. }
+            | MouseEvent::DoubleTapGesture { .. } => InputEventFilterResult::ForwardAndIgnore,
             MouseEvent::DragMove(..) | MouseEvent::Drop(..) => {
                 InputEventFilterResult::ForwardAndIgnore
             }
@@ -105,6 +109,7 @@ impl Item for DragArea {
         event: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventResult {
         match event {
             MouseEvent::Pressed { .. } => InputEventResult::EventAccepted,
@@ -133,6 +138,9 @@ impl Item for DragArea {
                 }
             }
             MouseEvent::Wheel { .. } => InputEventResult::EventIgnored,
+            MouseEvent::PinchGesture { .. }
+            | MouseEvent::RotationGesture { .. }
+            | MouseEvent::DoubleTapGesture { .. } => InputEventResult::EventIgnored,
             MouseEvent::DragMove(..) | MouseEvent::Drop(..) => InputEventResult::EventIgnored,
         }
     }
@@ -231,6 +239,7 @@ impl Item for DropArea {
         _: &MouseEvent,
         _window_adapter: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        _: &mut MouseCursor,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -238,8 +247,9 @@ impl Item for DropArea {
     fn input_event(
         self: Pin<&Self>,
         event: &MouseEvent,
-        window_adapter: &Rc<dyn WindowAdapter>,
+        _: &Rc<dyn WindowAdapter>,
         _self_rc: &ItemRc,
+        cursor: &mut MouseCursor,
     ) -> InputEventResult {
         if !self.enabled() {
             return InputEventResult::EventIgnored;
@@ -249,9 +259,7 @@ impl Item for DropArea {
                 let r = Self::FIELD_OFFSETS.can_drop.apply_pin(self).call(&(event.clone(),));
                 if r {
                     self.contains_drag.set(true);
-                    if let Some(window_adapter) = window_adapter.internal(crate::InternalToken) {
-                        window_adapter.set_mouse_cursor(MouseCursor::Copy);
-                    }
+                    *cursor = MouseCursor::Copy;
                     InputEventResult::EventAccepted
                 } else {
                     self.contains_drag.set(false);

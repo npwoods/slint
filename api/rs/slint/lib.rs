@@ -75,11 +75,11 @@ build = "build.rs"
 edition = "2021"
 
 [dependencies]
-slint = "1.14"
+slint = "1.15"
 ...
 
 [build-dependencies]
-slint-build = "1.14"
+slint-build = "1.15"
 ```
 
 Use the API of the slint-build crate in the `build.rs` file:
@@ -411,10 +411,12 @@ pub mod platform {
         any(feature = "renderer-femtovg", feature = "renderer-femtovg-wgpu")
     ))]
     pub mod femtovg_renderer {
+        #[cfg(feature = "renderer-femtovg")]
         pub use i_slint_renderer_femtovg::FemtoVGOpenGLRenderer as FemtoVGRenderer;
         /// Use this type to render to a WGPU texture using FemtoVG.
         #[cfg(feature = "unstable-wgpu-28")]
         pub use i_slint_renderer_femtovg::FemtoVGWGPURenderer;
+        #[cfg(feature = "renderer-femtovg")]
         pub use i_slint_renderer_femtovg::opengl::OpenGLInterface;
     }
 
@@ -447,7 +449,7 @@ pub mod android;
 /// Helper type that helps checking that the generated code is generated for the right version
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct VersionCheck_1_15_0;
+pub struct VersionCheck_1_16_0;
 
 #[cfg(doctest)]
 mod compile_fail_tests;
@@ -479,7 +481,7 @@ pub mod wgpu_27 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.15", features = ["unstable-wgpu-27"] }
+    //! slint = { version = "~1.16", features = ["unstable-wgpu-27"] }
     //! ```
     //!
     //! `main.rs`:
@@ -575,7 +577,7 @@ pub mod wgpu_28 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.15", features = ["unstable-wgpu-28"] }
+    //! slint = { version = "~1.16", features = ["unstable-wgpu-28"] }
     //! ```
     //!
     //! `main.rs`:
@@ -662,7 +664,7 @@ pub mod winit_030 {
     //!
     //! `Cargo.toml`:
     //! ```toml
-    //! slint = { version = "~1.15", features = ["unstable-winit-030"] }
+    //! slint = { version = "~1.16", features = ["unstable-winit-030"] }
     //! ```
     //!
     //! `main.rs`:
@@ -743,7 +745,7 @@ pub mod fontique_07 {
     ///
     /// `Cargo.toml`:
     /// ```toml
-    /// slint = { version = "~1.15", features = ["unstable-fontique-07"] }
+    /// slint = { version = "~1.16", features = ["unstable-fontique-07"] }
     /// ```
     ///
     /// `main.rs`:
@@ -766,6 +768,10 @@ pub mod fontique_07 {
     /// }
     /// ```
     pub fn shared_collection() -> fontique::Collection {
-        i_slint_common::sharedfontique::COLLECTION.inner.clone()
+        i_slint_core::with_global_context(
+            || panic!("slint platform not initialized"),
+            |ctx| ctx.font_context().borrow().collection.clone(),
+        )
+        .unwrap()
     }
 }

@@ -16,6 +16,7 @@ use i_slint_core::accessibility::{
 };
 use i_slint_core::api::LogicalPosition;
 use i_slint_core::component_factory::ComponentFactory;
+use i_slint_core::input::KeyboardShortcut;
 use i_slint_core::item_tree::{
     IndexRange, ItemRc, ItemTree, ItemTreeNode, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable,
     ItemTreeWeak, ItemVisitorRefMut, ItemVisitorVTable, ItemWeak, TraversalOrder,
@@ -318,7 +319,7 @@ impl Drop for ErasedItemTreeBox {
                 instance_ref.instance,
                 vtable::VRef::new(self),
                 instance_ref.description.item_array.as_slice(),
-                &window_adapter,
+                window_adapter,
             );
         }
     }
@@ -1032,7 +1033,9 @@ fn generate_rtti() -> HashMap<&'static str, Rc<ItemRTTI>> {
             rtti_for::<BorderRectangle>(),
             rtti_for::<TouchArea>(),
             rtti_for::<FocusScope>(),
+            rtti_for::<Shortcut>(),
             rtti_for::<SwipeGestureHandler>(),
+            rtti_for::<PinchGestureHandler>(),
             rtti_for::<Path>(),
             rtti_for::<Flickable>(),
             rtti_for::<WindowItem>(),
@@ -1298,6 +1301,7 @@ pub(crate) fn generate_item_tree<'id>(
                     i_slint_common::for_each_enums!(match_enum_type)
                 }
             }
+            Type::KeyboardShortcutType => property_info::<KeyboardShortcut>(),
             Type::LayoutCache => property_info::<SharedVector<f32>>(),
             Type::ArrayOfU16 => property_info::<SharedVector<u16>>(),
             Type::Function { .. } | Type::Callback { .. } => return None,
@@ -1443,7 +1447,7 @@ pub fn animation_for_property(
             AnimatedBindingKind::Animation(Box::new({
                 let component_ptr = component.as_ptr();
                 let vtable = NonNull::from(&component.description.ct).cast();
-                let anim_elem = Rc::clone(&anim_elem);
+                let anim_elem = Rc::clone(anim_elem);
                 move || -> PropertyAnimation {
                     generativity::make_guard!(guard);
                     let component = unsafe {
@@ -1565,11 +1569,10 @@ pub fn instantiate(
     instance_ref.self_weak().set(self_weak.clone()).ok();
     let description = comp.description();
 
-    if let Some(WindowOptions::UseExistingWindow(existing_adapter)) = &window_options {
-        if let Err((a, b)) = globals.window_adapter().unwrap().try_insert(existing_adapter.clone())
-        {
-            assert!(Rc::ptr_eq(a, &b), "window not the same as parent window");
-        }
+    if let Some(WindowOptions::UseExistingWindow(existing_adapter)) = &window_options
+        && let Err((a, b)) = globals.window_adapter().unwrap().try_insert(existing_adapter.clone())
+    {
+        assert!(Rc::ptr_eq(a, &b), "window not the same as parent window");
     }
 
     if let Some(parent) = parent_ctx {
@@ -1580,11 +1583,9 @@ pub fn instantiate(
             .set(parent)
             .ok()
             .unwrap();
-    } else {
-        if let Some(g) = description.compiled_globals.as_ref() {
-            for g in g.compiled_globals.iter() {
-                crate::global_component::instantiate(g, &globals, self_weak.clone());
-            }
+    } else if let Some(g) = description.compiled_globals.as_ref() {
+        for g in g.compiled_globals.iter() {
+            crate::global_component::instantiate(g, &globals, self_weak.clone());
         }
     }
     let extra_data = description.extra_data_offset.apply(instance_ref.as_ref());
@@ -1852,7 +1853,8 @@ fn prepare_for_two_way_binding(
             if element.id == element.enclosing_component.upgrade().unwrap().root_element.borrow().id
                 && let Some(x) = enclosing_component.description.custom_properties.get(name)
             {
-                let item = unsafe { Pin::new_unchecked(&*instance_ref.as_ptr().add(x.offset)) };
+                let item =
+                    unsafe { Pin::new_unchecked(&*enclosing_component.as_ptr().add(x.offset)) };
                 let common = x.prop.prepare_for_two_way_binding(item);
                 return (common, map);
             }

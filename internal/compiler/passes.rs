@@ -51,6 +51,7 @@ mod remove_unused_properties;
 mod repeater_component;
 pub mod resolve_native_classes;
 pub mod resolving;
+mod shortcuts;
 mod unique_id;
 mod visible;
 mod windows;
@@ -202,6 +203,7 @@ pub async fn run_passes(
     unique_id::assign_unique_id(doc);
 
     doc.visit_all_used_components(|component| {
+        shortcuts::warn_duplicates(component, diag);
         lower_platform::lower_platform(component, type_loader);
 
         // Don't perform the empty rectangle removal when debug info is requested, because the resulting
@@ -223,7 +225,7 @@ pub async fn run_passes(
             const_propagation::const_propagation(component, &global_analysis);
         }
         deduplicate_property_read::deduplicate_property_read(component);
-        if !component.is_global() {
+        if !component.is_global() && !component.is_interface() {
             resolve_native_classes::resolve_native_classes(component);
         }
     });

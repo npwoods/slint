@@ -22,6 +22,8 @@ use i_slint_compiler::langtype::Type;
 use i_slint_compiler::namedreference::NamedReference;
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_core as corelib;
+use i_slint_core::api::ToSharedString;
+use i_slint_core::items::KeyEvent;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -228,6 +230,9 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                 (Value::Number(n), Type::Color) => Color::from_argb_encoded(n as u32).into(),
                 (Value::Brush(brush), Type::Color) => brush.color().into(),
                 (Value::EnumerationValue(_, val), Type::String) => Value::String(val.into()),
+                (Value::KeyboardShortcut(shortcut), Type::String) => {
+                    Value::String(shortcut.to_shared_string())
+                }
                 (v, _) => v,
             }
         }
@@ -443,6 +448,19 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
         Expression::EnumerationValue(value) => {
             Value::EnumerationValue(value.enumeration.name.to_string(), value.to_string())
         }
+        Expression::KeyboardShortcut(ks) => {
+            Value::KeyboardShortcut(i_slint_core::input::make_keyboard_shortcut(
+                SharedString::from(&*ks.key),
+                i_slint_core::input::KeyboardModifiers {
+                    alt: ks.modifiers.alt,
+                    control: ks.modifiers.control,
+                    shift: ks.modifiers.shift,
+                    meta: ks.modifiers.meta,
+                },
+                ks.ignore_shift,
+                ks.ignore_alt,
+            ))
+        }
         Expression::ReturnStatement(x) => {
             let val = x.as_ref().map_or(Value::Void, |x| eval_expression(x, local_context));
             if local_context.return_value.is_none() {
@@ -463,6 +481,7 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             )
             .unwrap();
             if let Value::LayoutCache(cache) = cache {
+                // Coordinate cache
                 if let Some(ri) = repeater_index {
                     let offset: usize = eval_expression(ri, local_context).try_into().unwrap();
                     Value::Number(
@@ -476,6 +495,7 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                     Value::Number(cache[*index].into())
                 }
             } else if let Value::ArrayOfU16(cache) = cache {
+                // Organized Data cache
                 if let Some(ri) = repeater_index {
                     let offset: usize = eval_expression(ri, local_context).try_into().unwrap();
                     Value::Number(
@@ -487,6 +507,63 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
                     )
                 } else {
                     Value::Number(cache[*index].into())
+                }
+            } else {
+                panic!("invalid layout cache")
+            }
+        }
+        Expression::GridRepeaterCacheAccess {
+            layout_cache_prop,
+            index,
+            repeater_index,
+            stride,
+            child_offset,
+            inner_repeater_index,
+            entries_per_item,
+        } => {
+            let cache = load_property_helper(
+                &ComponentInstance::InstanceRef(local_context.component_instance),
+                &layout_cache_prop.element(),
+                layout_cache_prop.name(),
+            )
+            .unwrap();
+            if let Value::LayoutCache(cache) = cache {
+                // Coordinate cache
+                let row_idx: usize =
+                    eval_expression(repeater_index, local_context).try_into().unwrap();
+                let stride_val: usize = eval_expression(stride, local_context).try_into().unwrap();
+                if let Some(inner_ri) = inner_repeater_index {
+                    let inner_offset: usize =
+                        eval_expression(inner_ri, local_context).try_into().unwrap();
+                    let base = cache[*index] as usize;
+                    let data_idx = base
+                        + row_idx * stride_val
+                        + *child_offset
+                        + inner_offset * *entries_per_item;
+                    Value::Number(cache.get(data_idx).copied().unwrap_or(0.).into())
+                } else {
+                    let base = cache[*index] as usize;
+                    let data_idx = base + row_idx * stride_val + *child_offset;
+                    Value::Number(cache.get(data_idx).copied().unwrap_or(0.).into())
+                }
+            } else if let Value::ArrayOfU16(cache) = cache {
+                // Organized Data cache
+                let row_idx: usize =
+                    eval_expression(repeater_index, local_context).try_into().unwrap();
+                let stride_val: usize = eval_expression(stride, local_context).try_into().unwrap();
+                if let Some(inner_ri) = inner_repeater_index {
+                    let inner_offset: usize =
+                        eval_expression(inner_ri, local_context).try_into().unwrap();
+                    let base = cache[*index] as usize;
+                    let data_idx = base
+                        + row_idx * stride_val
+                        + *child_offset
+                        + inner_offset * *entries_per_item;
+                    Value::Number(cache.get(data_idx).copied().unwrap_or(0).into())
+                } else {
+                    let base = cache[*index] as usize;
+                    let data_idx = base + row_idx * stride_val + *child_offset;
+                    Value::Number(cache.get(data_idx).copied().unwrap_or(0).into())
                 }
             } else {
                 panic!("invalid layout cache")
@@ -536,6 +613,12 @@ pub fn eval_expression(expression: &Expression, local_context: &mut EvalLocalCon
             } else {
                 panic!("invalid layout organized data cache")
             }
+        }
+        Expression::SolveFlexBoxLayout(layout) => {
+            crate::eval_layout::solve_flexbox_layout(layout, local_context)
+        }
+        Expression::ComputeFlexBoxLayoutInfo(layout, orientation) => {
+            crate::eval_layout::compute_flexbox_layout_info(layout, *orientation, local_context)
         }
         Expression::MinMax { ty: _, op, lhs, rhs } => {
             let Value::Number(lhs) = eval_expression(lhs, local_context) else {
@@ -735,6 +818,25 @@ fn call_builtin_function(
             } else {
                 panic!("internal error: argument to ClearFocusItem must be an element")
             }
+        }
+        BuiltinFunction::KeyboardShortcutMatches => {
+            let [shortcut, event] = arguments else {
+                panic!(
+                    "internal error: Incorrect number of arguments to KeyboardShortcut::matches"
+                );
+            };
+            let Value::KeyboardShortcut(shortcut) = eval_expression(shortcut, local_context) else {
+                panic!(
+                    "internal error: first argument to KeyboardShortcut::matches is not a keyboard shortcut"
+                );
+            };
+            let Ok(key_event) = KeyEvent::try_from(eval_expression(event, local_context)) else {
+                panic!(
+                    "internal error: second argument to KeyboardShortcut::matches is not a KeyEvent"
+                );
+            };
+
+            Value::from(shortcut.matches(&key_event))
         }
         BuiltinFunction::ShowPopupWindow => {
             if arguments.len() != 1 {
@@ -1547,15 +1649,20 @@ fn call_builtin_function(
                 panic!("internal error: argument to RestartTimer must be an element")
             }
         }
-        BuiltinFunction::EscapeMarkdown => {
-            let text: SharedString =
-                eval_expression(&arguments[0], local_context).try_into().unwrap();
-            Value::String(corelib::styled_text::escape_markdown(&text).into())
-        }
         BuiltinFunction::ParseMarkdown => {
-            let text: SharedString =
+            let format_string: SharedString =
                 eval_expression(&arguments[0], local_context).try_into().unwrap();
-            Value::StyledText(corelib::styled_text::parse_markdown(&text))
+            let args: ModelRc<corelib::styled_text::StyledText> =
+                eval_expression(&arguments[1], local_context).try_into().unwrap();
+            Value::StyledText(corelib::styled_text::parse_markdown(
+                &format_string,
+                &args.iter().collect::<Vec<_>>(),
+            ))
+        }
+        BuiltinFunction::StringToStyledText => {
+            let string: SharedString =
+                eval_expression(&arguments[0], local_context).try_into().unwrap();
+            Value::StyledText(corelib::styled_text::string_to_styled_text(string.to_string()))
         }
     }
 }
@@ -1892,6 +1999,7 @@ fn check_value_type(value: &mut Value, ty: &Type) -> bool {
         Type::Enumeration(en) => {
             matches!(value, Value::EnumerationValue(name, _) if name == en.name.as_str())
         }
+        Type::KeyboardShortcutType => matches!(value, Value::KeyboardShortcut(_)),
         Type::LayoutCache => matches!(value, Value::LayoutCache(_)),
         Type::ArrayOfU16 => matches!(value, Value::ArrayOfU16(_)),
         Type::ComponentFactory => matches!(value, Value::ComponentFactory(_)),
@@ -2186,6 +2294,7 @@ pub fn default_value_for_type(ty: &Type) -> Value {
             e.name.to_string(),
             e.values.get(e.default_value).unwrap().to_string(),
         ),
+        Type::KeyboardShortcutType => Value::KeyboardShortcut(Default::default()),
         Type::Easing => Value::EasingCurve(Default::default()),
         Type::Void | Type::Invalid => Value::Void,
         Type::UnitProduct(_) => Value::Number(0.),

@@ -16,6 +16,10 @@ use crate::langtype::{
 use crate::langtype::{ElementType, PropertyLookupResult};
 use crate::layout::{LayoutConstraints, Orientation};
 use crate::namedreference::NamedReference;
+use crate::object_tree::interfaces::{
+    apply_implements_specifier, apply_interface_default_property_values, apply_uses_statement,
+    get_implemented_interface, validate_function_implementations_for_interface,
+};
 use crate::parser;
 use crate::parser::{SyntaxKind, SyntaxNode, syntax_nodes};
 use crate::typeloader::{ImportKind, ImportedTypes, LibraryInfo};
@@ -28,6 +32,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+
+mod interfaces;
 
 macro_rules! unwrap_or_continue {
     ($e:expr ; $diag:expr) => {
@@ -345,74 +351,6 @@ pub struct UsedSubTypes {
     /// All global components that originates from an
     /// external library
     pub library_global_imports: Vec<(SmolStr, LibraryInfo)>,
-}
-
-/// A parsed [syntax_nodes::UsesIdentifier].
-#[derive(Clone, Debug)]
-struct UsesStatement {
-    interface_name: QualifiedTypeName,
-    child_id: SmolStr,
-    node: syntax_nodes::UsesIdentifier,
-}
-
-impl UsesStatement {
-    /// Get the node representing the interface name.
-    fn interface_name_node(&self) -> syntax_nodes::QualifiedName {
-        self.node.QualifiedName()
-    }
-
-    /// Get the node representing the child identifier.
-    fn child_id_node(&self) -> syntax_nodes::DeclaredIdentifier {
-        self.node.DeclaredIdentifier()
-    }
-
-    /// Lookup the interface component for this uses statement. Emits an error if the iterface could not be found, or
-    /// was not actually an interface.
-    fn lookup_interface(
-        &self,
-        tr: &TypeRegister,
-        diag: &mut BuildDiagnostics,
-    ) -> Result<Rc<Component>, ()> {
-        let interface_name = self.interface_name.to_smolstr();
-        match tr.lookup_element(&interface_name) {
-            Ok(element_type) => match element_type {
-                ElementType::Component(component) => {
-                    if !component.is_interface() {
-                        diag.push_error(
-                            format!("'{}' is not an interface", self.interface_name),
-                            &self.interface_name_node(),
-                        );
-                        return Err(());
-                    }
-
-                    Ok(component)
-                }
-                _ => {
-                    diag.push_error(
-                        format!("'{}' is not an interface", self.interface_name),
-                        &self.interface_name_node(),
-                    );
-                    Err(())
-                }
-            },
-            Err(error) => {
-                diag.push_error(error, &self.interface_name_node());
-                Err(())
-            }
-        }
-    }
-}
-
-impl From<&syntax_nodes::UsesIdentifier> for UsesStatement {
-    fn from(node: &syntax_nodes::UsesIdentifier) -> UsesStatement {
-        UsesStatement {
-            interface_name: QualifiedTypeName::from_node(
-                node.child_node(SyntaxKind::QualifiedName).unwrap().clone().into(),
-            ),
-            child_id: parser::identifier_text(&node.DeclaredIdentifier()).unwrap_or_default(),
-            node: node.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1168,7 +1106,8 @@ impl Element {
             ..Default::default()
         };
 
-        apply_implements_specifier(&mut r, get_implements_specifier(&node), tr, diag);
+        let implemented_interface = get_implemented_interface(&r, &node, tr, diag);
+        apply_implements_specifier(&mut r, &implemented_interface, diag);
 
         for prop_decl in node.PropertyDeclaration() {
             let prop_type = prop_decl
@@ -1427,12 +1366,6 @@ impl Element {
             let return_type = func
                 .ReturnType()
                 .map_or(Type::Void, |ret_ty| type_from_node(ret_ty.Type(), diag, tr));
-            if r.bindings
-                .insert(name.clone(), BindingExpression::new_uncompiled(func.clone().into()).into())
-                .is_some()
-            {
-                assert!(diag.has_errors());
-            }
 
             let mut visibility = PropertyVisibility::Private;
             let mut pure = None;
@@ -1454,20 +1387,49 @@ impl Element {
                 }
             }
 
-            r.property_declarations.insert(
-                name,
-                PropertyDeclaration {
-                    property_type: Type::Function(Rc::new(Function {
-                        return_type,
-                        args,
-                        arg_names,
-                    })),
-                    node: Some(func.into()),
-                    visibility,
-                    pure,
-                    ..Default::default()
-                },
-            );
+            if base_type == ElementType::Interface && visibility != PropertyVisibility::Public {
+                diag.push_error(
+                    "Function declarations in an interface must be public".into(),
+                    &func,
+                );
+            }
+
+            let declaration = PropertyDeclaration {
+                property_type: Type::Function(Rc::new(Function { return_type, args, arg_names })),
+                node: Some(func.clone().into()),
+                visibility,
+                pure,
+                ..Default::default()
+            };
+
+            match (base_type.clone(), func.CodeBlock()) {
+                (ElementType::Interface, Some(code_block)) => {
+                    diag.push_error(
+                        "Function declarations in interfaces must not have a body".into(),
+                        &code_block,
+                    );
+                    continue;
+                }
+                (ElementType::Interface, None) => {
+                    // Do not create a binding for this function, as it is just a declaration without body. It will be
+                    // implemented by the component that implements the interface.
+                    r.property_declarations.insert(name, declaration);
+                    continue;
+                }
+                (_, None) => {
+                    diag.push_error("Functions must have a code block".into(), &func);
+                }
+                (_, Some(_)) => {}
+            }
+
+            if r.bindings
+                .insert(name.clone(), BindingExpression::new_uncompiled(func.clone().into()).into())
+                .is_some()
+            {
+                assert!(diag.has_errors());
+            }
+
+            r.property_declarations.insert(name, declaration);
         }
 
         for con_node in node.CallbackConnection() {
@@ -1751,6 +1713,9 @@ impl Element {
             }
         }
 
+        apply_interface_default_property_values(&mut r.borrow_mut(), &implemented_interface);
+        validate_function_implementations_for_interface(&r.borrow(), &implemented_interface, diag);
+
         r
     }
 
@@ -1891,12 +1856,14 @@ impl Element {
                 match lookup_result.property_type {
                         Type::Invalid => {
                             if self.base_type != ElementType::Error {
-                                diag.push_error(if self.base_type.to_smolstr() == "Empty" {
+                                let msg = if let Some(suggestion) = css_property_suggestion(&unresolved_name, &self.base_type) {
+                                    suggestion
+                                } else if self.base_type.to_smolstr() == "Empty" {
                                     format!( "Unknown property {unresolved_name}")
                                 } else {
                                     format!( "Unknown property {unresolved_name} in {}", self.base_type)
-                                },
-                                &name_token);
+                                };
+                                diag.push_error(msg, &name_token);
                             }
                         }
                         Type::Callback { .. } => {
@@ -2073,6 +2040,21 @@ impl Element {
     }
 }
 
+/// For FlexBoxLayout, suggest Slint property names for CSS properties.
+fn css_property_suggestion(property_name: &str, base_type: &ElementType) -> Option<String> {
+    let base_name = base_type.to_smolstr();
+    if base_name != "FlexBoxLayout" {
+        return None;
+    }
+    match property_name {
+        "gap" => Some("Use spacing instead of gap".into()),
+        "row-gap" => Some("Use spacing-vertical instead of row-gap".into()),
+        "column-gap" => Some("Use spacing-horizontal instead of column-gap".into()),
+        "justify-content" => Some("Use alignment instead of justify-content".into()),
+        _ => None,
+    }
+}
+
 /// Apply default property values defined in `builtins.slint` to the element.
 fn apply_default_type_properties(element: &mut Element) {
     // Apply default property values on top:
@@ -2087,190 +2069,6 @@ fn apply_default_type_properties(element: &mut Element) {
             }
         }
     }
-}
-
-fn get_implements_specifier(
-    node: &syntax_nodes::Element,
-) -> Option<syntax_nodes::ImplementsSpecifier> {
-    let parent: syntax_nodes::Component =
-        node.parent().filter(|p| p.kind() == SyntaxKind::Component)?.into();
-    parent.ImplementsSpecifier()
-}
-
-fn apply_implements_specifier(
-    e: &mut Element,
-    implements_specifier: Option<syntax_nodes::ImplementsSpecifier>,
-    tr: &TypeRegister,
-    diag: &mut BuildDiagnostics,
-) {
-    let Some(implements_specifier) = implements_specifier else {
-        return;
-    };
-
-    if !diag.enable_experimental && !tr.expose_internal_types {
-        diag.push_error("'implements' is an experimental feature".into(), &implements_specifier);
-        return;
-    }
-
-    let interface_name =
-        QualifiedTypeName::from_node(implements_specifier.QualifiedName().clone().into())
-            .to_smolstr();
-
-    let mut interfaces: Vec<Rc<Component>> = Vec::new();
-    match e.base_type.lookup_type_for_child_element(&interface_name, tr) {
-        Ok(ElementType::Component(c)) => {
-            if !c.is_interface() {
-                diag.push_error(
-                    format!("Cannot implement {}. It is not an interface", interface_name),
-                    &implements_specifier.QualifiedName(),
-                );
-                return;
-            }
-
-            c.used.set(true);
-            interfaces.push(c);
-        }
-        Ok(_) => {
-            diag.push_error(
-                format!("Cannot implement {}. It is not an interface", interface_name),
-                &implements_specifier.QualifiedName(),
-            );
-            return;
-        }
-        Err(err) => {
-            diag.push_error(err, &implements_specifier.QualifiedName());
-            return;
-        }
-    }
-
-    for interface in interfaces.iter() {
-        for (prop_name, prop_decl) in interface.root_element.borrow().property_declarations.iter() {
-            e.property_declarations.insert(prop_name.clone(), prop_decl.clone());
-        }
-    }
-}
-
-fn apply_uses_statement(
-    e: &ElementRc,
-    uses_specifier: Option<syntax_nodes::UsesSpecifier>,
-    tr: &TypeRegister,
-    diag: &mut BuildDiagnostics,
-) {
-    let Some(uses_specifier) = uses_specifier else {
-        return;
-    };
-
-    if !diag.enable_experimental && !tr.expose_internal_types {
-        diag.push_error("'uses' is an experimental feature".into(), &uses_specifier);
-        return;
-    }
-
-    for uses_identifier_node in uses_specifier.UsesIdentifier() {
-        let uses_statement: UsesStatement = (&uses_identifier_node).into();
-        let Ok(interface) = uses_statement.lookup_interface(tr, diag) else {
-            continue;
-        };
-
-        let Some(child) = find_element_by_id(e, &uses_statement.child_id) else {
-            diag.push_error(
-                format!("'{}' does not exist", uses_statement.child_id),
-                &uses_statement.child_id_node(),
-            );
-            continue;
-        };
-
-        if !element_implements_interface(&child, &interface, &uses_statement, diag) {
-            continue;
-        }
-
-        for (prop_name, prop_decl) in &interface.root_element.borrow().property_declarations {
-            let lookup_result = e.borrow().base_type.lookup_property(prop_name);
-            if lookup_result.is_valid() {
-                diag.push_error(
-                    format!(
-                        "Cannot use interface '{}' because property '{}' conflicts with existing property in '{}'",
-                        uses_statement.interface_name, prop_name, e.borrow().base_type
-                    ),
-                    &uses_statement.interface_name_node(),
-                );
-                continue;
-            }
-
-            if let Some(existing_property) =
-                e.borrow_mut().property_declarations.insert(prop_name.clone(), prop_decl.clone())
-            {
-                let source = existing_property
-                    .node
-                    .as_ref()
-                    .and_then(|node| node.child_node(SyntaxKind::DeclaredIdentifier))
-                    .and_then(|node| node.child_token(SyntaxKind::Identifier))
-                    .map_or_else(
-                        || parser::NodeOrToken::Node(uses_statement.child_id_node().into()),
-                        parser::NodeOrToken::Token,
-                    );
-
-                diag.push_error(
-                    format!(
-                        "Cannot override property '{}' from '{}'",
-                        prop_name, uses_statement.interface_name
-                    ),
-                    &source,
-                );
-                continue;
-            }
-
-            if let Some(existing_binding) = e.borrow_mut().bindings.insert(
-                prop_name.clone(),
-                BindingExpression::new_two_way(
-                    NamedReference::new(&child, prop_name.clone()).into(),
-                )
-                .into(),
-            ) {
-                let message = format!(
-                    "Cannot override binding for property '{}' from interface '{}'",
-                    prop_name, uses_statement.interface_name
-                );
-                if let Some(location) = &existing_binding.borrow().span {
-                    diag.push_error(message, location);
-                } else {
-                    diag.push_error(message, &uses_statement.interface_name_node());
-                }
-
-                continue;
-            }
-        }
-    }
-}
-
-/// Check that the given element implements the given interface. Emits a diagnostic if the interface is not implemented.
-fn element_implements_interface(
-    element: &ElementRc,
-    interface: &Rc<Component>,
-    uses_statement: &UsesStatement,
-    diag: &mut BuildDiagnostics,
-) -> bool {
-    let property_matches_interface =
-        |property: &PropertyLookupResult, interface_declaration: &PropertyDeclaration| -> bool {
-            property.property_type == interface_declaration.property_type
-                && property.property_visibility == interface_declaration.visibility
-        };
-
-    for (property_name, property_declaration) in
-        interface.root_element.borrow().property_declarations.iter()
-    {
-        let lookup_result = element.borrow().lookup_property(property_name);
-        if !property_matches_interface(&lookup_result, property_declaration) {
-            diag.push_error(
-                format!(
-                    "{} does not implement {}",
-                    uses_statement.child_id, uses_statement.interface_name
-                ),
-                &uses_statement.child_id_node(),
-            );
-            return false;
-        }
-    }
-    true
 }
 
 /// Create a Type for this node
@@ -2666,13 +2464,16 @@ pub fn visit_named_references_in_expression(
             ..
         } => vis(r),
         Expression::LayoutCacheAccess { layout_cache_prop, .. } => vis(layout_cache_prop),
+        Expression::GridRepeaterCacheAccess { layout_cache_prop, .. } => vis(layout_cache_prop),
         Expression::OrganizeGridLayout(l) => l.visit_named_references(vis),
         Expression::ComputeBoxLayoutInfo(l, _) => l.visit_named_references(vis),
+        Expression::ComputeFlexBoxLayoutInfo(l, _) => l.visit_named_references(vis),
         Expression::ComputeGridLayoutInfo { layout_organized_data_prop, layout, .. } => {
             vis(layout_organized_data_prop);
             layout.visit_named_references(vis);
         }
         Expression::SolveBoxLayout(l, _) => l.visit_named_references(vis),
+        Expression::SolveFlexBoxLayout(l) => l.visit_named_references(vis),
         Expression::SolveGridLayout { layout_organized_data_prop, layout, .. } => {
             vis(layout_organized_data_prop);
             layout.visit_named_references(vis);

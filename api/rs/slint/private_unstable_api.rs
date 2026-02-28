@@ -163,7 +163,7 @@ pub mod re_exports {
     pub use core::iter::FromIterator;
     pub use core::option::{Option, Option::*};
     pub use core::result::{Result, Result::*};
-    pub use i_slint_core::styled_text::{StyledText, escape_markdown, parse_markdown};
+    pub use i_slint_core::styled_text::{StyledText, parse_markdown, string_to_styled_text};
     // This one is empty when Qt is not available, which triggers a warning
     pub use euclid::approxeq::ApproxEq;
     #[allow(unused_imports)]
@@ -174,12 +174,13 @@ pub mod re_exports {
     pub use i_slint_core::animations::{EasingCurve, animation_tick, current_tick};
     pub use i_slint_core::api::LogicalPosition;
     pub use i_slint_core::callbacks::Callback;
+    pub use i_slint_core::context::SlintContext;
     pub use i_slint_core::date_time::*;
     pub use i_slint_core::detect_operating_system;
     pub use i_slint_core::graphics::*;
     pub use i_slint_core::input::{
         FocusEvent, FocusReason, InputEventResult, KeyEvent, KeyEventResult, KeyboardModifiers,
-        MouseEvent, key_codes::Key,
+        KeyboardShortcut, MouseEvent, key_codes::Key, make_keyboard_shortcut,
     };
     pub use i_slint_core::item_tree::{
         IndexRange, ItemTree, ItemTreeRefPin, ItemTreeVTable, ItemTreeWeak, register_item_tree,
@@ -210,7 +211,9 @@ pub mod re_exports {
     pub use i_slint_core::window::{
         InputMethodRequest, WindowAdapter, WindowAdapterRc, WindowInner,
     };
-    pub use i_slint_core::{Color, Coord, SharedString, SharedVector, format};
+    pub use i_slint_core::{
+        Color, Coord, SharedString, SharedVector, format, string::ToSharedString,
+    };
     pub use i_slint_core::{ItemTreeVTable_static, MenuVTable_static};
     pub use num_traits::float::Float;
     pub use num_traits::ops::euclid::Euclid;

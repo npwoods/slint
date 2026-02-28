@@ -56,6 +56,10 @@ serde = ["i-slint-core/serde"]
 # Deprecated feature, this is now automatically enabled when the `renderer-software` and `std` features are enabled
 software-renderer-systemfonts = ["renderer-software"]
 
+# Enable support for Path element rendering with the software renderer. This is implicitly enabled by the
+# `std` feature, but can be enabled without `std` if you want to use the software renderer in a `#![no_std]` environment and need support for Path elements.
+software-renderer-path = ["i-slint-renderer-software/path"]
+
 ## Slint uses internally some `thread_local` state.
 ##
 ## When the `std` feature is enabled, Slint can use [`std::thread_local!`], but when in a `#![no_std]`
@@ -168,7 +172,7 @@ renderer-skia-opengl = ["i-slint-backend-selector/renderer-skia-opengl", "std"]
 renderer-skia-vulkan = ["i-slint-backend-selector/renderer-skia-vulkan", "std"]
 
 ## Render using the software renderer.
-renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software", "dep:fontique"]
+renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software"]
 
 ## KMS with Vulkan or EGL and libinput on Linux are used to render the application in full screen mode, without any
 ## windowing system. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead.
@@ -201,7 +205,7 @@ backend-android-activity-05 = [
 ## in your `Cargo.toml` when enabling this feature:
 ##
 ## ```toml
-## slint = { version = "~1.15", features = ["unstable-wgpu-27"] }
+## slint = { version = "~1.16", features = ["unstable-wgpu-27"] }
 ## ```
 unstable-wgpu-27 = [
   "i-slint-core/unstable-wgpu-27",
@@ -220,7 +224,7 @@ unstable-wgpu-27 = [
 ## in your `Cargo.toml` when enabling this feature:
 ##
 ## ```toml
-## slint = { version = "~1.15", features = ["unstable-wgpu-28"] }
+## slint = { version = "~1.16", features = ["unstable-wgpu-28"] }
 ## ```
 unstable-wgpu-28 = [
   "i-slint-core/unstable-wgpu-28",
@@ -237,7 +241,7 @@ unstable-wgpu-28 = [
 ## in your `Cargo.toml` when enabling this feature:
 ##
 ## ```toml
-## slint = { version = "~1.15", features = ["unstable-winit-030"] }
+## slint = { version = "~1.16", features = ["unstable-winit-030"] }
 ## ```
 unstable-winit-030 = ["backend-winit", "dep:i-slint-backend-winit", "i-slint-backend-selector/unstable-winit-030"]
 
@@ -251,7 +255,7 @@ unstable-winit-030 = ["backend-winit", "dep:i-slint-backend-winit", "i-slint-bac
 ## in your `Cargo.toml` when enabling this feature:
 ##
 ## ```toml
-## slint = { version = "~1.15", features = ["unstable-libinput-09"] }
+## slint = { version = "~1.16", features = ["unstable-libinput-09"] }
 ## ```
 unstable-libinput-09 = ["i-slint-backend-selector/unstable-libinput-09"]
 
@@ -264,7 +268,7 @@ unstable-libinput-09 = ["i-slint-backend-selector/unstable-libinput-09"]
 ## in your `Cargo.toml` when enabling this feature:
 ##
 ## ```toml
-## slint = { version = "~1.15", features = ["unstable-fontique-07"] }
+## slint = { version = "~1.16", features = ["unstable-fontique-07"] }
 ## ```
 unstable-fontique-07 = ["i-slint-common/shared-fontique"]
 
@@ -304,11 +308,6 @@ i-slint-renderer-femtovg = { workspace = true, optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 i-slint-backend-android-activity = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "linux")'.build-dependencies]
-# Workaround cross compiling on linux where the build dependencies depends on fontique through slint-build
-# but fontconfig build script find the target library via pkg-config and causes link errors
-fontique = { workspace = true, optional = true, features = ["fontconfig-dlopen"] }
-
 [dev-dependencies]
 slint-build = { path = "../build" }
 # The next can not be a workspace dependency because it may not have a version
@@ -319,6 +318,7 @@ serde = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
 async-compat = { version = "0.2.4" }
 bytemuck = { workspace = true }
+i-slint-renderer-software = { path = "../../../internal/renderers/software", features = ["testing"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # this line is there to add the "enable" feature by default, but only on linux

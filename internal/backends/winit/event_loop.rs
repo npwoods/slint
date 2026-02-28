@@ -24,6 +24,15 @@ use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+
+fn winit_touch_phase(phase: winit::event::TouchPhase) -> corelib::input::TouchPhase {
+    match phase {
+        winit::event::TouchPhase::Started => corelib::input::TouchPhase::Started,
+        winit::event::TouchPhase::Moved => corelib::input::TouchPhase::Moved,
+        winit::event::TouchPhase::Ended => corelib::input::TouchPhase::Ended,
+        winit::event::TouchPhase::Cancelled => corelib::input::TouchPhase::Cancelled,
+    }
+}
 use winit::event_loop::ControlFlow;
 use winit::window::ResizeDirection;
 
@@ -62,8 +71,9 @@ pub struct EventLoopState {
     shared_backend_data: Rc<SharedBackendData>,
     // last seen cursor position
     cursor_pos: LogicalPoint,
+    /// Whether a *mouse* button is currently pressed. Touch input is handled
+    /// separately via `process_touch_input` and does not affect this flag.
     pressed: bool,
-    current_touch_id: Option<u64>,
 
     loop_error: Option<PlatformError>,
     current_resize_direction: Option<ResizeDirection>,
@@ -83,7 +93,6 @@ impl EventLoopState {
             shared_backend_data,
             cursor_pos: Default::default(),
             pressed: Default::default(),
-            current_touch_id: Default::default(),
             loop_error: Default::default(),
             current_resize_direction: Default::default(),
             pumping_events_instantly: Default::default(),
@@ -235,9 +244,13 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 };
 
                 macro_rules! winit_key_to_char {
-                ($($char:literal # $name:ident # $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|*;)*) => {
+                ($($char:literal # $name:ident # $($shifted:expr)? $(=> $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
                     match &key_code {
-                        $($(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$winit) $(if event.location == winit::keyboard::KeyLocation::$pos)? => $char.into(),)*)*
+                        $( $( $(
+                                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::$winit)
+                                    $(if event.location == winit::keyboard::KeyLocation::$pos)?
+                                        => $char.into(),
+                        )* )? )*
                         winit::keyboard::Key::Character(str) => str.as_str().into(),
                         _ => {
                             if let Some(text) = &event.text {
@@ -250,7 +263,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 }
             }
                 #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
-                let text = i_slint_common::for_each_special_keys!(winit_key_to_char);
+                let text = i_slint_common::for_each_keys!(winit_key_to_char);
 
                 self.loop_error = window
                     .window()
@@ -374,38 +387,13 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 runtime_window.process_mouse_input(ev);
             }
             WindowEvent::Touch(touch) => {
-                if Some(touch.id) == self.current_touch_id || self.current_touch_id.is_none() {
-                    let location = touch.location.to_logical(runtime_window.scale_factor() as f64);
-                    let position = euclid::point2(location.x, location.y);
-                    let ev = match touch.phase {
-                        winit::event::TouchPhase::Started => {
-                            self.pressed = true;
-                            if self.current_touch_id.is_none() {
-                                self.current_touch_id = Some(touch.id);
-                            }
-                            MouseEvent::Pressed {
-                                position,
-                                button: PointerEventButton::Left,
-                                click_count: 0,
-                                is_touch: true,
-                            }
-                        }
-                        winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => {
-                            self.pressed = false;
-                            self.current_touch_id = None;
-                            MouseEvent::Released {
-                                position,
-                                button: PointerEventButton::Left,
-                                click_count: 0,
-                                is_touch: true,
-                            }
-                        }
-                        winit::event::TouchPhase::Moved => {
-                            MouseEvent::Moved { position, is_touch: true }
-                        }
-                    };
-                    runtime_window.process_mouse_input(ev);
-                }
+                let location = touch.location.to_logical(runtime_window.scale_factor() as f64);
+                let position = euclid::point2(location.x, location.y);
+                runtime_window.process_touch_input(
+                    touch.id,
+                    position,
+                    winit_touch_phase(touch.phase),
+                );
             }
             WindowEvent::ScaleFactorChanged { scale_factor, inner_size_writer: _ } => {
                 if std::env::var("SLINT_SCALE_FACTOR").is_err() {
@@ -428,6 +416,30 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
 
                 // In addition to the hack done for WindowEvent::Resize, also do it for Occluded so we handle Minimized change
                 window.window_state_event();
+            }
+            // Note: winit's PinchGesture does not carry a position; we use the last
+            // known cursor position as the best available approximation. On macOS
+            // trackpads, CursorMoved events typically precede gesture events.
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                runtime_window.process_mouse_input(corelib::input::MouseEvent::PinchGesture {
+                    position: self.cursor_pos,
+                    delta: delta as f32,
+                    phase: winit_touch_phase(phase),
+                });
+            }
+            WindowEvent::RotationGesture { delta, phase, .. } => {
+                // macOS/winit: positive = counterclockwise. Negate to match
+                // Slint convention (positive = clockwise).
+                runtime_window.process_mouse_input(corelib::input::MouseEvent::RotationGesture {
+                    position: self.cursor_pos,
+                    delta: -delta,
+                    phase: winit_touch_phase(phase),
+                });
+            }
+            WindowEvent::DoubleTapGesture { .. } => {
+                runtime_window.process_mouse_input(corelib::input::MouseEvent::DoubleTapGesture {
+                    position: self.cursor_pos,
+                });
             }
             _ => {}
         }
@@ -525,10 +537,10 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
             }
         }
 
-        if event_loop.control_flow() == ControlFlow::Wait {
-            if let Some(next_timer) = corelib::platform::duration_until_next_timer_update() {
-                event_loop.set_control_flow(ControlFlow::wait_duration(next_timer));
-            }
+        if event_loop.control_flow() == ControlFlow::Wait
+            && let Some(next_timer) = corelib::platform::duration_until_next_timer_update()
+        {
+            event_loop.set_control_flow(ControlFlow::wait_duration(next_timer));
         }
 
         if self.pumping_events_instantly {
