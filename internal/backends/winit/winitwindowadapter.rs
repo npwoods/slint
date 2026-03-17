@@ -119,9 +119,7 @@ fn icon_to_winit(
 ) -> Option<winit::window::Icon> {
     let image_inner: &ImageInner = (&icon).into();
 
-    let Some(pixel_buffer) = image_inner.render_to_buffer(Some(size.cast())) else {
-        return None;
-    };
+    let pixel_buffer = image_inner.render_to_buffer(Some(size.cast()))?;
 
     // This could become a method in SharedPixelBuffer...
     let rgba_pixels: Vec<u8> = match &pixel_buffer {
@@ -162,6 +160,7 @@ fn window_is_resizable(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WinitWindowOrNone {
     HasWindow {
         window: Arc<winit::window::Window>,
@@ -1507,20 +1506,22 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     fn window_handle_06_rc(
         &self,
     ) -> Result<Arc<dyn raw_window_handle::HasWindowHandle>, raw_window_handle::HandleError> {
-        self.winit_window_or_none
+        Ok(self
+            .winit_window_or_none
             .borrow()
             .as_window()
-            .map_or(Err(raw_window_handle::HandleError::Unavailable), |window| Ok(window))
+            .ok_or(raw_window_handle::HandleError::Unavailable)?)
     }
 
     #[cfg(feature = "raw-window-handle-06")]
     fn display_handle_06_rc(
         &self,
     ) -> Result<Arc<dyn raw_window_handle::HasDisplayHandle>, raw_window_handle::HandleError> {
-        self.winit_window_or_none
+        Ok(self
+            .winit_window_or_none
             .borrow()
             .as_window()
-            .map_or(Err(raw_window_handle::HandleError::Unavailable), |window| Ok(window))
+            .ok_or(raw_window_handle::HandleError::Unavailable)?)
     }
 
     fn bring_to_front(&self) -> Result<(), PlatformError> {

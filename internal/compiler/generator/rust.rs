@@ -544,7 +544,7 @@ fn generate_shared_globals(
 }
 
 fn generate_struct(name: &StructName, fields: &BTreeMap<SmolStr, Type>) -> TokenStream {
-    let component_id = struct_name_to_tokens(&name).unwrap();
+    let component_id = struct_name_to_tokens(name).unwrap();
     let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) =
         fields.iter().map(|(name, ty)| (ident(name), rust_primitive_type(ty).unwrap())).unzip();
 
@@ -1194,7 +1194,7 @@ fn generate_sub_component(
 
     user_init_code.extend(component.change_callbacks.iter().enumerate().map(|(idx, (p, e))| {
         let code = compile_expression(&e.borrow(), &ctx);
-        let prop = compile_expression(&Expression::PropertyReference(p.clone().into()), &ctx);
+        let prop = compile_expression(&Expression::PropertyReference(p.clone()), &ctx);
         let change_tracker = format_ident!("change_tracker{idx}");
         quote! {
             let self_weak = sp::VRcMapped::downgrade(&self_rc);
@@ -1687,7 +1687,7 @@ fn generate_item_tree(
             if let Some(parent_rc) = self.parent.clone().upgrade() {
                 let parent_origin = sp::VRcMapped::origin(&parent_rc);
                 // TODO: store popup index in ctx and set it here instead of 0?
-                *_result = sp::ItemRc::new(parent_origin, 0).downgrade();
+                *_result = sp::ItemRc::new_root(parent_origin).downgrade();
             }
         }
     }, |idx| {
@@ -3017,8 +3017,8 @@ fn compile_builtin_function_call(
         }
         BuiltinFunction::KeyboardShortcutMatches => {
             if let [shortcut, event] = arguments {
-                let shortcut = compile_expression(&shortcut, ctx);
-                let event = compile_expression(&event, ctx);
+                let shortcut = compile_expression(shortcut, ctx);
+                let event = compile_expression(event, ctx);
                 quote!(#shortcut.matches(&#event))
             } else {
                 panic!("internal error: invalid args to KeyboardShortcut::matches {arguments:?}")
@@ -3655,7 +3655,16 @@ fn struct_name_to_tokens(name: &StructName) -> Option<proc_macro2::TokenStream> 
         StructName::BuiltinPublic(builtin_public_struct) => {
             let name: &'static str = builtin_public_struct.into();
             let name = format_ident!("{}", name);
-            Some(quote!(slint::#name))
+            if matches!(
+                builtin_public_struct,
+                crate::langtype::BuiltinPublicStruct::Color
+                    | crate::langtype::BuiltinPublicStruct::LogicalPosition
+                    | crate::langtype::BuiltinPublicStruct::LogicalSize
+            ) {
+                Some(quote!(slint::#name))
+            } else {
+                Some(quote!(slint::language::#name))
+            }
         }
     }
 }
