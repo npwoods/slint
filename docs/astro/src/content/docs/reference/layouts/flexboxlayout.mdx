@@ -110,24 +110,57 @@ The primary direction in which items are placed. Set to `row` to place items hor
 It also supports `row-reverse` and `column-reverse` which invert the flow: `row-reverse` places items right-to-left (starting at the right edge), and `column-reverse` places items bottom-to-top (starting at the bottom edge).
 </SlintProperty>
 
+### flex-wrap
+<SlintProperty propName="flex-wrap" typeName="enum" enumName="FlexWrap">
+Controls whether flex items wrap onto multiple lines when they don't fit in the container.
+The default value is `wrap`.
+</SlintProperty>
+
 ### align-content
 <SlintProperty propName="align-content" typeName="enum" enumName="FlexAlignContent">
 Set the distribution of flex lines along the cross axis.
-- `stretch`: Lines are stretched to fill the container along the cross axis (default).
-- `start`: Lines are placed at the start of the cross axis.
-- `end`: Lines are placed at the end of the cross axis.
-- `center`: Lines are centered along the cross axis.
 The default value is `stretch`.
 </SlintProperty>
 
 ### align-items
 <SlintProperty propName="align-items" typeName="enum" enumName="FlexAlignItems">
 Set the alignment of individual items along the cross axis within each flex line.
-- `stretch`: Items are stretched to fill the line along the cross axis (default). Items without an explicit cross-axis size stretch to the line height (row) or line width (column).
-- `start`: Items are placed at the start of the cross axis.
-- `end`: Items are placed at the end of the cross axis.
-- `center`: Items are centered along the cross axis.
 The default value is `stretch`.
+</SlintProperty>
+
+## Per-Item Properties
+
+The following properties can be set on individual children of a `FlexBoxLayout`:
+
+### flex-grow
+<SlintProperty propName="flex-grow" typeName="float">
+Controls how much an item grows relative to other flex items when there is extra space along the main axis.
+A value of `0` (default) means the item does not grow. Items with higher values receive proportionally more extra space.
+</SlintProperty>
+
+### flex-shrink
+<SlintProperty propName="flex-shrink" typeName="float">
+Controls how much an item shrinks relative to other flex items when items overflow the container along the main axis.
+A value of `0` (default) means the item does not shrink. Items with higher values shrink proportionally more.
+</SlintProperty>
+
+### flex-basis
+<SlintProperty propName="flex-basis" typeName="length">
+Sets the initial main size of a flex item before growing or shrinking is applied.
+If not set, the item's `preferred-width` (row) or `preferred-height` (column) is used.
+</SlintProperty>
+
+### flex-align-self
+<SlintProperty propName="flex-align-self" typeName="enum" enumName="FlexAlignSelf">
+Overrides the container's `align-items` for this specific item.
+The default value is `auto`, which inherits the container's `align-items` setting.
+</SlintProperty>
+
+### flex-order
+<SlintProperty propName="flex-order" typeName="int">
+Controls the visual order of flex items. Items with lower values appear first.
+Items with the same order value preserve their declaration order.
+The default value is `0`.
 </SlintProperty>
 
 ## Layout Behavior

@@ -177,12 +177,12 @@ export component FocusScope {
     //-default_size_binding:expands_to_parent_geometry
     //-accepts_focus
 
-    Shortcut { }
+    KeyBinding { }
 }
 
-component Shortcut {
+component KeyBinding {
     in property <bool> enabled: true;
-    in property <keyboard-shortcut> keys;
+    in property <keys> keys;
     callback activated();
     //-is_non_item_type
 }
@@ -229,7 +229,7 @@ export component SwipeGestureHandler {
     //-default_size_binding:expands_to_parent_geometry
 }
 
-export component PinchGestureHandler {
+export component ScaleRotateGestureHandler {
     in property <bool> enabled: true;
 
     out property <bool> active;
@@ -241,7 +241,6 @@ export component PinchGestureHandler {
     callback updated();
     callback ended();
     callback cancelled();
-    callback smart-magnify();
 
     //-default_size_binding:expands_to_parent_geometry
 }
@@ -472,6 +471,7 @@ export component FlexBoxLayout {
     in property <FlexDirection> flex-direction;
     in property <FlexAlignContent> align-content;
     in property <FlexAlignItems> align-items;
+    in property <FlexWrap> flex-wrap;
 }
 
 component MoveTo {
@@ -537,11 +537,13 @@ export component Path {
     in property <length> stroke-width;
     in property <LineCap> stroke-line-cap;
     in property <LineJoin> stroke-line-join;
+    in property <float> stroke-miter-limit: 4; // SVG default is 4
     in property <string> commands;  // 'fake' hardcoded in typeregister.rs
     in property <float> viewbox-x;
     in property <float> viewbox-y;
     in property <float> viewbox-width;
     in property <float> viewbox-height;
+    in property <ImageFit> fit: contain;
     in property <bool> clip;
     in property <bool> anti-alias: true;
 
@@ -624,6 +626,7 @@ export global TextInputInterface {
 export global Platform {
     out property <OperatingSystemType> os;
     out property <string> style-name;
+    function open-url(url: string) {}
 }
 
 export component NativeButton {

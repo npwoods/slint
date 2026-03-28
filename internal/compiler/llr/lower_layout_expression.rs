@@ -338,6 +338,11 @@ pub(super) fn solve_flexbox_layout(
                     .with(|e| Type::Enumeration(e.enums.FlexAlignItems.clone())),
                 fld.align_items,
             ),
+            (
+                "flex_wrap",
+                crate::typeregister::BUILTIN.with(|e| Type::Enumeration(e.enums.FlexWrap.clone())),
+                fld.flex_wrap,
+            ),
             ("cells_h", fld.cells_h.ty(ctx), fld.cells_h),
             ("cells_v", fld.cells_v.ty(ctx), fld.cells_v),
         ],
@@ -496,6 +501,7 @@ fn compute_flexbox_layout_info_for_direction(
             orientation_expr,
             fld.direction,
             constraint_size,
+            fld.flex_wrap,
         ];
 
         match fld.compute_cells {
@@ -533,6 +539,7 @@ fn compute_flexbox_layout_info_for_direction(
             }),
             fld.direction,
             llr_Expression::NumberLiteral(f32::MAX.into()),
+            fld.flex_wrap,
         ];
 
         match fld.compute_cells {
@@ -564,6 +571,7 @@ struct FlexBoxLayoutDataResult {
     direction: llr_Expression,
     align_content: llr_Expression,
     align_items: llr_Expression,
+    flex_wrap: llr_Expression,
     cells_h: llr_Expression,
     cells_v: llr_Expression,
     /// When there are repeaters involved, we need to do a WithFlexBoxLayoutItemInfo with the
@@ -619,10 +627,51 @@ fn flexbox_layout_data(
         })
     };
 
-    let repeater_count =
-        layout.elems.iter().filter(|i| i.element.borrow().repeated.is_some()).count();
+    let flex_wrap = if let Some(expr) = &layout.flex_wrap {
+        llr_Expression::PropertyReference(ctx.map_property_reference(expr))
+    } else {
+        let e = crate::typeregister::BUILTIN.with(|e| e.enums.FlexWrap.clone());
+        llr_Expression::EnumerationValue(EnumerationValue {
+            value: e.default_value,
+            enumeration: e,
+        })
+    };
 
-    let element_ty = crate::typeregister::layout_item_info_type();
+    let repeater_count =
+        layout.elems.iter().filter(|i| i.item.element.borrow().repeated.is_some()).count();
+
+    let element_ty = crate::typeregister::flexbox_layout_item_info_type();
+
+    let flex_prop =
+        |li: &crate::layout::FlexBoxLayoutItem, ctx: &mut ExpressionLoweringCtx| -> FlexItemProps {
+            FlexItemProps {
+                grow: li
+                    .flex_grow
+                    .as_ref()
+                    .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(nr)))
+                    .unwrap_or(llr_Expression::NumberLiteral(0.0)),
+                shrink: li
+                    .flex_shrink
+                    .as_ref()
+                    .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(nr)))
+                    .unwrap_or(llr_Expression::NumberLiteral(0.0)),
+                basis: li
+                    .flex_basis
+                    .as_ref()
+                    .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(nr)))
+                    .unwrap_or(llr_Expression::NumberLiteral(-1.0)),
+                align_self: li
+                    .align_self
+                    .as_ref()
+                    .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(nr)))
+                    .unwrap_or(default_align_self().1),
+                order: li
+                    .order
+                    .as_ref()
+                    .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(nr)))
+                    .unwrap_or(llr_Expression::NumberLiteral(0.0)),
+            }
+        };
 
     if repeater_count == 0 {
         let cells_h = llr_Expression::Array {
@@ -630,9 +679,14 @@ fn flexbox_layout_data(
                 .elems
                 .iter()
                 .map(|li| {
-                    let layout_info_h =
-                        get_layout_info(&li.element, ctx, &li.constraints, Orientation::Horizontal);
-                    make_layout_cell_data_struct(layout_info_h)
+                    let layout_info_h = get_layout_info(
+                        &li.item.element,
+                        ctx,
+                        &li.item.constraints,
+                        Orientation::Horizontal,
+                    );
+                    let flex_props = flex_prop(li, ctx);
+                    make_flexbox_cell_data_struct(layout_info_h, flex_props)
                 })
                 .collect(),
             element_ty: element_ty.clone(),
@@ -643,9 +697,14 @@ fn flexbox_layout_data(
                 .elems
                 .iter()
                 .map(|li| {
-                    let layout_info_v =
-                        get_layout_info(&li.element, ctx, &li.constraints, Orientation::Vertical);
-                    make_layout_cell_data_struct(layout_info_v)
+                    let layout_info_v = get_layout_info(
+                        &li.item.element,
+                        ctx,
+                        &li.item.constraints,
+                        Orientation::Vertical,
+                    );
+                    let flex_props = flex_prop(li, ctx);
+                    make_flexbox_cell_data_struct(layout_info_v, flex_props)
                 })
                 .collect(),
             element_ty,
@@ -656,6 +715,7 @@ fn flexbox_layout_data(
             direction,
             align_content,
             align_items,
+            flex_wrap,
             cells_h,
             cells_v,
             compute_cells: None,
@@ -663,41 +723,55 @@ fn flexbox_layout_data(
     } else {
         let mut elements = Vec::new();
         for item in &layout.elems {
-            if item.element.borrow().repeated.is_some() {
-                let repeater_index =
-                    match ctx.mapping.element_mapping.get(&item.element.clone().into()).unwrap() {
-                        LoweredElement::Repeated { repeated_index } => *repeated_index,
-                        _ => panic!(),
-                    };
+            if item.item.element.borrow().repeated.is_some() {
+                let repeater_index = match ctx
+                    .mapping
+                    .element_mapping
+                    .get(&item.item.element.clone().into())
+                    .unwrap()
+                {
+                    LoweredElement::Repeated { repeated_index } => *repeated_index,
+                    _ => panic!(),
+                };
                 elements.push(Either::Right(LayoutRepeatedElement {
                     repeater_index,
-                    repeated_children_count: None,
+                    row_child_templates: None,
                 }))
             } else {
                 // For static elements, we need both orientations
-                let layout_info_h =
-                    get_layout_info(&item.element, ctx, &item.constraints, Orientation::Horizontal);
-                let layout_info_v =
-                    get_layout_info(&item.element, ctx, &item.constraints, Orientation::Vertical);
+                let layout_info_h = get_layout_info(
+                    &item.item.element,
+                    ctx,
+                    &item.item.constraints,
+                    Orientation::Horizontal,
+                );
+                let layout_info_v = get_layout_info(
+                    &item.item.element,
+                    ctx,
+                    &item.item.constraints,
+                    Orientation::Vertical,
+                );
+                let flex_props = flex_prop(item, ctx);
                 elements.push(Either::Left((
-                    make_layout_cell_data_struct(layout_info_h),
-                    make_layout_cell_data_struct(layout_info_v),
+                    make_flexbox_cell_data_struct(layout_info_h, flex_props.clone()),
+                    make_flexbox_cell_data_struct(layout_info_v, flex_props),
                 )));
             }
         }
         let cells_h = llr_Expression::ReadLocalVariable {
             name: "cells_h".into(),
-            ty: Type::Array(Rc::new(crate::typeregister::layout_info_type().into())),
+            ty: Type::Array(Rc::new(crate::typeregister::flexbox_layout_item_info_type())),
         };
         let cells_v = llr_Expression::ReadLocalVariable {
             name: "cells_v".into(),
-            ty: Type::Array(Rc::new(crate::typeregister::layout_info_type().into())),
+            ty: Type::Array(Rc::new(crate::typeregister::flexbox_layout_item_info_type())),
         };
         FlexBoxLayoutDataResult {
             alignment,
             direction,
             align_content,
             align_items,
+            flex_wrap,
             cells_h,
             cells_v,
             compute_cells: Some(("cells_h".into(), "cells_v".into(), elements)),
@@ -713,10 +787,45 @@ struct BoxLayoutDataResult {
     compute_cells: Option<(String, Vec<Either<llr_Expression, LayoutRepeatedElement>>)>,
 }
 
+fn default_align_self() -> (Type, llr_Expression) {
+    let e = crate::typeregister::BUILTIN.with(|e| e.enums.FlexAlignSelf.clone());
+    (
+        Type::Enumeration(e.clone()),
+        llr_Expression::EnumerationValue(EnumerationValue {
+            value: e.default_value,
+            enumeration: e,
+        }),
+    )
+}
+
 fn make_layout_cell_data_struct(layout_info: llr_Expression) -> llr_Expression {
     make_struct(
         BuiltinPrivateStruct::LayoutItemInfo,
         [("constraint", crate::typeregister::layout_info_type().into(), layout_info)],
+    )
+}
+
+#[derive(Clone)]
+struct FlexItemProps {
+    grow: llr_Expression,
+    shrink: llr_Expression,
+    basis: llr_Expression,
+    align_self: llr_Expression,
+    order: llr_Expression,
+}
+
+fn make_flexbox_cell_data_struct(layout_info: llr_Expression, fp: FlexItemProps) -> llr_Expression {
+    let (align_self_ty, _) = default_align_self();
+    make_struct(
+        BuiltinPrivateStruct::FlexBoxLayoutItemInfo,
+        [
+            ("constraint", crate::typeregister::layout_info_type().into(), layout_info),
+            ("flex-grow", Type::Float32, fp.grow),
+            ("flex-shrink", Type::Float32, fp.shrink),
+            ("flex-basis", Type::Float32, fp.basis),
+            ("flex-align-self", align_self_ty, fp.align_self),
+            ("flex-order", Type::Int32, fp.order),
+        ],
     )
 }
 
@@ -766,7 +875,7 @@ fn box_layout_data(
                     };
                 elements.push(Either::Right(LayoutRepeatedElement {
                     repeater_index,
-                    repeated_children_count: None,
+                    row_child_templates: None,
                 }))
             } else {
                 let layout_info =
@@ -827,11 +936,10 @@ fn grid_layout_cell_constraints(
                     LoweredElement::Repeated { repeated_index } => *repeated_index,
                     _ => panic!(),
                 };
-                let cell = item.cell.borrow();
-                let repeated_children_count = cell.child_items.as_ref().map(|c| c.len());
+                let row_child_templates = get_row_child_templates(&item.item.element, ctx);
                 elements.push(Either::Right(LayoutRepeatedElement {
                     repeater_index,
-                    repeated_children_count,
+                    row_child_templates,
                 }));
             } else {
                 let layout_info =
@@ -921,10 +1029,9 @@ fn grid_layout_input_data(
                     LoweredElement::Repeated { repeated_index } => *repeated_index,
                     _ => panic!(),
                 };
-                let cell = item.cell.borrow();
-                let repeated_children_count = cell.child_items.as_ref().map(|c| c.len());
+                let row_child_templates = get_row_child_templates(&item.item.element, ctx);
                 let repeated_element =
-                    GridLayoutRepeatedElement { new_row, repeater_index, repeated_children_count };
+                    GridLayoutRepeatedElement { new_row, repeater_index, row_child_templates };
                 elements.push(Either::Right(repeated_element));
                 after_repeater_in_same_row = true;
             } else {
@@ -1088,13 +1195,23 @@ pub fn get_grid_layout_input_for_repeated(
         };
 
     if let Some(child_items) = grid_cell.child_items.as_ref() {
-        // Repeated Row
+        // Repeated Row: only handle static children here;
+        // inner repeater children are handled by the code generators at runtime
         let mut new_row_expr = llr_Expression::BoolLiteral(true);
-        for (i, child_item) in child_items.iter().enumerate() {
-            let child_element = child_item.element.borrow();
-            let child_cell = child_element.grid_layout_cell.as_ref().unwrap().borrow();
-            push_assignment(i, &new_row_expr, &child_cell);
-            new_row_expr = llr_Expression::BoolLiteral(false);
+        let mut i = 0;
+        for child_item in child_items.iter() {
+            match child_item {
+                crate::layout::RowChildTemplate::Static(layout_item) => {
+                    let child_element = layout_item.element.borrow();
+                    let child_cell = child_element.grid_layout_cell.as_ref().unwrap().borrow();
+                    push_assignment(i, &new_row_expr, &child_cell);
+                    new_row_expr = llr_Expression::BoolLiteral(false);
+                    i += 1;
+                }
+                crate::layout::RowChildTemplate::Repeated { .. } => {
+                    // Inner repeater children are filled at runtime by the code generators
+                }
+            }
         }
     } else {
         // Single repeated item
@@ -1110,4 +1227,59 @@ pub fn get_grid_layout_input_for_repeated(
     }
 
     llr_Expression::CodeBlock(assignments)
+}
+
+/// Returns the row child template list for a repeated Row element.
+///
+/// Reads it from the already-lowered Row sub-component (which must have been
+/// lowered before the parent's expression lowering — see the ordering in
+/// `lower_sub_component`).
+///
+/// Returns `None` if this is a column-repeater (not a Row sub-component).
+/// Returns `Some(vec)` with one entry per child in declaration order.
+fn get_row_child_templates(
+    outer_element: &ElementRc,
+    ctx: &ExpressionLoweringCtx,
+) -> Option<Vec<super::RowChildTemplateInfo>> {
+    let comp = outer_element.borrow().base_type.as_component().clone();
+    ctx.state.row_child_templates(&comp)
+}
+
+/// Generate an expression that builds a FlexBoxLayoutItemInfo for a repeated element
+/// in a FlexBoxLayout, reading flex properties from the component instance.
+pub fn get_flexbox_layout_item_info_for_repeated(
+    ctx: &mut ExpressionLoweringCtx,
+    element: &ElementRc,
+) -> llr_Expression {
+    let prop_ref = |name: &'static str| -> Option<llr_Expression> {
+        crate::layout::binding_reference(element, name)
+            .map(|nr| llr_Expression::PropertyReference(ctx.map_property_reference(&nr)))
+    };
+
+    let (align_self_ty, align_self_default) = default_align_self();
+
+    let grow = prop_ref("flex-grow").unwrap_or(llr_Expression::NumberLiteral(0.0));
+    let shrink = prop_ref("flex-shrink").unwrap_or(llr_Expression::NumberLiteral(0.0));
+    let basis = prop_ref("flex-basis").unwrap_or(llr_Expression::NumberLiteral(-1.0));
+    let align_self = prop_ref("flex-align-self").unwrap_or(align_self_default);
+    let order = prop_ref("flex-order").unwrap_or(llr_Expression::NumberLiteral(0.0));
+
+    make_struct(
+        BuiltinPrivateStruct::FlexBoxLayoutItemInfo,
+        [
+            (
+                "constraint",
+                crate::typeregister::layout_info_type().into(),
+                llr_Expression::default_value_for_type(
+                    &crate::typeregister::layout_info_type().into(),
+                )
+                .unwrap(),
+            ),
+            ("flex-grow", Type::Float32, grow),
+            ("flex-shrink", Type::Float32, shrink),
+            ("flex-basis", Type::Float32, basis),
+            ("flex-align-self", align_self_ty, align_self),
+            ("flex-order", Type::Int32, order),
+        ],
+    )
 }

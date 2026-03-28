@@ -57,6 +57,56 @@ pub struct LayoutItem {
     pub constraints: LayoutConstraints,
 }
 
+/// A FlexBoxLayout child item, wrapping a LayoutItem with flex-specific properties.
+#[derive(Debug, Clone)]
+pub struct FlexBoxLayoutItem {
+    pub item: LayoutItem,
+    pub flex_grow: Option<NamedReference>,
+    pub flex_shrink: Option<NamedReference>,
+    pub flex_basis: Option<NamedReference>,
+    pub align_self: Option<NamedReference>,
+    pub order: Option<NamedReference>,
+}
+
+/// A child within a repeated Row in a GridLayout.
+/// Can be either a static item or a nested repeater (`for y in model: ...`).
+#[derive(Debug, Clone)]
+pub enum RowChildTemplate {
+    Static(LayoutItem),
+    Repeated {
+        item: LayoutItem,
+        /// The repeated element (the `for y in ...` element inside the Row)
+        repeated_element: ElementRc,
+    },
+}
+
+impl RowChildTemplate {
+    pub fn layout_item(&self) -> &LayoutItem {
+        match self {
+            RowChildTemplate::Static(item) => item,
+            RowChildTemplate::Repeated { item, .. } => item,
+        }
+    }
+
+    pub fn layout_item_mut(&mut self) -> &mut LayoutItem {
+        match self {
+            RowChildTemplate::Static(item) => item,
+            RowChildTemplate::Repeated { item, .. } => item,
+        }
+    }
+
+    pub fn repeated_element(&self) -> Option<&ElementRc> {
+        match self {
+            RowChildTemplate::Static(_) => None,
+            RowChildTemplate::Repeated { repeated_element, .. } => Some(repeated_element),
+        }
+    }
+
+    pub fn is_repeated(&self) -> bool {
+        self.repeated_element().is_some()
+    }
+}
+
 impl LayoutItem {
     pub fn rect(&self) -> LayoutRect {
         let p = |unresolved_name: &str| {
@@ -283,7 +333,7 @@ pub struct GridLayoutCell {
     pub row_expr: RowColExpr,
     pub colspan_expr: RowColExpr,
     pub rowspan_expr: RowColExpr,
-    pub child_items: Option<Vec<LayoutItem>>, // for repeated rows
+    pub child_items: Option<Vec<RowChildTemplate>>, // for repeated rows
 }
 
 impl GridLayoutCell {
@@ -302,7 +352,7 @@ impl GridLayoutCell {
         }
         if let Some(children) = &mut self.child_items {
             for child in children {
-                child.constraints.visit_named_references(visitor);
+                child.layout_item_mut().constraints.visit_named_references(visitor);
             }
         }
     }
@@ -522,7 +572,7 @@ impl GridLayout {
             layout_elem.item.constraints.visit_named_references(visitor);
             if let Some(child_items) = &mut layout_elem.cell.borrow_mut().child_items {
                 for child in child_items {
-                    child.constraints.visit_named_references(visitor);
+                    child.layout_item_mut().constraints.visit_named_references(visitor);
                 }
             }
         }
@@ -551,17 +601,33 @@ impl BoxLayout {
 /// Internal representation of a FlexBoxLayout (row or column direction with wrapping)
 #[derive(Debug, Clone)]
 pub struct FlexBoxLayout {
-    pub elems: Vec<LayoutItem>,
+    pub elems: Vec<FlexBoxLayoutItem>,
     pub geometry: LayoutGeometry,
     pub direction: Option<NamedReference>,
     pub align_content: Option<NamedReference>,
     pub align_items: Option<NamedReference>,
+    pub flex_wrap: Option<NamedReference>,
 }
 
 impl FlexBoxLayout {
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
-            cell.constraints.visit_named_references(visitor);
+            cell.item.constraints.visit_named_references(visitor);
+            if let Some(e) = cell.flex_grow.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.flex_shrink.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.flex_basis.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.align_self.as_mut() {
+                visitor(&mut *e)
+            }
+            if let Some(e) = cell.order.as_mut() {
+                visitor(&mut *e)
+            }
         }
         self.geometry.visit_named_references(visitor);
         if let Some(e) = self.direction.as_mut() {
@@ -571,6 +637,9 @@ impl FlexBoxLayout {
             visitor(&mut *e)
         }
         if let Some(e) = self.align_items.as_mut() {
+            visitor(&mut *e)
+        }
+        if let Some(e) = self.flex_wrap.as_mut() {
             visitor(&mut *e)
         }
     }
