@@ -118,7 +118,7 @@ impl MenuFromItemTree {
                     let has_sub_menu = !children.is_empty();
                     let enabled = menu_item.enabled();
                     let checkable = menu_item.checkable();
-                    let checked = menu_item.checked();                
+                    let checked = menu_item.checked();
                     let icon = menu_item.icon();
                     let shortcut = menu_item.shortcut();
                     self.item_cache.borrow_mut().insert(
