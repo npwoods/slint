@@ -211,7 +211,7 @@ impl RepeatedItemTree for ErasedItemTreeBox {
         self: Pin<&Self>,
         o: Orientation,
         child_index: Option<usize>,
-    ) -> i_slint_core::layout::FlexBoxLayoutItemInfo {
+    ) -> i_slint_core::layout::FlexboxLayoutItemInfo {
         generativity::make_guard!(guard);
         let s = self.unerase(guard);
         let instance_ref = s.borrow_instance();
@@ -234,10 +234,10 @@ impl RepeatedItemTree for ErasedItemTreeBox {
         let flex_align_self = eval::load_property(instance_ref, root_element, "flex-align-self")
             .ok()
             .and_then(|v| v.try_into().ok())
-            .unwrap_or(i_slint_core::items::FlexAlignSelf::Auto);
+            .unwrap_or(i_slint_core::items::FlexboxLayoutAlignSelf::Auto);
         let flex_order = load_f32("flex-order") as i32;
 
-        i_slint_core::layout::FlexBoxLayoutItemInfo {
+        i_slint_core::layout::FlexboxLayoutItemInfo {
             constraint: self.layout_item_info(o, child_index).constraint,
             flex_grow,
             flex_shrink,
@@ -913,10 +913,7 @@ pub async fn load(
     mut compiler_config: CompilerConfiguration,
 ) -> CompilationResult {
     // If the native style should be Qt, resolve it here as we know that we have it
-    let is_native = match &compiler_config.style {
-        Some(s) => s == "native",
-        None => std::env::var("SLINT_STYLE").map_or(true, |s| s == "native"),
-    };
+    let is_native = compiler_config.style.as_deref() == Some("native");
     if is_native {
         // On wasm, look at the browser user agent
         #[cfg(target_arch = "wasm32")]

@@ -188,12 +188,12 @@ macro_rules! for_each_builtin_structs {
                     checkable: bool,
                     /// whether the menu entry is checked
                     checked: bool,
-                    /// BletchMAME hack:  the muda accelerator
-                    muda_accelerator: SharedString,
                     /// Sub menu
                     has_sub_menu: bool,
                     /// The menu entry is a separator
                     is_separator: bool,
+                    /// The shortcut keys
+                    shortcut: Keys,
                 }
                 private {}
             }

@@ -117,7 +117,7 @@ impl BuiltinTypes {
             name: BuiltinPrivateStruct::LayoutInfo.into(),
         });
         let enums = BuiltinEnums::new();
-        let flex_align_self_type = Type::Enumeration(enums.FlexAlignSelf.clone());
+        let flex_align_self_type = Type::Enumeration(enums.FlexboxLayoutAlignSelf.clone());
         Self {
             enums,
             logical_point_type: Rc::new(Struct {
@@ -188,7 +188,7 @@ impl BuiltinTypes {
                     ("flex-order".into(), Type::Int32),
                 ])
                 .collect(),
-                name: BuiltinPrivateStruct::FlexBoxLayoutItemInfo.into(),
+                name: BuiltinPrivateStruct::FlexboxLayoutItemInfo.into(),
             })),
             gridlayout_input_data_type: Type::Struct(Rc::new(Struct {
                 fields: IntoIterator::into_iter([
@@ -304,7 +304,7 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
         // because Type::Enumeration requires a runtime Rc allocation.
         .chain(std::iter::once((
             "flex-align-self",
-            Type::Enumeration(BUILTIN.with(|e| e.enums.FlexAlignSelf.clone())),
+            Type::Enumeration(BUILTIN.with(|e| e.enums.FlexboxLayoutAlignSelf.clone())),
             PropertyVisibility::Input,
         )))
         .chain(IntoIterator::into_iter([
@@ -788,6 +788,7 @@ pub mod builtin_structs {
         ($pub_type:ident, SharedString) => { Type::String };
         ($pub_type:ident, Image) => { Type::Image };
         ($pub_type:ident, Coord) => { Type::LogicalLength };
+        ($pub_type:ident, Keys) => { Type::Keys };
         ($pub_type:ident, LogicalPosition) => { Type::Struct(logical_point_type()) };
         ($pub_type:ident, LogicalSize) => { Type::Struct(logical_size_type()) };
         // builtin structs
@@ -882,7 +883,7 @@ pub fn layout_item_info_type() -> Type {
     BUILTIN.with(|types| types.layout_item_info_type.clone())
 }
 
-/// The [`Type`] for a runtime FlexBoxLayoutItemInfo structure
+/// The [`Type`] for a runtime FlexboxLayoutItemInfo structure
 pub fn flexbox_layout_item_info_type() -> Type {
     BUILTIN.with(|types| types.flexbox_layout_item_info_type.clone())
 }

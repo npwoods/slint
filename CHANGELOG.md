@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file.
  - Skia: Enabled subpixel glyph positioning to fix uneven text spacing. (#10752)
  - Winit: Batch mouse move events to prevent too many move event to delay rendering. (#9038)
  - Wasm: Enabled clipboard interaction by default.
+ - LinuxKMS: Add support for WGPU based rendering with Skia and FemtoVG.
 
 ### Slint
 
@@ -23,7 +24,7 @@ All notable changes to this project are documented in this file.
  - Fixed empty `GridLayout` not taking padding into account.
  - Added support for Keyboard shortcuts with `KeyBinding` element, `keys` type, and `@keys(...)` macro.
  - Added printable keys in the `Key` namespace.
- - Added `FlexBoxLayout`.
+ - Added `FlexboxLayout`.
  - Added support for styled text with `StyledText` element, `styled-text` type, and `@markdown(...)` macro.
  - Added `ScaleRotateGestureHandler` element for handling multi-touch pinch gestures.
  - Fixed compiler panic when accessing model data from repeated menu. (#10927)

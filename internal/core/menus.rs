@@ -5,7 +5,7 @@
 #![allow(unsafe_code)]
 
 use crate::graphics::Image;
-use crate::input::InternalKeyEvent;
+use crate::input::{InternalKeyEvent, Keys};
 use crate::item_rendering::CachedRenderingData;
 use crate::item_tree::{ItemTreeRc, ItemWeak, VisitChildrenResult};
 use crate::items::{ItemRc, ItemRef, MenuEntry, VoidArg};
@@ -120,7 +120,7 @@ impl MenuFromItemTree {
                     let checkable = menu_item.checkable();
                     let checked = menu_item.checked();                
                     let icon = menu_item.icon();
-                    let muda_accelerator = menu_item.muda_accelerator();
+                    let shortcut = menu_item.shortcut();
                     self.item_cache.borrow_mut().insert(
                         id.clone(),
                         ShadowTreeNode { item: ItemRc::downgrade(&item), children },
@@ -134,7 +134,7 @@ impl MenuFromItemTree {
                         checkable,
                         checked,
                         icon,
-                        muda_accelerator
+                        shortcut,
                     });
                 }
                 VisitChildrenResult::CONTINUE
@@ -196,7 +196,7 @@ pub struct MenuItem {
     pub checkable: Property<bool>,
     pub checked: Property<bool>,
     pub icon: Property<Image>,
-    pub muda_accelerator: Property<SharedString>,
+    pub shortcut: Property<Keys>,
 }
 
 impl crate::items::Item for MenuItem {

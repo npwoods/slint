@@ -12,7 +12,7 @@ use i_slint_compiler::layout::{
 use i_slint_compiler::namedreference::NamedReference;
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_core::Coord;
-use i_slint_core::items::{DialogButtonRole, FlexDirection, ItemRc};
+use i_slint_core::items::{DialogButtonRole, FlexboxLayoutDirection, ItemRc};
 use i_slint_core::layout::{self as core_layout, GridLayoutInputData, GridLayoutOrganizedData};
 use i_slint_core::model::RepeatedItemTree;
 use i_slint_core::slice::Slice;
@@ -180,7 +180,7 @@ pub(crate) fn solve_box_layout(
 }
 
 pub(crate) fn solve_flexbox_layout(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     local_context: &mut EvalLocalContext,
 ) -> Value {
     let component = local_context.component_instance;
@@ -204,17 +204,19 @@ pub(crate) fn solve_flexbox_layout(
     let align_content = flexbox_layout
         .align_content
         .as_ref()
-        .map_or(i_slint_core::items::FlexAlignContent::default(), |nr| {
+        .map_or(i_slint_core::items::FlexboxLayoutAlignContent::default(), |nr| {
             eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
         });
     let align_items = flexbox_layout
         .align_items
         .as_ref()
-        .map_or(i_slint_core::items::FlexAlignItems::default(), |nr| {
+        .map_or(i_slint_core::items::FlexboxLayoutAlignItems::default(), |nr| {
             eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
         });
-    let flex_wrap =
-        flexbox_layout.flex_wrap.as_ref().map_or(i_slint_core::items::FlexWrap::default(), |nr| {
+    let flex_wrap = flexbox_layout
+        .flex_wrap
+        .as_ref()
+        .map_or(i_slint_core::items::FlexboxLayoutWrap::default(), |nr| {
             eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
         });
 
@@ -224,7 +226,7 @@ pub(crate) fn solve_flexbox_layout(
         padding_and_spacing(&flexbox_layout.geometry, Orientation::Vertical, &expr_eval);
 
     core_layout::solve_flexbox_layout(
-        &core_layout::FlexBoxLayoutData {
+        &core_layout::FlexboxLayoutData {
             width: width_ref.as_ref().map(&expr_eval).unwrap_or(0.),
             height: height_ref.as_ref().map(&expr_eval).unwrap_or(0.),
             spacing_h,
@@ -245,9 +247,9 @@ pub(crate) fn solve_flexbox_layout(
 }
 
 fn flexbox_layout_direction(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     local_context: &EvalLocalContext,
-) -> FlexDirection {
+) -> FlexboxLayoutDirection {
     flexbox_layout
         .direction
         .as_ref()
@@ -257,21 +259,21 @@ fn flexbox_layout_direction(
                     .ok()?;
             if let Value::EnumerationValue(_, variant) = &value {
                 match variant.as_str() {
-                    "row" => Some(FlexDirection::Row),
-                    "row-reverse" => Some(FlexDirection::RowReverse),
-                    "column" => Some(FlexDirection::Column),
-                    "column-reverse" => Some(FlexDirection::ColumnReverse),
+                    "row" => Some(FlexboxLayoutDirection::Row),
+                    "row-reverse" => Some(FlexboxLayoutDirection::RowReverse),
+                    "column" => Some(FlexboxLayoutDirection::Column),
+                    "column-reverse" => Some(FlexboxLayoutDirection::ColumnReverse),
                     _ => None,
                 }
             } else {
                 None
             }
         })
-        .unwrap_or(FlexDirection::Row)
+        .unwrap_or(FlexboxLayoutDirection::Row)
 }
 
 pub(crate) fn compute_flexbox_layout_info(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     orientation: Orientation,
     local_context: &mut EvalLocalContext,
 ) -> Value {
@@ -289,8 +291,11 @@ pub(crate) fn compute_flexbox_layout_info(
     // Determine if we're on the main axis or cross axis
     let is_main_axis = matches!(
         (direction, orientation),
-        (FlexDirection::Row | FlexDirection::RowReverse, Orientation::Horizontal)
-            | (FlexDirection::Column | FlexDirection::ColumnReverse, Orientation::Vertical)
+        (FlexboxLayoutDirection::Row | FlexboxLayoutDirection::RowReverse, Orientation::Horizontal)
+            | (
+                FlexboxLayoutDirection::Column | FlexboxLayoutDirection::ColumnReverse,
+                Orientation::Vertical
+            )
     );
 
     let (padding_h, spacing_h) =
@@ -298,8 +303,10 @@ pub(crate) fn compute_flexbox_layout_info(
     let (padding_v, spacing_v) =
         padding_and_spacing(&flexbox_layout.geometry, Orientation::Vertical, &expr_eval);
 
-    let flex_wrap =
-        flexbox_layout.flex_wrap.as_ref().map_or(i_slint_core::items::FlexWrap::default(), |nr| {
+    let flex_wrap = flexbox_layout
+        .flex_wrap
+        .as_ref()
+        .map_or(i_slint_core::items::FlexboxLayoutWrap::default(), |nr| {
             eval::load_property(component, &nr.element(), nr.name()).unwrap().try_into().unwrap()
         });
 
@@ -352,11 +359,11 @@ pub(crate) fn compute_flexbox_layout_info(
 }
 
 fn flexbox_layout_data(
-    flexbox_layout: &i_slint_compiler::layout::FlexBoxLayout,
+    flexbox_layout: &i_slint_compiler::layout::FlexboxLayout,
     component: InstanceRef,
     expr_eval: &impl Fn(&NamedReference) -> f32,
     _local_context: &mut EvalLocalContext,
-) -> (Vec<core_layout::FlexBoxLayoutItemInfo>, Vec<core_layout::FlexBoxLayoutItemInfo>, Vec<u32>) {
+) -> (Vec<core_layout::FlexboxLayoutItemInfo>, Vec<core_layout::FlexboxLayoutItemInfo>, Vec<u32>) {
     let window_adapter = component.window_adapter();
     let mut cells_h = Vec::with_capacity(flexbox_layout.elems.len());
     let mut cells_v = Vec::with_capacity(flexbox_layout.elems.len());
@@ -410,9 +417,9 @@ fn flexbox_layout_data(
                         .try_into()
                         .unwrap()
                 })
-                .unwrap_or(i_slint_core::items::FlexAlignSelf::default());
+                .unwrap_or(i_slint_core::items::FlexboxLayoutAlignSelf::default());
             let order = layout_elem.order.as_ref().map(&expr_eval).unwrap_or(0.0) as i32;
-            let item_info = core_layout::FlexBoxLayoutItemInfo {
+            let item_info = core_layout::FlexboxLayoutItemInfo {
                 constraint: layout_info_h,
                 flex_grow,
                 flex_shrink,
@@ -421,7 +428,7 @@ fn flexbox_layout_data(
                 flex_order: order,
             };
             cells_h.push(item_info);
-            cells_v.push(core_layout::FlexBoxLayoutItemInfo {
+            cells_v.push(core_layout::FlexboxLayoutItemInfo {
                 constraint: layout_info_v,
                 flex_grow,
                 flex_shrink,
