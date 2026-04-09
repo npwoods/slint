@@ -32,6 +32,8 @@ pub struct MenuVTable {
     sub_menu: extern "C" fn(VRef<MenuVTable>, Option<&MenuEntry>, &mut SharedVector<MenuEntry>),
     /// Handler when the menu entry is activated
     activate: extern "C" fn(VRef<MenuVTable>, &MenuEntry),
+    /// Condition
+    condition: extern "C" fn(VRef<MenuVTable>) -> bool,
     /// drop_in_place handler
     drop_in_place: extern "C" fn(VRefMut<MenuVTable>) -> Layout,
     /// dealloc handler
@@ -84,12 +86,6 @@ impl MenuFromItemTree {
     fn update_shadow_tree(&self) {
         self.tracker.as_ref().evaluate_if_dirty(|| {
             self.item_cache.replace(Default::default());
-            if let Some(condition) = &self.condition
-                && !condition.as_ref().get()
-            {
-                self.root.replace(SharedVector::default());
-                return;
-            }
             self.root.replace(
                 self.update_shadow_tree_recursive(&ItemRc::new_root(self.item_tree.clone())),
             );
@@ -179,6 +175,10 @@ impl Menu for MenuFromItemTree {
 
             menu_item.activated.call(&());
         }
+    }
+
+    fn condition(&self) -> bool {
+        self.condition.as_ref().is_none_or(|x| x.as_ref().get())
     }
 }
 
