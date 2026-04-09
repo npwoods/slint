@@ -4,7 +4,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
-"POT-Creation-Date: 2026-03-27 05:05+0000\n"
+"POT-Creation-Date: 2026-04-09 05:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -244,11 +244,6 @@ msgctxt "ScanPage"
 msgid "Start scanning"
 msgstr ""
 
-#: ui/ink_page.slint:15
-msgctxt "InkPage"
-msgid "Ink Level"
-msgstr ""
-
 #: ui/usb_page.slint:20
 msgctxt "UsbPage"
 msgid "USB"
@@ -277,6 +272,41 @@ msgstr ""
 #: ui/usb_page.slint:93
 msgctxt "UsbPage"
 msgid "Start printing"
+msgstr ""
+
+#: ui/print_page.slint:10
+msgctxt "PrintPage"
+msgid "Print"
+msgstr ""
+
+#: ui/print_page.slint:18
+msgctxt "PrintPage"
+msgid "Printing-Queue"
+msgstr ""
+
+#: ui/home_page.slint:55
+msgctxt "HomePage"
+msgid "Slint Printer Demo"
+msgstr ""
+
+#: ui/home_page.slint:58
+msgctxt "HomePage"
+msgid "Print"
+msgstr ""
+
+#: ui/home_page.slint:59
+msgctxt "HomePage"
+msgid "Scan"
+msgstr ""
+
+#: ui/home_page.slint:60
+msgctxt "HomePage"
+msgid "Copy"
+msgstr ""
+
+#: ui/home_page.slint:61
+msgctxt "HomePage"
+msgid "USB"
 msgstr ""
 
 #: ui/copy_page.slint:10 ui/copy_page.slint:97
@@ -404,16 +434,6 @@ msgctxt "CopyPage"
 msgid "Start copying"
 msgstr ""
 
-#: ui/print_page.slint:10
-msgctxt "PrintPage"
-msgid "Print"
-msgstr ""
-
-#: ui/print_page.slint:18
-msgctxt "PrintPage"
-msgid "Printing-Queue"
-msgstr ""
-
 #: ui/printer_queue.slint:25
 msgctxt "PrinterQueue"
 msgid "PRINTING"
@@ -479,33 +499,13 @@ msgctxt "PrinterQueueView"
 msgid "Printing Queue"
 msgstr ""
 
-#: ui/home_page.slint:55
-msgctxt "HomePage"
-msgid "Slint Printer Demo"
-msgstr ""
-
-#: ui/home_page.slint:58
-msgctxt "HomePage"
-msgid "Print"
-msgstr ""
-
-#: ui/home_page.slint:59
-msgctxt "HomePage"
-msgid "Scan"
-msgstr ""
-
-#: ui/home_page.slint:60
-msgctxt "HomePage"
-msgid "Copy"
-msgstr ""
-
-#: ui/home_page.slint:61
-msgctxt "HomePage"
-msgid "USB"
-msgstr ""
-
 #: ui/printerdemo.slint:57
 msgctxt "MainWindow"
 msgid "Slint printer demo"
+msgstr ""
+
+#: ui/ink_page.slint:15
+msgctxt "InkPage"
+msgid "Ink Level"
 msgstr ""
 
