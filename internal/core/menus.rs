@@ -32,8 +32,8 @@ pub struct MenuVTable {
     sub_menu: extern "C" fn(VRef<MenuVTable>, Option<&MenuEntry>, &mut SharedVector<MenuEntry>),
     /// Handler when the menu entry is activated
     activate: extern "C" fn(VRef<MenuVTable>, &MenuEntry),
-    /// Condition
-    condition: extern "C" fn(VRef<MenuVTable>) -> bool,
+    /// Handler to returrn whether the menu is visible or not
+    visible: extern "C" fn(VRef<MenuVTable>) -> bool,
     /// drop_in_place handler
     drop_in_place: extern "C" fn(VRefMut<MenuVTable>) -> Layout,
     /// dealloc handler
@@ -52,6 +52,7 @@ pub struct MenuFromItemTree {
     next_id: Cell<usize>,
     tracker: Pin<Box<PropertyTracker>>,
     condition: Option<Pin<Box<Property<bool>>>>,
+    visible: bool
 }
 
 impl MenuFromItemTree {
@@ -63,6 +64,7 @@ impl MenuFromItemTree {
             tracker: Box::pin(PropertyTracker::default()),
             next_id: 0.into(),
             condition: None,
+            visible: true
         }
     }
 
@@ -80,6 +82,7 @@ impl MenuFromItemTree {
             tracker: Box::pin(PropertyTracker::default()),
             next_id: 0.into(),
             condition: Some(cond_prop),
+            visible: true
         }
     }
 
@@ -177,8 +180,8 @@ impl Menu for MenuFromItemTree {
         }
     }
 
-    fn condition(&self) -> bool {
-        self.condition.as_ref().is_none_or(|x| x.as_ref().get())
+    fn visible(&self) -> bool {
+        self.visible
     }
 }
 
