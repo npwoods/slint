@@ -208,12 +208,6 @@ impl MudaAdapter {
             }
         }
 
-        // Until we have menu roles, always create an app menu on macOS.
-        #[cfg(target_os = "macos")]
-        if matches!(muda_type, MudaType::Menubar) {
-            create_default_app_menu(&self.menu).unwrap();
-        }
-
         if let Some(menu_tree) = menu_tree.as_deref() {
             let mut build_menu = || {
                 let mut menu_entries = Default::default();
@@ -252,11 +246,19 @@ impl MudaAdapter {
                     }
                 }
 
+                // Until we have menu roles, always create an app menu on macOS.
+                #[cfg(target_os = "macos")]
+                if matches!(muda_type, MudaType::Menubar)
+                    && let Some(menu) = self.menu.as_ref()
+                {
+                    create_default_app_menu(menu).unwrap();
+                }
+
                 let window_id = u64::from(winit_window.id()).to_string();
                 if let Some(menu) = self.menu.as_ref() {
                     for e in menu_entries {
                         menu.append(&*generate_menu_entry(
-                            vtable::VRc::borrow(&menu_tree),
+                            vtable::VRc::borrow(menu_tree),
                             &e,
                             0,
                             &mut self.entries,
@@ -282,7 +284,7 @@ impl MudaAdapter {
 
     pub fn invoke(&self, menubar: &vtable::VRc<MenuVTable>, entry_id: usize) {
         let Some(entry) = &self.entries.get(entry_id) else { return };
-        vtable::VRc::borrow(&menubar).activate(entry);
+        vtable::VRc::borrow(menubar).activate(entry);
     }
 
     #[cfg(target_os = "windows")]
@@ -308,13 +310,13 @@ impl MudaAdapter {
         let menu_bar = muda::Menu::new();
         create_default_app_menu(&menu_bar)?;
         menu_bar.init_for_nsapp();
-        Ok(Self { entries: Vec::new(), menu: RefCell::new(Some(menu_bar)), tracker: None })
+        Ok(Self { entries: Vec::new(), menu: Some(menu_bar), tracker: None })
     }
 
     #[cfg(target_os = "macos")]
     pub fn window_activation_changed(&self, is_active: bool) {
-        if is_active {
-            self.menu.init_for_nsapp();
+        if is_active && let Some(menu) = self.menu.as_ref() {
+            menu.init_for_nsapp();
         }
     }
 }
