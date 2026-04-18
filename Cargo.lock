@@ -5058,7 +5058,7 @@ dependencies = [
  "i-slint-renderer-software",
  "imgref",
  "lyon_path",
- "muda 0.17.2",
+ "muda",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -6657,24 +6657,6 @@ name = "muda"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b20e2339ef964849496bd6dab1bcd8ceb7a3a5a268dc64c8b84c833e75d66dab"
-dependencies = [
- "crossbeam-channel",
- "dpi",
- "keyboard-types",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-foundation 0.3.2",
- "once_cell",
- "png 0.17.16",
- "thiserror 2.0.18",
- "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "muda"
-version = "0.17.2"
-source = "git+https://github.com/tauri-apps/muda.git?rev=adb9f5565444f6240c3df25347a25bcfcdc442b2#adb9f5565444f6240c3df25347a25bcfcdc442b2"
 dependencies = [
  "crossbeam-channel",
  "dpi",
@@ -10240,7 +10222,7 @@ dependencies = [
 
 [[package]]
 name = "slint-material-components"
-version = "1.16.0"
+version = "1.17.0"
 
 [[package]]
 name = "slint-node"

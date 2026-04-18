@@ -211,7 +211,7 @@ impl MudaAdapter {
             }
         }
 
-        if let Some(menu_tree) = menu_tree.as_deref() {
+        if let Some(menu_tree) = menu_tree {
             let mut build_menu = || {
                 let mut menu_entries = Default::default();
                 if vtable::VRc::borrow(&menu_tree).condition() {
