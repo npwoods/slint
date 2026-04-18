@@ -369,7 +369,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
             return Ok(None::<serde_json::Value>);
         }
         if params.command.as_str() == POPULATE_COMMAND {
-            tokio::task::spawn_local(populate_command(&params.arguments, ctx)?);
+            common::spawn_local(populate_command(&params.arguments, ctx)?);
             return Ok(None::<serde_json::Value>);
         }
         Ok(None::<serde_json::Value>)
@@ -1372,7 +1372,7 @@ fn get_document_symbols(
         (!r.is_empty()).then_some(r)
     }
 
-    r.sort_by(|a, b| a.range.start.cmp(&b.range.start));
+    r.sort_by_key(|a| a.range.start);
 
     #[cfg(debug_assertions)]
     fn check_ranges(r: &[DocumentSymbol]) {

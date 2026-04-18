@@ -3,6 +3,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::await_holding_refcell_ref)]
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::disallowed_methods)]
 
 #[cfg(all(feature = "preview-engine", not(feature = "preview-builtin")))]
 compile_error!(
@@ -217,6 +218,7 @@ impl RequestHandler {
 
 fn main() {
     tracing_subscriber::fmt()
+        .log_internal_errors(false)
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -268,7 +270,7 @@ fn main() {
             Commands::Format(fmt) => match fmt::tool::run(&fmt.paths, fmt.inline) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
-                    eprintln!("Format Error: {e}");
+                    tracing::error!("Format Error: {e}");
                     std::process::exit(1)
                 }
             },
@@ -276,7 +278,7 @@ fn main() {
             Commands::LivePreview(live_preview) => match preview::run(live_preview) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
-                    eprintln!("Preview Error: {e}");
+                    tracing::error!("Preview Error: {e}");
                     std::process::exit(2);
                 }
             },
@@ -291,7 +293,7 @@ fn main() {
         match local_set.block_on(&rt, run_lsp_server(args)) {
             Ok(threads) => threads.join().unwrap(),
             Err(error) => {
-                eprintln!("Error running LSP server: {error}");
+                tracing::error!("Error running LSP server: {error}");
                 std::process::exit(3);
             }
         }
@@ -317,12 +319,9 @@ async fn main_loop(
     init_param: InitializeParams,
     cli_args: Cli,
 ) -> Result<()> {
-    let mut rh = RequestHandler::default();
-    register_request_handlers(&mut rh);
-
     let request_queue = OutgoingRequestQueue::default();
     #[cfg_attr(not(feature = "preview-engine"), allow(unused))]
-    let (preview_to_lsp_sender, mut preview_to_lsp_receiver) =
+    let (preview_to_lsp_sender, preview_to_lsp_receiver) =
         mpsc::unbounded_channel::<crate::common::PreviewToLspMessage>();
 
     let server_notifier =
@@ -349,6 +348,35 @@ async fn main_loop(
             .unwrap(),
         )
     };
+
+    let result = run_main_loop(
+        connection,
+        init_param,
+        cli_args,
+        request_queue,
+        server_notifier,
+        preview_to_lsp_receiver,
+        to_preview.clone(),
+    )
+    .await;
+
+    to_preview.shutdown().await;
+
+    result
+}
+
+async fn run_main_loop(
+    connection: Connection,
+    init_param: InitializeParams,
+    cli_args: Cli,
+    request_queue: OutgoingRequestQueue,
+    server_notifier: ServerNotifier,
+    #[cfg_attr(not(feature = "preview-engine"), allow(unused_mut))]
+    mut preview_to_lsp_receiver: mpsc::UnboundedReceiver<crate::common::PreviewToLspMessage>,
+    to_preview: Rc<dyn LspToPreview>,
+) -> Result<()> {
+    let mut rh = RequestHandler::default();
+    register_request_handlers(&mut rh);
 
     let to_preview_clone = to_preview.clone();
     let compiler_config = CompilerConfiguration {

@@ -276,7 +276,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
 
                 fn to_slint_key(event: &winit::event::KeyEvent, key_code: &Key) -> SharedString {
                     macro_rules! winit_key_to_char {
-                        ($($char:literal # $name:ident # $($shifted:ident)? # $($_muda:ident)? $(=> $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
+                        ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
                             #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
                             match key_code {
                                 $( $( $(
@@ -388,13 +388,12 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 // arrives.
                 self.pending_mouse_move = Some((window_id, self.cursor_pos));
             }
-            WindowEvent::CursorLeft { .. } => {
-                // On the html canvas, we don't get the mouse move or release event when outside the canvas. So we have no choice but canceling the event
-                if cfg!(target_arch = "wasm32") || !self.pressed {
-                    self.pressed = false;
-                    runtime_window.process_mouse_input(MouseEvent::Exit);
-                }
+            // On the html canvas, we don't get the mouse move or release event when outside the canvas. So we have no choice but canceling the event
+            WindowEvent::CursorLeft { .. } if cfg!(target_arch = "wasm32") || !self.pressed => {
+                self.pressed = false;
+                runtime_window.process_mouse_input(MouseEvent::Exit);
             }
+            WindowEvent::CursorLeft { .. } => {}
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 let (delta_x, delta_y) = match delta {
                     winit::event::MouseScrollDelta::LineDelta(lx, ly) => (lx * 60., ly * 60.),
@@ -466,18 +465,19 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                     winit_touch_phase(touch.phase),
                 );
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, inner_size_writer: _ } => {
-                if std::env::var("SLINT_SCALE_FACTOR").is_err() {
-                    self.loop_error = window
-                        .window()
-                        .try_dispatch_event(corelib::platform::WindowEvent::ScaleFactorChanged {
-                            scale_factor: scale_factor as f32,
-                        })
-                        .err();
-                    // TODO: send a resize event or try to keep the logical size the same.
-                    //window.resize_event(inner_size_writer.???)?;
-                }
+            WindowEvent::ScaleFactorChanged { scale_factor, inner_size_writer: _ }
+                if std::env::var("SLINT_SCALE_FACTOR").is_err() =>
+            {
+                self.loop_error = window
+                    .window()
+                    .try_dispatch_event(corelib::platform::WindowEvent::ScaleFactorChanged {
+                        scale_factor: scale_factor as f32,
+                    })
+                    .err();
+                // TODO: send a resize event or try to keep the logical size the same.
+                //window.resize_event(inner_size_writer.???)?;
             }
+            WindowEvent::ScaleFactorChanged { .. } => {}
             WindowEvent::ThemeChanged(theme) => {
                 window.set_color_scheme(match theme {
                     winit::window::Theme::Dark => ColorScheme::Dark,
@@ -608,8 +608,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 .shared_backend_data
                 .active_windows
                 .borrow()
-                .iter()
-                .filter_map(|(_, w)| w.upgrade())
+                .values()
+                .filter_map(|w| w.upgrade())
             {
                 if w.window().has_active_animations() {
                     w.request_redraw();

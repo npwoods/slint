@@ -136,6 +136,23 @@ impl common::LspToPreview for ChildProcessLspToPreview {
     fn set_preview_target(&self, _: common::PreviewTarget) -> common::Result<()> {
         Err("Can not change the preview target".into())
     }
+
+    fn shutdown<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let Some(inner) = self.inner.borrow_mut().take() else {
+                return;
+            };
+            let message = serde_json::to_string(&common::LspToPreviewMessage::Quit).unwrap();
+            let _ = inner.to_child_sender.send(message);
+            drop(inner.to_child_sender);
+            if tokio::time::timeout(std::time::Duration::from_secs(5), inner.communication_handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Timed out waiting for preview child process to exit");
+            }
+        })
+    }
 }
 
 pub struct EmbeddedLspToPreview {
@@ -198,6 +215,14 @@ impl common::LspToPreview for SwitchableLspToPreview {
             Err("Target not found".into())
         }
     }
+
+    fn shutdown<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            for child in self.lsp_to_previews.values() {
+                child.shutdown().await;
+            }
+        })
+    }
 }
 
 pub struct RemoteControlledPreviewToLsp {}
@@ -259,6 +284,7 @@ impl RemoteControlledPreviewToLsp {
 }
 
 impl common::PreviewToLsp for RemoteControlledPreviewToLsp {
+    #[allow(clippy::print_stdout)]
     fn send(&self, message: &common::PreviewToLspMessage) -> common::Result<()> {
         let message = serde_json::to_string(message).map_err(|e| e.to_string())?;
         println!("{message}");

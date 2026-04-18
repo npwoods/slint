@@ -27,6 +27,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_prelude::*;
 
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_local<F>(future: F)
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = future.await;
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::task::spawn_local(future);
+}
+
 /// Use this in nodes you want the language server and preview to
 /// ignore a node for code analysis purposes.
 pub const NODE_IGNORE_COMMENT: &str = "@lsp:ignore-node";
@@ -46,6 +60,9 @@ pub trait LspToPreview {
     fn send(&self, message: &LspToPreviewMessage);
     fn set_preview_target(&self, target: PreviewTarget) -> Result<()>;
     fn preview_target(&self) -> PreviewTarget;
+    fn shutdown<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Default, Clone)]
@@ -749,7 +766,7 @@ pub fn fuzzy_filter_iter<T: std::fmt::Debug>(
         .collect::<Vec<_>>();
 
     // sort by value, highest first. Sort names with the same value alphabetically
-    all_matches.sort_by(|r, l| l.0.cmp(&r.0));
+    all_matches.sort_by_key(|l| std::cmp::Reverse(l.0));
 
     let cut_off = {
         let lowest_value = all_matches.last().map(|(v, _)| *v).unwrap_or_default();
