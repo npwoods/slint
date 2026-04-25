@@ -6,7 +6,6 @@ pub mod webview;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
 mod gl_bindings {
     #![allow(unsafe_op_in_unsafe_fn)]
-
     include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
 }
 
@@ -54,8 +53,10 @@ pub fn android_main(android_app: slint::android::AndroidApp) {
 }
 
 fn setup_slint_with_wgpu() {
+    use slint::wgpu_28::{WGPUConfiguration, WGPUSettings};
+
     #[allow(unused_mut)]
-    let mut wgpu_settings = slint::wgpu_28::WGPUSettings::default();
+    let mut wgpu_settings = WGPUSettings::default();
 
     #[cfg(target_os = "windows")]
     {
@@ -64,7 +65,7 @@ fn setup_slint_with_wgpu() {
     }
 
     slint::BackendSelector::new()
-        .require_wgpu_28(slint::wgpu_28::WGPUConfiguration::Automatic(wgpu_settings))
+        .require_wgpu_28(WGPUConfiguration::Automatic(wgpu_settings))
         .select()
         .expect(
             "Failed to create Slint backend with WGPU based renderer - \

@@ -9,8 +9,7 @@
 //! the case of `native` runs in a separate thread at this time.
 
 use crate::common::{
-    self, ComponentInformation, ElementRcNode, PreviewComponent, PreviewConfig,
-    PreviewToLspMessage, SourceFileVersion, component_catalog, rename_component, text_edit,
+    self, ComponentInformation, ElementRcNode, component_catalog, rename_component, text_edit,
 };
 use crate::preview::element_selection::ElementSelection;
 use crate::util;
@@ -19,6 +18,9 @@ use i_slint_compiler::parser::{TextSize, syntax_nodes};
 use i_slint_compiler::{EmbedResourcesKind, diagnostics};
 use i_slint_core::component_factory::FactoryContext;
 use i_slint_core::lengths::{LogicalPoint, LogicalRect, LogicalSize};
+use i_slint_preview_protocol::{
+    PreviewComponent, PreviewConfig, PreviewToLspMessage, SourceFileVersion,
+};
 use lsp_types::Url;
 use slint::PlatformError;
 use slint_interpreter::{ComponentDefinition, ComponentHandle, ComponentInstance};
@@ -46,17 +48,12 @@ pub mod ui;
 mod undo_redo;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(config: &crate::LivePreview) -> std::result::Result<(), slint::PlatformError> {
-    if !config.remote_controlled {
-        return Err(slint::PlatformError::Other(
-            "Can not run the live preview without the LSP (yet)".into(),
-        ));
-    }
-
-    let to_lsp: Rc<dyn common::PreviewToLsp> =
-        Rc::new(connector::RemoteControlledPreviewToLsp::new());
-
-    let ui = ui::create_ui(&to_lsp, "")?;
+pub fn run(
+    to_lsp: Rc<dyn common::PreviewToLsp>,
+    fullscreen: bool,
+    use_editor_ui: bool,
+) -> std::result::Result<(), slint::PlatformError> {
+    let app_window = ui::create_ui(&to_lsp, "", use_editor_ui)?;
 
     to_lsp
         .send_telemetry(&mut [(
@@ -64,20 +61,23 @@ pub fn run(config: &crate::LivePreview) -> std::result::Result<(), slint::Platfo
             serde_json::to_value("preview_opened").unwrap(),
         )])
         .unwrap();
-    ui.window().set_fullscreen(config.fullscreen);
+    app_window.window().set_fullscreen(fullscreen);
 
     tracing::debug!("Preview: requesting state from LSP");
-    to_lsp.send(&common::PreviewToLspMessage::RequestState { unused: true }).unwrap();
+    to_lsp
+        .send(&i_slint_preview_protocol::PreviewToLspMessage::RequestState { unused: true })
+        .unwrap();
 
-    let ui_clone = PREVIEW_STATE.with(move |preview_state| {
+    let app_window_clone = PREVIEW_STATE.with(move |preview_state| {
         let mut preview_state = preview_state.borrow_mut();
         *preview_state.to_lsp.borrow_mut() = Some(to_lsp);
-        preview_state.ui = Some(ui.clone_strong());
-        ui
+        preview_state.api = app_window.api_weak();
+        preview_state.app_window = Some(app_window.clone_strong());
+        app_window
     });
 
     tracing::debug!("Preview: starting event loop (run)");
-    ui_clone.run()?;
+    app_window_clone.run()?;
     tracing::debug!("Preview: event loop exited");
 
     Ok(())
@@ -120,7 +120,8 @@ type SourceCodeCache = HashMap<Url, SourceCodeCacheEntry>;
 
 #[derive(Default)]
 pub struct PreviewState {
-    pub ui: Option<ui::PreviewUi>,
+    pub app_window: Option<ui::AppWindow>,
+    pub api: slint::Weak<ui::Api<'static>>,
     property_range_declarations: Option<ui::PropertyDeclarations>,
     /// The handle to the previewed component instance
     handle: Rc<RefCell<Option<slint_interpreter::ComponentInstance>>>,
@@ -257,7 +258,7 @@ fn apply_live_preview_data() {
     }
 }
 
-fn set_contents(url: &common::VersionedUrl, content: String) {
+fn set_contents(url: &i_slint_preview_protocol::VersionedUrl, content: String) {
     if let Some(current) = PREVIEW_STATE.with_borrow_mut(|preview_state| {
         if !preview_state.undo_redo_stack.check_set_contents_valid(url.url(), &content) {
             undo_redo::set_undo_redo_enabled(preview_state);
@@ -918,7 +919,10 @@ fn resize_selected_element_impl(
 
     properties::update_element_properties(
         &document_cache,
-        common::VersionedPosition::new(common::VersionedUrl::new(url, version), offset),
+        common::VersionedPosition::new(
+            i_slint_preview_protocol::VersionedUrl::new(url, version),
+            offset,
+        ),
         properties,
     )
     .map(|edit| (edit, format!("{op} element")))
@@ -1036,8 +1040,8 @@ fn change_style() {
 fn start_parsing() {
     set_status_text("Updating Preview...");
     PREVIEW_STATE.with_borrow_mut(|preview_state| {
-        if let Some(ui) = &preview_state.ui {
-            ui::set_diagnostics(ui, &[]);
+        if let Some(api) = preview_state.api.upgrade() {
+            ui::set_diagnostics(&api, &[]);
         }
     });
 }
@@ -1142,20 +1146,23 @@ fn finish_parsing(preview_url: &Url, previewed_component: Option<String>, succes
                 })
                 .unwrap_or_default();
 
-            if let Some(ui) = &preview_state.ui {
-                let win = i_slint_core::window::WindowInner::from_pub(ui.window()).window_adapter();
-                let palettes = ui::palette::collect_palette(&document_cache, preview_url, &win);
-                ui::palette::set_palette(ui, palettes);
-                ui::ui_set_uses_widgets(ui, uses_widgets);
-                ui::ui_set_known_components(ui, &preview_state.known_components, index);
+            if let Some(api) = preview_state.api.upgrade() {
+                if let Some(app_window) = &preview_state.app_window {
+                    let win = i_slint_core::window::WindowInner::from_pub(app_window.window())
+                        .window_adapter();
+                    let palettes = ui::palette::collect_palette(&document_cache, preview_url, &win);
+                    ui::palette::set_palette(&api, palettes);
+                }
+                ui::ui_set_uses_widgets(&api, uses_widgets);
+                ui::ui_set_known_components(&api, &preview_state.known_components, index);
                 let component = document_cache.get_document(preview_url).and_then(|doc| {
                     match previewed_component.as_ref() {
                         Some(c_id) => doc.inner_components.iter().find(|c| c.id == c_id).cloned(),
                         None => doc.last_exported_component(),
                     }
                 });
-                outline::reset_outline(ui, component);
-                ui::ui_set_preview_data(ui, preview_data, previewed_component);
+                outline::reset_outline(&api, component);
+                ui::ui_set_preview_data(&api, preview_data, previewed_component);
             }
         });
     }
@@ -1378,9 +1385,9 @@ pub fn load_preview(preview_component: PreviewComponent, behavior: LoadBehavior)
 }
 
 async fn parse_source(
-    config: common::PreviewConfig,
+    config: i_slint_preview_protocol::PreviewConfig,
     path: PathBuf,
-    version: common::SourceFileVersion,
+    version: i_slint_preview_protocol::SourceFileVersion,
     source_code: String,
     style: String,
     component: Option<String>,
@@ -1389,7 +1396,9 @@ async fn parse_source(
     ) -> core::pin::Pin<
         Box<
             dyn core::future::Future<
-                    Output = Option<std::io::Result<(common::SourceFileVersion, String)>>,
+                    Output = Option<
+                        std::io::Result<(i_slint_preview_protocol::SourceFileVersion, String)>,
+                    >,
                 >,
         >,
     > + 'static,
@@ -1491,12 +1500,11 @@ async fn reload_preview_impl(
     );
 
     let lsp = PREVIEW_STATE.with_borrow_mut(|preview_state| {
-        if let Some(ui) = &preview_state.ui {
-            let api = ui.global::<ui::Api>();
+        if let Some(api) = preview_state.api.upgrade() {
             if api.get_auto_clear_console() {
-                ui::log_messages::clear_log_messages_impl(ui);
+                ui::log_messages::clear_log_messages_impl(&api);
             }
-            ui::set_diagnostics(ui, &diagnostics);
+            ui::set_diagnostics(&api, &diagnostics);
         }
         preview_state.to_lsp.borrow().clone().unwrap()
     });
@@ -1511,13 +1519,14 @@ async fn reload_preview_impl(
 
 /// This sets up the preview area to show the ComponentInstance
 fn set_preview_factory(
-    ui: &ui::PreviewUi,
+    app_window: &ui::AppWindow,
+    api: &ui::Api<'_>,
     compiled: ComponentDefinition,
     callback: Box<dyn Fn(ComponentInstance)>,
     behavior: LoadBehavior,
 ) {
     // Ensure that any popups are closed as they are related to the old factory
-    i_slint_core::window::WindowInner::from_pub(ui.window()).close_all_popups();
+    i_slint_core::window::WindowInner::from_pub(app_window.window()).close_all_popups();
 
     compiled.set_debug_handler(
         |location, text| {
@@ -1543,9 +1552,9 @@ fn set_preview_factory(
             let text = text.to_string();
             let _ = slint::invoke_from_event_loop(move || {
                 PREVIEW_STATE.with_borrow(|preview_state| {
-                    if let Some(ui) = &preview_state.ui {
+                    if let Some(api) = preview_state.api.upgrade() {
                         ui::log_messages::append_log_message(
-                            ui,
+                            &api,
                             ui::LogMessageLevel::Debug,
                             location,
                             &text,
@@ -1565,7 +1574,6 @@ fn set_preview_factory(
         Some(instance)
     });
 
-    let api = ui.global::<ui::Api>();
     api.set_preview_area(factory);
     api.set_resize_to_preferred_size(behavior != LoadBehavior::Reload);
 }
@@ -1651,11 +1659,10 @@ fn convert_diagnostics(
 
 fn set_drop_mark(mark: &Option<drop_location::DropMark>) {
     PREVIEW_STATE.with_borrow(move |preview_state| {
-        let Some(ui) = &preview_state.ui else {
+        let Some(api) = preview_state.api.upgrade() else {
             return;
         };
 
-        let api = ui.global::<ui::Api>();
         if let Some(m) = mark {
             api.set_drop_mark(ui::DropMark {
                 x1: m.start.x,
@@ -1719,8 +1726,7 @@ fn set_selected_element(
                 .unwrap_or_default()
         };
 
-        if let Some(ui) = &preview_state.ui {
-            let api = ui.global::<ui::Api>();
+        if let Some(api) = preview_state.api.upgrade() {
             api.set_selection(ui::Selection {
                 highlight_index: selection.as_ref().map(|s| s.instance_index as i32).unwrap_or(-1),
                 layout_data: layout_kind,
@@ -1760,9 +1766,12 @@ fn set_selected_element(
                         ))
                     })
             {
-                let win = i_slint_core::window::WindowInner::from_pub(ui.window()).window_adapter();
-                let palettes = ui::palette::collect_palette(&document_cache, &uri, &win);
-                ui::palette::set_palette(ui, palettes);
+                if let Some(app_window) = &preview_state.app_window {
+                    let win = i_slint_core::window::WindowInner::from_pub(app_window.window())
+                        .window_adapter();
+                    let palettes = ui::palette::collect_palette(&document_cache, &uri, &win);
+                    ui::palette::set_palette(&api, palettes);
+                }
 
                 let in_layout = match parent_layout_kind {
                     ui::LayoutKind::None => properties::LayoutKind::None,
@@ -1770,11 +1779,14 @@ fn set_selected_element(
                     ui::LayoutKind::Vertical => properties::LayoutKind::VerticalBox,
                     ui::LayoutKind::Grid => properties::LayoutKind::GridLayout,
                 };
-                preview_state.property_range_declarations = Some(ui::ui_set_properties(
-                    ui,
-                    &document_cache,
-                    properties::query_properties(&uri, version, &selection, in_layout).ok(),
-                ));
+                if let Some(app_window) = &preview_state.app_window {
+                    preview_state.property_range_declarations = Some(ui::ui_set_properties(
+                        &api,
+                        app_window.window(),
+                        &document_cache,
+                        properties::query_properties(&uri, version, &selection, in_layout).ok(),
+                    ));
+                }
             }
         }
 
@@ -1826,8 +1838,7 @@ fn document_cache_from(preview_state: &PreviewState) -> Option<Rc<common::Docume
 
 fn set_show_preview_ui(show_preview_ui: bool) {
     PREVIEW_STATE.with_borrow(|preview_state| {
-        if let Some(ui) = &preview_state.ui {
-            let api = ui.global::<ui::Api>();
+        if let Some(api) = preview_state.api.upgrade() {
             api.set_show_preview_ui(show_preview_ui)
         }
     });
@@ -1835,8 +1846,7 @@ fn set_show_preview_ui(show_preview_ui: bool) {
 
 fn set_current_style(style: String) {
     PREVIEW_STATE.with_borrow(move |preview_state| {
-        if let Some(ui) = &preview_state.ui {
-            let api = ui.global::<ui::Api>();
+        if let Some(api) = preview_state.api.upgrade() {
             api.set_current_style(style.into())
         }
     });
@@ -1844,8 +1854,7 @@ fn set_current_style(style: String) {
 
 fn get_current_style() -> String {
     PREVIEW_STATE.with_borrow(|preview_state| -> String {
-        if let Some(ui) = &preview_state.ui {
-            let api = ui.global::<ui::Api>();
+        if let Some(api) = preview_state.api.upgrade() {
             api.get_current_style().as_str().to_string()
         } else {
             String::new()
@@ -1858,8 +1867,7 @@ fn set_status_text(text: &str) {
 
     i_slint_core::api::invoke_from_event_loop(move || {
         PREVIEW_STATE.with_borrow(|preview_state| {
-            if let Some(ui) = &preview_state.ui {
-                let api = ui.global::<ui::Api>();
+            if let Some(api) = preview_state.api.upgrade() {
                 api.set_status_text(text.into());
             }
         });
@@ -1878,17 +1886,18 @@ fn update_preview_area(
     PREVIEW_STATE.with_borrow_mut(move |preview_state| {
         preview_state.workspace_edit_sent = false;
 
-        let ui = preview_state.ui.as_ref().unwrap();
+        let app_window = preview_state.app_window.as_ref().unwrap();
+        let api = preview_state.api.upgrade().unwrap();
         let shared_handle = preview_state.handle.clone();
         let shared_document_cache = preview_state.document_cache.clone();
 
         if let Some(compiled) = compiled {
-            let api = ui.global::<ui::Api>();
             api.set_focus_previewed_element(behavior == LoadBehavior::BringWindowToFront);
             api.set_current_element(Default::default());
 
             set_preview_factory(
-                ui,
+                app_window,
+                &api,
                 compiled,
                 Box::new(move |instance| {
                     if let Some(rtl) = instance.definition().raw_type_loader() {
@@ -1908,9 +1917,9 @@ fn update_preview_area(
             );
         }
 
-        ui.show().and_then(|_| {
+        app_window.show().and_then(|_| {
             if matches!(behavior, LoadBehavior::BringWindowToFront) {
-                let window_inner = i_slint_core::window::WindowInner::from_pub(ui.window());
+                let window_inner = i_slint_core::window::WindowInner::from_pub(app_window.window());
                 if let Some(window_adapter_internal) =
                     window_inner.window_adapter().internal(i_slint_core::InternalToken)
                 {
