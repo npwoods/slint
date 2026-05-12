@@ -3807,7 +3807,7 @@ fn compile_builtin_function_call(
                 Expression::BoolLiteral(no_native),
                 condition,
                 visible,
-                ..
+                ..,
             ] = arguments
             else {
                 panic!("internal error: incorrect arguments to SetupMenuBar")
