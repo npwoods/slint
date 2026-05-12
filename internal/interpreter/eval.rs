@@ -979,6 +979,7 @@ fn call_builtin_function(
                     &menu_item_tree,
                     &enclosing_component,
                     None,
+					None
                 );
 
                 if component.access_window(|window| {
@@ -1450,7 +1451,9 @@ fn call_builtin_function(
                 Expression::PropertyReference(activated_nr),
                 Expression::ElementReference(item_tree_root),
                 Expression::BoolLiteral(no_native),
-                rest @ ..,
+				condition,
+				visible,
+                ..,
             ] = arguments
             else {
                 panic!("internal error: incorrect argument count to SetupMenuBar")
@@ -1461,7 +1464,8 @@ fn call_builtin_function(
             let menu_item_tree = crate::dynamic_item_tree::make_menu_item_tree(
                 &menu_item_tree,
                 &component,
-                rest.first(),
+				Some(condition),
+				Some(visible)
             );
 
             let window_adapter = component.window_adapter();
