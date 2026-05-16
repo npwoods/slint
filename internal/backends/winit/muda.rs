@@ -217,6 +217,46 @@ impl MudaAdapter {
                 if vtable::VRc::borrow(&menu_tree).visible() {
                     vtable::VRc::borrow(&menu_tree).sub_menu(None, &mut menu_entries);
                 }
+
+                if menu_entries.is_empty() && muda_type == MudaType::Menubar {
+                    self.menu = None;
+                } else if let Some(menu) = self.menu.as_ref() {
+                    while menu.remove_at(0).is_some() {}
+                } else {
+                    self.menu = Some(muda::Menu::new());
+
+                    if muda_type == MudaType::Menubar
+                        && let Some(menu) = self.menu.as_ref()
+                    {
+                        #[cfg(target_os = "windows")]
+                        if let RawWindowHandle::Win32(handle) =
+                            winit_window.window_handle().unwrap().as_raw()
+                        {
+                            let theme = match winit_window.theme() {
+                                Some(winit::window::Theme::Dark) => muda::MenuTheme::Dark,
+                                Some(winit::window::Theme::Light) => muda::MenuTheme::Light,
+                                None => muda::MenuTheme::Auto,
+                            };
+                            unsafe {
+                                menu.init_for_hwnd_with_theme(handle.hwnd.get(), theme).unwrap()
+                            };
+                        }
+
+                        #[cfg(target_os = "macos")]
+                        {
+                            menu.init_for_nsapp();
+                        }
+                    }
+                }
+
+                // Until we have menu roles, always create an app menu on macOS.
+                #[cfg(target_os = "macos")]
+                if matches!(muda_type, MudaType::Menubar)
+                    && let Some(menu) = self.menu.as_ref()
+                {
+                    create_default_app_menu(menu).unwrap();
+                }
+
                 let window_id = u64::from(winit_window.id()).to_string();
                 if let Some(menu) = self.menu.as_ref() {
                     for e in menu_entries {
