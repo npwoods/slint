@@ -51,6 +51,7 @@ pub struct MenuFromItemTree {
     root: RefCell<SharedVector<MenuEntry>>,
     next_id: Cell<usize>,
     tracker: Pin<Box<PropertyTracker>>,
+    #[allow(dead_code)]
     condition: Option<Pin<Box<Property<bool>>>>,
     visible: Option<Pin<Box<Property<bool>>>>,
 }

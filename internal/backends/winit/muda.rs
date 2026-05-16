@@ -214,8 +214,8 @@ impl MudaAdapter {
         if let Some(menu_tree) = menu_tree {
             let mut build_menu = || {
                 let mut menu_entries = Default::default();
-                if vtable::VRc::borrow(&menubar).visible() {
-                    vtable::VRc::borrow(&menubar).sub_menu(None, &mut menu_entries);
+                if vtable::VRc::borrow(&menu_tree).visible() {
+                    vtable::VRc::borrow(&menu_tree).sub_menu(None, &mut menu_entries);
                 }
                 let window_id = u64::from(winit_window.id()).to_string();
                 if let Some(menu) = self.menu.as_ref() {
