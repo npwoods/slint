@@ -169,7 +169,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 |handler| handler.window_event(
                     event_loop,
                     window_id,
-                    winit_window.as_ref().map(|w| &**w),
+                    winit_window.as_deref(),
                     window.as_ref().map(|w| w.window()),
                     &event
                 ));
