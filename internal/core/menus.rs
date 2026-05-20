@@ -90,21 +90,14 @@ impl MenuFromItemTree {
             root: Default::default(),
             tracker: Box::pin(PropertyTracker::default()),
             next_id: 0.into(),
-<<<<<<< HEAD
-            condition: cond_prop,
-            visible: visible_prop,
-=======
             condition,
             visible,
->>>>>>> master
         }
     }
 
     fn update_shadow_tree(&self) {
         self.tracker.as_ref().evaluate_if_dirty(|| {
             self.item_cache.replace(Default::default());
-<<<<<<< HEAD
-=======
             if let Some(condition) = &self.condition
                 && !condition.as_ref().get()
             {
@@ -112,7 +105,6 @@ impl MenuFromItemTree {
                 return;
             }
             crate::item_tree::ensure_item_tree_instantiated(&self.item_tree);
->>>>>>> master
             self.root.replace(
                 self.update_shadow_tree_recursive(&ItemRc::new_root(self.item_tree.clone())),
             );
@@ -205,11 +197,7 @@ impl Menu for MenuFromItemTree {
     }
 
     fn visible(&self) -> bool {
-<<<<<<< HEAD
-        self.visible.as_ref().map_or(true, |v| v.as_ref().get())
-=======
         self.visible.as_ref().is_none_or(|v| v.as_ref().get())
->>>>>>> master
     }
 }
 
