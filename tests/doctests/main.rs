@@ -5,6 +5,22 @@
 
 #[cfg(test)]
 fn do_test(snippet: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Strip rustdoc-style `# ` prefix from hidden lines
+    let snippet: String = snippet
+        .lines()
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix("# ") {
+                rest
+            } else if line == "#" {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let snippet = snippet.as_str();
+
     let must_wrap = !snippet.contains("component ") && !snippet.contains("global ");
 
     let code = if must_wrap {
@@ -12,6 +28,7 @@ fn do_test(snippet: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> 
             "import {{
                 Button, CheckBox, ComboBox, DatePickerPopup, LineEdit, ProgressIndicator, ScrollView,
                 Slider, SpinBox, Spinner, StandardButton, StandardListView, StandardTableView,
+                RadioGroup,
                 Switch, TabWidget, TextEdit, TimePickerPopup}} from\"std-widgets.slint\";
             component Example {{\n{snippet}\n}}"
         )

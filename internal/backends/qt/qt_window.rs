@@ -1,10 +1,11 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// cSpell: ignore frameless qbrush qpointf qreal qwidgetsize svgz
+// cSpell: ignore frameless qbrush qimage qpointf qreal qvariant qwidgetsize svgz Nesw qsize qstring
 
 use cpp::*;
 use i_slint_common::sharedfontique::HashedBlob;
+use i_slint_core::DataTransfer;
 use i_slint_core::graphics::rendering_metrics_collector::{
     RenderingMetrics, RenderingMetricsCollector,
 };
@@ -21,8 +22,8 @@ use i_slint_core::item_tree::{
     ItemTreeRc, ItemTreeRef, ItemTreeRefPin, ItemTreeWeak, ParentItemTraversalMode,
 };
 use i_slint_core::items::{
-    self, ColorScheme, FillRule, ImageRendering, ItemRc, ItemRef, Layer, LineCap, LineJoin,
-    MouseCursor, Opacity, PointerEventButton, RenderingResult, TextWrap,
+    self, DragAction, DropEvent, FillRule, ImageRendering, ItemRc, ItemRef, Layer, LineCap,
+    LineJoin, MouseCursor, Opacity, PointerEventButton, RenderingResult, TextWrap,
 };
 use i_slint_core::layout::Orientation;
 use i_slint_core::lengths::{
@@ -30,9 +31,10 @@ use i_slint_core::lengths::{
     PhysicalPx, ScaleFactor, logical_size_from_api,
 };
 use i_slint_core::platform::{PlatformError, WindowEvent};
+use i_slint_core::string::ToSharedString;
 use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer, fontique, parley};
 use i_slint_core::window::{WindowAdapter, WindowAdapterInternal, WindowInner};
-use i_slint_core::{ImageInner, Property, SharedString};
+use i_slint_core::{ImageInner, SharedString};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,7 +44,6 @@ use std::rc::{Rc, Weak};
 
 use crate::key_generated;
 use i_slint_core::renderer::Renderer;
-use std::cell::OnceCell;
 
 cpp! {{
     // Note: Do not include <QtWidgets> to avoid inclusion of gl.h (see #10989).
@@ -54,9 +55,14 @@ cpp! {{
     #include <QtCore/QPointer>
     #include <QtCore/QThread>
     #include <QtCore/QTimer>
+    #include <QtCore/QMimeData>
     #include <QtGui/QAccessible>
     #include <QtGui/QCursor>
     #include <QtGui/QDesktopServices>
+    #include <QtGui/QDragEnterEvent>
+    #include <QtGui/QDragLeaveEvent>
+    #include <QtGui/QDragMoveEvent>
+    #include <QtGui/QDropEvent>
     #include <QtGui/QIconEngine>
     #include <QtGui/QImageReader>
     #include <QtGui/QPaintEngine>
@@ -119,6 +125,7 @@ cpp! {{
             // to draw the window background which is set on the palette.
             // (But the window background might not be opaque)
             setAttribute(Qt::WA_NoSystemBackground, false);
+            setAcceptDrops(true);
             grabGesture(Qt::PinchGesture);
         }
 
@@ -177,7 +184,7 @@ cpp! {{
             rust!(Slint_mousePressEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint", button: u32 as "int" ] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
                 let button = from_qt_button(button);
-                rust_window.mouse_event(MouseEvent::Pressed{ position, button, click_count: 0, is_touch: false })
+                rust_window.mouse_event(MouseEvent::Pressed{ position, button, click_count: 0, touch_finger_id: 0 })
             });
         }
         void mouseReleaseEvent(QMouseEvent *event) override {
@@ -207,7 +214,7 @@ cpp! {{
             rust!(Slint_mouseReleaseEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint", button: u32 as "int" ] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
                 let button = from_qt_button(button);
-                rust_window.mouse_event(MouseEvent::Released{ position, button, click_count: 0, is_touch: false })
+                rust_window.mouse_event(MouseEvent::Released{ position, button, click_count: 0, touch_finger_id: 0 })
             });
         }
         void mouseMoveEvent(QMouseEvent *event) override {
@@ -216,7 +223,7 @@ cpp! {{
                 return;
             rust!(Slint_mouseMoveEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint"] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
-                rust_window.mouse_event(MouseEvent::Moved{position, is_touch: false})
+                rust_window.mouse_event(MouseEvent::Moved{position, touch_finger_id: 0})
             });
         }
         void wheelEvent(QWheelEvent *event) override {
@@ -252,6 +259,66 @@ cpp! {{
             });
         }
 
+        // Translates a QDragMoveEvent (DragEnter is a subclass) into Slint's MouseEvent::DragMove
+        // and reports the negotiated drop action back to Qt. `is_drop` switches to MouseEvent::Drop.
+        Qt::DropAction dispatchDragEvent(QDropEvent *event, bool is_drop) {
+            if (!rust_window)
+                return Qt::IgnoreAction;
+            const QMimeData *mime = event->mimeData();
+            QString text = mime->hasText() ? mime->text() : QString();
+            QImage image = mime->hasImage() ? qvariant_cast<QImage>(mime->imageData()) : QImage();
+    #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            QPoint pos = event->position().toPoint();
+    #else
+            QPoint pos = event->pos();
+    #endif
+            int allowed = int(event->possibleActions());
+            int proposed = int(event->proposedAction());
+            int chosen = rust!(Slint_dragEvent [
+                rust_window: &QtWindow as "void*",
+                pos: qttypes::QPoint as "QPoint",
+                text: qttypes::QString as "QString",
+                image: qttypes::QImage as "QImage",
+                allowed: u32 as "int",
+                proposed: u32 as "int",
+                is_drop: bool as "bool"
+            ] -> u32 as "int" {
+                rust_window.drag_event(pos, text.clone(), image.clone(), allowed, proposed, is_drop)
+            });
+            return Qt::DropAction(chosen);
+        }
+
+        void dragEnterEvent(QDragEnterEvent *event) override {
+            // Accept unconditionally: ignoring here kills the whole gesture for this widget,
+            // so a DropArea further along the cursor's path would never see the drag. Per-
+            // position feedback is carried by setDropAction (Qt::IgnoreAction = no-drop cursor).
+            event->setDropAction(dispatchDragEvent(event, false));
+            event->accept();
+        }
+
+        void dragMoveEvent(QDragMoveEvent *event) override {
+            event->setDropAction(dispatchDragEvent(event, false));
+            event->accept();
+        }
+
+        void dragLeaveEvent(QDragLeaveEvent *) override {
+            if (!rust_window)
+                return;
+            rust!(Slint_dragLeaveEvent [rust_window: &QtWindow as "void*"] {
+                rust_window.mouse_event(MouseEvent::Exit)
+            });
+        }
+
+        void dropEvent(QDropEvent *event) override {
+            Qt::DropAction chosen = dispatchDragEvent(event, true);
+            if (chosen != Qt::IgnoreAction) {
+                event->setDropAction(chosen);
+                event->accept();
+            } else {
+                event->ignore();
+            }
+        }
+
         void keyPressEvent(QKeyEvent *event) override {
             if (!rust_window)
                 return;
@@ -285,17 +352,6 @@ cpp! {{
                 bool active = isActiveWindow();
                 rust!(Slint_updateWindowActivation [rust_window: &QtWindow as "void*", active: bool as "bool"] {
                     rust_window.window.dispatch_event(WindowEvent::WindowActiveChanged(active));
-                });
-            } else if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) {
-                bool dark_color_scheme = qApp->palette().color(QPalette::Window).valueF() < 0.5;
-                rust!(Slint_updateWindowDarkColorScheme [rust_window: &QtWindow as "void*", dark_color_scheme: bool as "bool"] {
-                    if let Some(ds) = rust_window.color_scheme.get() {
-                        ds.as_ref().set(if dark_color_scheme {
-                            ColorScheme::Dark
-                        } else {
-                            ColorScheme::Light
-                        });
-                    }
                 });
             }
 
@@ -687,6 +743,27 @@ fn from_qt_button(qt_button: u32) -> PointerEventButton {
     }
 }
 
+fn qt_drop_action_to_slint(qt_action: u32) -> DragAction {
+    match qt_action {
+        key_generated::Qt_DropAction_CopyAction => DragAction::Copy,
+        // Qt's TargetMoveAction is a Move variant on internal moves.
+        key_generated::Qt_DropAction_MoveAction | key_generated::Qt_DropAction_TargetMoveAction => {
+            DragAction::Move
+        }
+        key_generated::Qt_DropAction_LinkAction => DragAction::Link,
+        _ => DragAction::None,
+    }
+}
+
+fn slint_drag_action_to_qt(action: DragAction) -> u32 {
+    match action {
+        DragAction::Copy => key_generated::Qt_DropAction_CopyAction,
+        DragAction::Move => key_generated::Qt_DropAction_MoveAction,
+        DragAction::Link => key_generated::Qt_DropAction_LinkAction,
+        _ => key_generated::Qt_DropAction_IgnoreAction,
+    }
+}
+
 /// Given a position offset and an object of a given type that has x,y,width,height properties,
 /// create a QRectF that fits it.
 macro_rules! check_geometry {
@@ -1048,7 +1125,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
     }
 
     fn save_state(&mut self) {
-        // Don't add any additinoal calls here without adjusting `save_state_and_pixel_align_origin()`.
+        // Don't add any additional calls here without adjusting `save_state_and_pixel_align_origin()`.
         self.painter.save()
     }
 
@@ -1088,8 +1165,43 @@ impl ItemRenderer for QtItemRenderer<'_> {
         );
     }
 
-    fn draw_image_direct(&mut self, _image: i_slint_core::graphics::Image) {
-        todo!()
+    fn draw_image_direct(&mut self, image: i_slint_core::graphics::Image) {
+        let source_size = image.size();
+        if source_size.is_empty() {
+            return;
+        }
+        let scale_factor = ScaleFactor::new(self.scale_factor());
+        let target_size = LogicalSize::from_untyped(source_size.cast()) * scale_factor;
+        let image_inner: &ImageInner = (&image).into();
+        // Rasterize scalable sources at scale_factor so SVGs are crisp on high-DPI displays
+        // (matches femtovg/skia draw_image_direct).
+        let pixmap_size = image_inner.is_svg().then(|| target_size.cast());
+        let Some(pixmap) = image_to_pixmap(image_inner, pixmap_size) else { return };
+
+        let pixmap_size = pixmap.size();
+        let source_rect = qttypes::QRectF {
+            x: 0.,
+            y: 0.,
+            width: pixmap_size.width as _,
+            height: pixmap_size.height as _,
+        };
+        let dest_rect = qttypes::QRectF {
+            x: 0.,
+            y: 0.,
+            width: target_size.width as _,
+            height: target_size.height as _,
+        };
+        let painter: &mut QPainterPtr = &mut self.painter;
+        cpp! { unsafe [
+                painter as "QPainterPtr*",
+                pixmap as "QPixmap",
+                source_rect as "QRectF",
+                dest_rect as "QRectF"] {
+            (*painter)->save();
+            (*painter)->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            (*painter)->drawPixmap(dest_rect, pixmap, source_rect);
+            (*painter)->restore();
+        }};
     }
 
     fn window(&self) -> &i_slint_core::window::WindowInner {
@@ -1450,6 +1562,34 @@ pub(crate) fn image_to_pixmap(
     shared_image_buffer_to_pixmap(&image.render_to_buffer(source_size)?)
 }
 
+/// Converts a Qt image to a Slint `SharedPixelBuffer<Rgba8Pixel>`, repacking each
+/// scan line so the result has no row padding. Returns `None` for empty images.
+pub(crate) fn qimage_to_shared_pixel_buffer(
+    mut image: qttypes::QImage,
+) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let size = image.size();
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+    let bytes = cpp!(unsafe [mut image as "QImage"] -> qttypes::QByteArray as "QByteArray" {
+        image.convertTo(QImage::Format_RGBA8888);
+        const int row_bytes = image.width() * 4;
+        QByteArray packed;
+        packed.resize(row_bytes * image.height());
+        // QImage may pad scan lines for alignment, so we can't just copy sizeInBytes()
+        // — pack row-by-row into a tight width*height*4 buffer.
+        for (int y = 0; y < image.height(); ++y) {
+            memcpy(packed.data() + y * row_bytes, image.constScanLine(y), row_bytes);
+        }
+        return packed;
+    });
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        bytes.to_slice(),
+        size.width,
+        size.height,
+    ))
+}
+
 impl QtItemRenderer<'_> {
     fn draw_image_impl(
         &mut self,
@@ -1806,8 +1946,6 @@ pub struct QtWindow {
 
     tree_structure_changed: RefCell<bool>,
 
-    color_scheme: OnceCell<Pin<Box<Property<ColorScheme>>>>,
-
     // Last icon image set on the window
     window_icon_cache_key: RefCell<Option<ImageCacheKey>>,
 
@@ -1846,7 +1984,6 @@ impl QtWindow {
                 cache: Default::default(),
                 text_layout_cache: Default::default(),
                 tree_structure_changed: RefCell::new(false),
-                color_scheme: Default::default(),
                 window_icon_cache_key: Default::default(),
                 parent,
             }
@@ -1868,7 +2005,7 @@ impl QtWindow {
     fn paint_event(&self, painter: QPainterPtr) {
         let runtime_window = WindowInner::from_pub(&self.window);
         let window_adapter = runtime_window.window_adapter();
-        runtime_window.draw_contents(|components| {
+        runtime_window.draw_contents(|components, post_render| {
             i_slint_core::animations::update_animations();
             self.text_layout_cache.clear_cache_if_scale_factor_changed(&self.window);
 
@@ -1891,6 +2028,8 @@ impl QtWindow {
                 }
             }
 
+            post_render(&mut renderer);
+
             if let Some(collector) = &*self.rendering_metrics_collector.borrow() {
                 let metrics = renderer.metrics.clone();
                 collector.measure_frame_rendered(&mut renderer, metrics);
@@ -1901,7 +2040,7 @@ impl QtWindow {
             }
         });
 
-        // Update the accessibility tree (if the component tree has changed)
+        // Update the accessibility tree (if the component tree has changed).
         if self.tree_structure_changed.replace(false) {
             let widget_ptr = self.widget_ptr();
             cpp! { unsafe [widget_ptr as "QWidget*"] {
@@ -1922,6 +2061,52 @@ impl QtWindow {
     fn mouse_event(&self, event: MouseEvent) {
         WindowInner::from_pub(&self.window).process_mouse_input(event);
         timer_event();
+    }
+
+    /// Dispatch a Qt drag/drop event. `allowed` is `event->possibleActions()` and
+    /// `proposed` is `event->proposedAction()` as `Qt::DropAction` bitmask values
+    /// (see `key_generated::Qt_DropAction_*`). `image` is the source's image payload
+    /// when one is offered, or a default (null) `QImage` otherwise. Returns the
+    /// negotiated `Qt::DropAction` (`Qt_DropAction_IgnoreAction` when no `DropArea`
+    /// accepted) for the caller to feed back into `QDropEvent::setDropAction` +
+    /// `accept()`.
+    fn drag_event(
+        &self,
+        pos: qttypes::QPoint,
+        text: qttypes::QString,
+        image: qttypes::QImage,
+        allowed: u32,
+        proposed: u32,
+        is_drop: bool,
+    ) -> u32 {
+        let position = i_slint_core::api::LogicalPosition::new(pos.x as f32, pos.y as f32);
+        let allow_copy = allowed & key_generated::Qt_DropAction_CopyAction != 0;
+        let allow_move = allowed
+            & (key_generated::Qt_DropAction_MoveAction
+                | key_generated::Qt_DropAction_TargetMoveAction)
+            != 0;
+        let allow_link = allowed & key_generated::Qt_DropAction_LinkAction != 0;
+        let mut data = DataTransfer::default();
+        let text = text.to_shared_string();
+        if !text.is_empty() {
+            data.set_plaintext(text);
+        }
+        if let Some(buffer) = qimage_to_shared_pixel_buffer(image) {
+            data.set_image(i_slint_core::graphics::Image::from_rgba8(buffer).into());
+        }
+        let drop_event = DropEvent {
+            data,
+            position,
+            allow_copy,
+            allow_move,
+            allow_link,
+            proposed_action: qt_drop_action_to_slint(proposed),
+        };
+        let mouse_event =
+            if is_drop { MouseEvent::Drop(drop_event) } else { MouseEvent::DragMove(drop_event) };
+        let chosen = WindowInner::from_pub(&self.window).process_mouse_input(mouse_event);
+        timer_event();
+        chosen.map(slint_drag_action_to_qt).unwrap_or(key_generated::Qt_DropAction_IgnoreAction)
     }
 
     fn key_event(&self, key: i32, text: qttypes::QString, released: bool, repeat: bool) {
@@ -2349,32 +2534,6 @@ impl WindowAdapterInternal for QtWindow {
         }
     }
 
-    fn color_scheme(&self) -> ColorScheme {
-        let ds = self.color_scheme.get_or_init(|| {
-            Box::pin(Property::new(
-                if cpp! {unsafe [] -> bool as "bool" {
-                    return qApp->palette().color(QPalette::Window).valueF() < 0.5;
-                }} {
-                    ColorScheme::Dark
-                } else {
-                    ColorScheme::Light
-                },
-            ))
-        });
-        ds.as_ref().get()
-    }
-
-    fn accent_color(&self) -> i_slint_core::graphics::Color {
-        let argb = cpp! {unsafe [] -> u32 as "QRgb" {
-            #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-                return qApp->palette().color(QPalette::Accent).rgba();
-            #else
-                return qApp->palette().color(QPalette::Highlight).rgba();
-            #endif
-        }};
-        i_slint_core::graphics::Color::from_argb_encoded(argb)
-    }
-
     fn bring_to_front(&self) -> Result<(), i_slint_core::platform::PlatformError> {
         let widget_ptr = self.widget_ptr();
         cpp! {unsafe [widget_ptr as "QWidget*"] {
@@ -2453,7 +2612,7 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
         data: &'static [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        ctx.font_context().borrow_mut().collection.register_fonts(data.to_vec().into(), None);
+        ctx.font_context().borrow_mut().register_static_font(data);
         Ok(())
     }
 
@@ -2499,24 +2658,10 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
 
     fn take_snapshot(&self) -> Result<SharedPixelBuffer<Rgba8Pixel>, PlatformError> {
         let widget_ptr = self.widget_ptr();
-
-        let size = cpp! {unsafe [widget_ptr as "QWidget*"] -> qttypes::QSize as "QSize" {
-            return widget_ptr->size();
+        let image = cpp! {unsafe [widget_ptr as "QWidget*"] -> qttypes::QImage as "QImage" {
+            return widget_ptr->grab().toImage();
         }};
-
-        let rgba8_data = cpp! {unsafe [widget_ptr as "QWidget*"] -> qttypes::QByteArray as "QByteArray" {
-            QPixmap pixmap = widget_ptr->grab();
-            QImage image = pixmap.toImage();
-            image.convertTo(QImage::Format_ARGB32);
-            return QByteArray(reinterpret_cast<const char *>(image.constBits()), image.sizeInBytes());
-        }};
-
-        let buffer = i_slint_core::graphics::SharedPixelBuffer::<i_slint_core::graphics::Rgba8Pixel>::clone_from_slice(
-            rgba8_data.to_slice(),
-            size.width,
-            size.height,
-        );
-        Ok(buffer)
+        qimage_to_shared_pixel_buffer(image).ok_or_else(|| "widget has zero size".into())
     }
 
     fn supports_transformations(&self) -> bool {

@@ -1,10 +1,13 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore ngettext npgettext pgettext unraisable
 use std::cell::{Cell, RefCell};
 
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::gen_stub_pyfunction};
 
+mod data_transfer;
+mod geometry;
 mod image;
 mod interpreter;
 mod language;
@@ -18,6 +21,7 @@ mod brush;
 mod errors;
 mod keys;
 mod models;
+mod styled_text;
 mod timer;
 mod value;
 use i_slint_core::translations::Translator;
@@ -182,7 +186,11 @@ fn slint(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<timer::PyTimer>()?;
     m.add_class::<brush::PyColor>()?;
     m.add_class::<brush::PyBrush>()?;
+    m.add_class::<geometry::PyLogicalPosition>()?;
+    m.add_class::<geometry::PyLogicalSize>()?;
     m.add_class::<keys::PyKeys>()?;
+    m.add_class::<data_transfer::PyDataTransfer>()?;
+    m.add_class::<styled_text::PyStyledText>()?;
     m.add_class::<models::PyModelBase>()?;
     m.add_class::<value::PyStruct>()?;
     m.add_class::<async_adapter::AsyncAdapter>()?;

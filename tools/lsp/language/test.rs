@@ -9,9 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::common;
-use crate::language::convert_diagnostics;
-use crate::language::load_document_impl;
+use crate::{
+    common,
+    common::SwitchableLspToPreview,
+    language::{convert_diagnostics, load_document_impl},
+};
 
 use super::Context;
 
@@ -31,8 +33,9 @@ pub fn mock_context() -> Context {
         #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
         to_show: None,
         open_urls: HashSet::new(),
-        to_preview: Rc::new(common::DummyLspToPreview::default()),
+        to_preview: Rc::new(SwitchableLspToPreview::with_one(common::DummyLspToPreview::default())),
         pending_recompile: Default::default(),
+        preview_to_lsp_sender: tokio::sync::mpsc::unbounded_channel().0,
     }
 }
 
@@ -74,8 +77,11 @@ pub fn loaded_document_cache_with_file_name(
         init_param: Default::default(),
         to_show: None,
         open_urls: Default::default(),
-        to_preview: std::rc::Rc::new(common::DummyLspToPreview::default()),
+        to_preview: std::rc::Rc::new(SwitchableLspToPreview::with_one(
+            common::DummyLspToPreview::default(),
+        )),
         pending_recompile: Default::default(),
+        preview_to_lsp_sender: tokio::sync::mpsc::unbounded_channel().0,
     };
     let (extra_files, diag) =
         spin_on::spin_on(load_document_impl(&mut ctx, content, url.clone(), Some(42)));
@@ -371,5 +377,16 @@ mod missing_imports {
             ctx.pending_recompile.contains(&main_url),
             "main.slint should be scheduled for recompilation when dep.slint is created outside the editor"
         );
+    }
+
+    #[test]
+    fn watch_set_tracks_missing_imports() {
+        let (ctx, dir, main_url) = load_document_with_missing_import();
+
+        let dep_url = Url::from_file_path(dir.join("dep.slint")).unwrap();
+        let watch_urls = ctx.document_cache.all_urls_to_watch();
+
+        assert!(watch_urls.contains(&main_url), "main.slint should stay in the watch set");
+        assert!(watch_urls.contains(&dep_url), "missing imports should stay in the watch set");
     }
 }

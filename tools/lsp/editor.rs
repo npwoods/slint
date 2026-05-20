@@ -12,12 +12,13 @@ use i_slint_preview_protocol::{
     LspToPreviewMessage, PreviewToLspMessage, SourceFileVersion, VersionedUrl,
 };
 use lsp_server::{Message, RequestId};
-use lsp_types::{MessageType, Url, notification::Notification};
+use lsp_types::{FileChangeType, MessageType, Url, notification::Notification};
+use slint_interpreter::{FileChangeKind, FileWatcher, WatchEvent};
 
 use crate::{
-    common::{self, LspToPreview, Result, document_cache::OpenImportCallback},
+    common::{self, Result, document_cache::OpenImportCallback},
     language, preview,
-    preview::connector::EmbeddedLspToPreview,
+    preview::connector::{EmbeddedLspToPreview, SwitchableLspToPreview},
 };
 
 pub fn editor_main() {
@@ -197,18 +198,22 @@ fn start_lsp_thread(
 
 fn bridge_crossbeam_to_tokio(
     from_preview: crossbeam_channel::Receiver<PreviewToLspMessage>,
-) -> tokio::sync::mpsc::UnboundedReceiver<PreviewToLspMessage> {
+) -> (
+    tokio::sync::mpsc::UnboundedSender<PreviewToLspMessage>,
+    tokio::sync::mpsc::UnboundedReceiver<PreviewToLspMessage>,
+) {
     let (from_preview_tx, from_preview_rx) =
         tokio::sync::mpsc::unbounded_channel::<PreviewToLspMessage>();
+    let inner_from_preview_tx = from_preview_tx.clone();
     std::thread::spawn(move || {
         while let Ok(msg) = from_preview.recv() {
-            if from_preview_tx.send(msg).is_err() {
+            if inner_from_preview_tx.send(msg).is_err() {
                 break;
             }
         }
         tracing::debug!("Preview->LSP crossbeam adapter thread exited");
     });
-    from_preview_rx
+    (from_preview_tx, from_preview_rx)
 }
 
 async fn lsp_main(
@@ -219,10 +224,19 @@ async fn lsp_main(
 ) -> Result<()> {
     use crate::common::document_cache::CompilerConfiguration;
 
-    let mut from_preview_rx = bridge_crossbeam_to_tokio(from_preview);
+    let (from_preview_tx, mut from_preview_rx) = bridge_crossbeam_to_tokio(from_preview);
+    let (file_watcher_tx, mut file_watcher_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut file_watcher = FileWatcher::start(
+        move |event| {
+            if file_watcher_tx.send(event).is_err() {
+                tracing::debug!("Ignoring file watcher event after editor shutdown");
+            }
+        },
+        move |err| tracing::warn!("File watcher error: {err}"),
+    )?;
 
     // Wrap to_preview in Rc for sharing with the import callback and Context
-    let to_preview: Rc<dyn LspToPreview> = Rc::new(to_preview);
+    let to_preview = Rc::new(SwitchableLspToPreview::with_one(to_preview));
 
     let open_import_callback = {
         let to_preview = Rc::clone(&to_preview);
@@ -230,7 +244,7 @@ async fn lsp_main(
             let to_preview = Rc::clone(&to_preview);
             Box::pin(async move {
                 tracing::trace!("Importing file: {}", path);
-                let contents = std::fs::read_to_string(&path);
+                let contents = std::fs::read(&path);
                 if let Ok(url) = Url::from_file_path(&path) {
                     if let Ok(contents) = &contents {
                         to_preview.send(&LspToPreviewMessage::SetContents {
@@ -241,7 +255,11 @@ async fn lsp_main(
                         to_preview.send(&LspToPreviewMessage::ForgetFile { url });
                     }
                 }
-                Some(contents.map(|c| (None, c)))
+                Some(
+                    contents
+                        .and_then(|c| String::from_utf8(c).map_err(std::io::Error::other))
+                        .map(|c| (None, c)),
+                )
             })
                 as Pin<
                     Box<dyn Future<Output = Option<std::io::Result<(SourceFileVersion, String)>>>>,
@@ -265,14 +283,17 @@ async fn lsp_main(
         open_urls: Default::default(),
         to_preview,
         pending_recompile: Default::default(),
+        preview_to_lsp_sender: from_preview_tx,
     };
 
     // Load the initial document through the compiler. This triggers the import
     // callback for all transitive dependencies, sending their contents to the preview.
     let full_path = std::fs::canonicalize(&cli.file)
         .map_err(|err| format!("Failed to determine full path for {}: {err}", cli.file))?;
+    let root_path = full_path.clone();
     let url = Url::from_file_path(full_path)
         .map_err(|_| format!("Failed to convert {} to URL!", cli.file))?;
+    file_watcher.update_watched_paths(std::iter::once(root_path.clone()))?;
     language::show_preview(
         i_slint_preview_protocol::PreviewComponent { url: url.clone(), component: cli.component },
         &mut ctx,
@@ -283,12 +304,19 @@ async fn lsp_main(
     language::reload_document(&mut ctx, url)
         .await
         .map_err(|err| format!("Failed to load file: {}: {err}", cli.file))?;
+    sync_file_watcher(&mut file_watcher, &ctx, &root_path)?;
 
     const RECOMPILE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
     loop {
         let recompile_idle_timeout =
             if ctx.pending_recompile.is_empty() { Duration::MAX } else { RECOMPILE_IDLE_TIMEOUT };
         tokio::select! {
+            watcher_event = file_watcher_rx.recv() => {
+                match watcher_event {
+                    Some(event) => trigger_editor_file_watcher(&mut ctx, event).await?,
+                    None => break Err("File watcher channel closed".into()),
+                }
+            }
             msg = from_preview_rx.recv() => {
                 match msg {
                     Some(msg) => handle_preview_message(msg, &ctx),
@@ -307,17 +335,60 @@ async fn lsp_main(
                         tracing::error!("Failed document reload: {err}");
                     }
                 }
+                sync_file_watcher(&mut file_watcher, &ctx, &root_path)?;
             }
         }
     }
 }
 
+async fn trigger_editor_file_watcher(
+    ctx: &mut language::Context,
+    WatchEvent { path, kind }: WatchEvent,
+) -> Result<()> {
+    let Ok(url) = Url::from_file_path(&path) else {
+        tracing::debug!("Ignoring file watcher event for non-file path: {}", path.display());
+        return Ok(());
+    };
+
+    language::trigger_file_watcher(ctx, url, lsp_file_change_type(kind)).await
+}
+
+fn lsp_file_change_type(kind: FileChangeKind) -> FileChangeType {
+    match kind {
+        FileChangeKind::Created => FileChangeType::CREATED,
+        FileChangeKind::Changed => FileChangeType::CHANGED,
+        FileChangeKind::Deleted => FileChangeType::DELETED,
+    }
+}
+
+fn sync_file_watcher(
+    watcher: &mut FileWatcher,
+    ctx: &language::Context,
+    root_path: &std::path::Path,
+) -> Result<()> {
+    watcher.update_watched_paths(
+        std::iter::once(root_path.to_path_buf()).chain(
+            ctx.document_cache
+                .all_urls_to_watch()
+                .into_iter()
+                // filter out builtins
+                .filter(|url| url.scheme() == "file")
+                .filter_map(|url| common::uri_to_file(&url)),
+        ),
+    )?;
+    Ok(())
+}
+
 fn handle_preview_message(msg: PreviewToLspMessage, ctx: &language::Context) {
     use PreviewToLspMessage::*;
     match &msg {
-        RequestState { .. } => {
-            tracing::debug!("Preview requested state, re-sending all documents");
-            language::send_state_to_preview(ctx);
+        RequestState { files } => {
+            if files.is_empty() {
+                tracing::debug!("Preview requested state, re-sending all documents");
+                language::send_state_to_preview(ctx);
+            } else {
+                language::send_files_to_preview(ctx, files);
+            }
         }
         SendShowMessage { message } => {
             match message.typ {

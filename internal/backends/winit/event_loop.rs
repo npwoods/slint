@@ -131,7 +131,7 @@ impl EventLoopState {
             && let Some(window) = self.shared_backend_data.window_by_id(window_id)
         {
             let runtime_window = WindowInner::from_pub(window.window());
-            runtime_window.process_mouse_input(MouseEvent::Moved { position, is_touch: false });
+            runtime_window.process_mouse_input(MouseEvent::Moved { position, touch_finger_id: 0 });
         }
     }
 }
@@ -212,7 +212,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
             .process_event(&winit_window, &event);
 
         let runtime_window = WindowInner::from_pub(window.window());
-        if !matches!(event, WindowEvent::CursorMoved { .. }) {
+        if !matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::AxisMotion { .. }) {
             self.flush_pending_mouse_move();
         }
 
@@ -447,7 +447,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                             position: self.cursor_pos,
                             button,
                             click_count: 0,
-                            is_touch: false,
+                            touch_finger_id: 0,
                         }
                     }
                     winit::event::ElementState::Released => {
@@ -456,7 +456,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                             position: self.cursor_pos,
                             button,
                             click_count: 0,
-                            is_touch: false,
+                            touch_finger_id: 0,
                         }
                     }
                 };
@@ -516,6 +516,9 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 });
             }
 
+            WindowEvent::AxisMotion { .. } => {
+                // Ignored, but happens often and is also ignored for the purpose of bundling CursorMoved.
+            }
             _ => {}
         }
 

@@ -317,6 +317,11 @@ pub struct Callback {
 
     /// Same as for Property::use_count
     pub use_count: Cell<usize>,
+
+    /// Whether this callback needs a change tracker `Property<()>` so that
+    /// setting a new handler from native code triggers re-evaluation of
+    /// property bindings that invoke this callback.
+    pub needs_tracker: bool,
 }
 
 #[derive(Debug)]
@@ -501,6 +506,7 @@ pub struct SubComponent {
 pub struct PopupWindow {
     pub item_tree: ItemTree,
     pub position: MutExpression,
+    pub is_tooltip: bool,
 }
 
 #[derive(Debug)]
@@ -561,12 +567,22 @@ pub struct ItemTree {
     pub tree: TreeNode,
 }
 
+/// What top-level role an exported component plays. Drives whether the
+/// generated public API is `slint::Window`-shaped (a `ComponentHandle` impl
+/// with `show`/`hide`/`run`/`window`) or something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopLevelComponentType {
+    Window,
+    SystemTrayIcon,
+}
+
 #[derive(Debug)]
 pub struct PublicComponent {
     pub public_properties: PublicProperties,
     pub private_properties: PrivateProperties,
     pub item_tree: ItemTree,
     pub name: SmolStr,
+    pub top_level_type: TopLevelComponentType,
 }
 
 #[derive(Debug)]
@@ -584,6 +600,11 @@ pub struct CompilationUnit {
 }
 
 impl CompilationUnit {
+    pub fn needs_window_adapter(&self) -> bool {
+        self.public_components.iter().any(|p| p.top_level_type == TopLevelComponentType::Window)
+            || self.popup_menu.is_some()
+    }
+
     pub fn for_each_sub_components<'a>(
         &'a self,
         visitor: &mut dyn FnMut(&'a SubComponent, &EvaluationContext<'_>),
