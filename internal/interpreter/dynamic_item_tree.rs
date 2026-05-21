@@ -8,7 +8,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use dynamic_type::{Instance, InstanceBox};
 use i_slint_compiler::expression_tree::{Expression, NamedReference, TwoWayBinding};
-use i_slint_compiler::langtype::{BuiltinPrivateStruct, StructName, Type};
+use i_slint_compiler::langtype::{BuiltinStruct, StructName, Type};
 use i_slint_compiler::object_tree::{ElementRc, ElementWeak, TransitionDirection};
 use i_slint_compiler::{CompilerConfiguration, generator, object_tree, parser};
 use i_slint_compiler::{diagnostics::BuildDiagnostics, object_tree::PropertyDeclaration};
@@ -1282,12 +1282,7 @@ pub(crate) fn generate_item_tree<'id>(
             Type::Image => property_info::<i_slint_core::graphics::Image>(),
             Type::Bool => property_info::<bool>(),
             Type::ComponentFactory => property_info::<ComponentFactory>(),
-            Type::Struct(s)
-                if matches!(
-                    s.name,
-                    StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)
-                ) =>
-            {
+            Type::Struct(s) if matches!(s.name, StructName::Builtin(BuiltinStruct::StateInfo)) => {
                 property_info::<i_slint_core::properties::StateInfo>()
             }
             Type::Struct(_) => property_info::<Value>(),
@@ -1721,7 +1716,7 @@ pub fn instantiate(
             } else if let Some(PropertiesWithinComponent { offset, prop: prop_info, .. }) =
                 description.custom_properties.get(prop_name).filter(|_| is_root)
             {
-                let is_state_info = matches!(&property_type, Type::Struct (s) if matches!(s.name, StructName::BuiltinPrivate(BuiltinPrivateStruct::StateInfo)));
+                let is_state_info = matches!(&property_type, Type::Struct (s) if matches!(s.name, StructName::Builtin(BuiltinStruct::StateInfo)));
                 if is_state_info {
                     let prop = Pin::new_unchecked(
                         &*(instance_ref.as_ptr().add(*offset)
@@ -2241,11 +2236,30 @@ extern "C" fn layout_info(component: ItemTreeRefPin, orientation: Orientation) -
     let instance_ref = unsafe { InstanceRef::from_pin_ref(component, guard) };
     let orientation = crate::eval_layout::from_runtime(orientation);
 
-    let mut result = crate::eval_layout::get_layout_info(
-        &instance_ref.description.original.root_element,
+    // The vtable layout_info path is taken e.g. for repeater cells. When
+    // the component root has a parameterized layout-info function, route
+    // through it: reading the bare `layoutinfo-{h,v}` would cycle on
+    // `self.{w,h}` for the cross-axis case, and we have no explicit
+    // constraint at this entry point. `f32::MAX` (i.e. "unconstrained")
+    // tells the runtime's flex algorithm to behave as if items don't
+    // need to wrap, which gives the natural max-cell-cross-axis result
+    // — much closer to correct than the `sqrt(item-areas)` heuristic
+    // that a `-1` sentinel would trigger.
+    let root = &instance_ref.description.original.root_element;
+    let cross_axis_constraint = match orientation {
+        i_slint_compiler::layout::Orientation::Vertical => {
+            root.borrow().layout_info_v_with_constraint.is_some().then_some(f32::MAX)
+        }
+        i_slint_compiler::layout::Orientation::Horizontal => {
+            root.borrow().layout_info_h_with_constraint.is_some().then_some(f32::MAX)
+        }
+    };
+    let mut result = crate::eval_layout::get_layout_info_with_constraint(
+        root,
         instance_ref,
         &instance_ref.window_adapter(),
         orientation,
+        cross_axis_constraint,
     );
 
     let constraints = instance_ref.description.original.root_constraints.borrow();
