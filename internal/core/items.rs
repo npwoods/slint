@@ -1659,9 +1659,20 @@ impl Item for ContextMenu {
         if !self.enabled() {
             return KeyEventResult::EventIgnored;
         }
-        if event.event_type == KeyEventType::KeyPressed
-            && event.key_event.text.starts_with(crate::input::key_codes::Menu)
-        {
+
+        fn is_menu_key(event: &InternalKeyEvent) -> bool {
+            #[allow(unused_mut)]
+            let mut is_menu_key = event.key_event.text.contains(crate::input::key_codes::Menu);
+            #[cfg(target_os = "windows")]
+            {
+                // Windows maps Shift + F10 to open the context menu
+                is_menu_key |= event.key_event.text.contains(crate::input::key_codes::F10)
+                    && event.key_event.modifiers.shift;
+            }
+            is_menu_key
+        }
+
+        if is_menu_key(event) {
             self.show.call(&(Default::default(),));
             KeyEventResult::EventAccepted
         } else {
@@ -2000,7 +2011,9 @@ impl Item for TooltipArea {
             self.schedule_show(self_rc);
         }
 
-        InputEventFilterResult::ForwardAndInterceptGrab
+        // Observe without claiming: siblings still receive the event; the routing tracks
+        // this item on its observers side-list and delivers Exit when the pointer leaves.
+        InputEventFilterResult::ForwardAndObserve
     }
 
     fn input_event(
@@ -2010,16 +2023,10 @@ impl Item for TooltipArea {
         _self_rc: &ItemRc,
         _: &mut MouseCursor,
     ) -> InputEventResult {
-        match event {
-            // Accept move/exit so this passive tracker stays in the routing lifecycle and
-            // continues receiving leave transitions, but ignore other interaction semantics.
-            MouseEvent::Moved { .. } => InputEventResult::EventAccepted,
-            MouseEvent::Exit => {
-                self.set_hover_state(false, _self_rc);
-                InputEventResult::EventAccepted
-            }
-            _ => InputEventResult::EventIgnored,
+        if matches!(event, MouseEvent::Exit) {
+            self.set_hover_state(false, _self_rc);
         }
+        InputEventResult::EventIgnored
     }
 
     fn capture_key_event(

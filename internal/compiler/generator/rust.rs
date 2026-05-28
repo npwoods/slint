@@ -3600,19 +3600,19 @@ fn compile_builtin_function_call(
                     Some(&parent_ctx),
                 );
                 let position = compile_expression(&popup.position.borrow(), &popup_ctx);
-                let is_tooltip = popup.is_tooltip;
                 let close_policy = compile_expression(close_policy, ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
-                let globals_init = if !is_tooltip {
-                    quote! {
-                        if let Some(popup_window_adapter) = window.create_popup_window_adapter() {
-                            shared_global.clone_with_window_adapter(popup_window_adapter)
-                        } else {
-                            shared_global.clone()
-                        }
-                    }
+                let window_kind = if popup.is_tooltip {
+                    quote!(sp::WindowKind::ToolTip)
                 } else {
-                    quote! { shared_global.clone() }
+                    quote!(sp::WindowKind::Popup)
+                };
+                let globals_init = quote! {
+                    if let Some(popup_window_adapter) = window.create_child_window_adapter(#window_kind) {
+                        shared_global.clone_with_window_adapter(popup_window_adapter)
+                    } else {
+                        shared_global.clone()
+                    }
                 };
                 component_access_tokens.then(|component_access_tokens| quote!({
                     let parent_item = #parent_item;
@@ -3639,10 +3639,9 @@ fn compile_builtin_function_call(
                             access_position,
                             #close_policy,
                             parent_item,
-                            #is_tooltip,
-                            false,
-                        ))
-                    );
+                            #window_kind,
+                        )
+                    ));
                     #popup_window_id::user_init(popup_instance_vrc.clone());
                 }))
             } else {
@@ -3670,20 +3669,19 @@ fn compile_builtin_function_call(
                         _ => unreachable!(),
                     };
                 }
-                let window_adapter_tokens = access_window_adapter_field(ctx);
                 let popup_id_name = internal_popup_id(*popup_index as usize);
                 let current_id_tokens = match component_access_tokens {
                     MemberAccess::Option(token_stream) => quote!(
-                        #token_stream.and_then(|a| a.as_pin_ref().#popup_id_name.take())
+                        #token_stream.and_then(|a| a.as_pin_ref().#popup_id_name.take().map(|id| (a.as_pin_ref().globals.get().unwrap().clone(), id)))
                     ),
                     MemberAccess::Direct(token_stream) => {
-                        quote!(#token_stream.as_ref().#popup_id_name.take())
+                        quote!(#token_stream.as_ref().#popup_id_name.take().map(|id|(#token_stream.as_ref().globals.get().unwrap().clone(), id)))
                     }
                     _ => unreachable!(),
                 };
                 quote!(
-                    if let Some(current_id) = #current_id_tokens {
-                        sp::WindowInner::from_pub(#window_adapter_tokens.window()).close_popup(current_id);
+                    if let Some((globals, current_id)) = #current_id_tokens {
+                        sp::WindowInner::from_pub(globals.window_adapter_impl().window()).close_popup(current_id);
                     }
                 )
             } else {
@@ -3729,7 +3727,6 @@ fn compile_builtin_function_call(
             let set_id = context_menu
                 .clone()
                 .then(|context_menu| quote!(#context_menu.popup_id.set(Some(id))));
-
             let slint_show = quote! {
                 #close_popup
                 let access_position = sp::Box::new(move || position);
@@ -3738,8 +3735,7 @@ fn compile_builtin_function_call(
                     access_position,
                     sp::PopupClosePolicy::CloseOnClickOutside,
                     #context_menu_rc,
-                    false,
-                    true,
+                    sp::WindowKind::Menu
                 );
                 #set_id;
                 #popup_id::user_init(popup_instance_vrc);
