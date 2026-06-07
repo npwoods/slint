@@ -3,6 +3,11 @@
 
 #![doc = include_str!("README.md")]
 
+mod screenshot;
+
+#[cfg(feature = "remote")]
+mod remote;
+
 use clap::Parser;
 use i_slint_compiler::ComponentSelection;
 use itertools::Itertools;
@@ -62,16 +67,13 @@ struct Cli {
     library_paths: Vec<String>,
 
     /// The .slint file to load ('-' for stdin)
-    #[cfg_attr(feature = "remote", arg(name = "path", action, required_unless_present = "remote"))]
-    #[cfg_attr(not(feature = "remote"), arg(name = "path", action, required = true))]
+    #[arg(name = "path", action, required_unless_present = "remote")]
     path: Option<std::path::PathBuf>,
 
-    #[cfg(feature = "remote")]
     /// Start in remote viewer mode: listen for WebSocket connections from the LSP
     #[arg(long)]
     remote: bool,
 
-    #[cfg(feature = "remote")]
     /// Address to listen on in remote mode (default: auto-assigned port on all interfaces)
     #[arg(long, value_name = "address")]
     remote_address: Option<std::net::SocketAddr>,
@@ -100,6 +102,16 @@ struct Cli {
     /// Store properties values in a json file at exit ('-' for stdout)
     #[arg(long, value_name = "json file", action)]
     save_data: Option<std::path::PathBuf>,
+
+    /// Render the component to an image file and exit instead of opening a window.
+    /// The file format is inferred from the extension (e.g. .png, .jpg).
+    /// Use `-` to write a PNG to standard output. The component is rendered at its
+    /// preferred size with a headless renderer (Skia's software rasterizer when the
+    /// `renderer-skia` feature is enabled, otherwise Slint's software renderer); pass
+    /// `--backend` to pick another renderer. Set `SLINT_SCALE_FACTOR` to override the
+    /// default scale factor of 1. Incompatible with `--auto-reload` and `--remote`.
+    #[arg(long, value_name = "image file", action)]
+    screenshot: Option<std::path::PathBuf>,
 
     /// Specify callbacks handler.
     /// The first argument is the callback name, and the second argument is a string that is going
@@ -142,10 +154,35 @@ fn main() -> Result<()> {
     #[cfg(not(all(target_os = "ios", feature = "remote")))]
     let args = Cli::parse();
 
-    #[cfg(feature = "remote")]
+    if args.screenshot.is_some() {
+        if args.auto_reload {
+            eprintln!("Cannot pass both --auto-reload and --screenshot");
+            std::process::exit(-1);
+        }
+        if args.save_data.is_some() {
+            eprintln!("Cannot pass both --save-data and --screenshot");
+            std::process::exit(-1);
+        }
+        #[cfg(feature = "remote")]
+        if args.remote {
+            eprintln!("Cannot pass both --remote and --screenshot");
+            std::process::exit(-1);
+        }
+    }
+
     if args.remote {
-        slint_viewer::remote::run(args.remote_address, true)?;
-        return Ok(());
+        #[cfg(feature = "remote")]
+        {
+            remote::run(args.remote_address, true)?;
+            return Ok(());
+        }
+        #[cfg(not(feature = "remote"))]
+        {
+            eprintln!(
+                "Remote mode is not supported in this build, recompile Slint Viewer with the \"remote\" feature enabled."
+            );
+            return Err(Error("Remote mode not enabled".into()));
+        }
     }
 
     if args.auto_reload && args.save_data.is_some() {
@@ -164,6 +201,10 @@ fn main() -> Result<()> {
             dirname,
         )?;
     };
+
+    if args.screenshot.is_some() {
+        return screenshot::take_screenshot(&args);
+    }
 
     let compiler = init_compiler(&args);
 
@@ -193,7 +234,7 @@ fn main() -> Result<()> {
         let instance = live.borrow().instance().clone_strong();
         instance.run()?;
     } else {
-        let result = slint_viewer::poll_ready(compiler.build_from_path(args.path()));
+        let result = poll_ready(compiler.build_from_path(args.path()));
         result.print_diagnostics();
         if result.has_errors() {
             std::process::exit(-1);
@@ -499,4 +540,15 @@ fn execute_cmd(cmd: &str, callback_args: &[Value]) -> Result<()> {
     }
     command.spawn()?;
     Ok(())
+}
+
+/// Poll a future that is expected to resolve immediately (e.g. the interpreter's
+/// `build_from_path` when no async file loader is installed).
+fn poll_ready<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match std::future::Future::poll(future.as_mut(), &mut cx) {
+        std::task::Poll::Ready(result) => result,
+        std::task::Poll::Pending => unreachable!("Compiler returned Pending"),
+    }
 }
