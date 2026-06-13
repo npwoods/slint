@@ -25,18 +25,22 @@ use i_slint_compiler::parser::{
 use i_slint_compiler::{diagnostics::BuildDiagnostics, langtype::Type};
 #[cfg(any(feature = "preview-external", feature = "preview-engine"))]
 use i_slint_live_preview::protocol::PreviewComponent;
-use i_slint_live_preview::protocol::{
-    LspToPreviewMessage, PreviewConfig, PreviewToLspMessage, SourceFileVersion, VersionedUrl,
+use i_slint_live_preview::{
+    file_watcher::FileChangeKind,
+    protocol::{
+        LspToPreviewMessage, PreviewConfig, PreviewToLspMessage, SourceFileVersion, VersionedUrl,
+    },
 };
+
 use itertools::Itertools;
 use lsp_types::TextDocumentPositionParams;
 use lsp_types::{
     ClientCapabilities, CodeActionOrCommand, CodeActionProviderCapability, CodeLens,
     CodeLensOptions, Color, ColorInformation, ColorPresentation, Command, CompletionOptions,
-    DocumentSymbol, DocumentSymbolResponse, FileChangeType, InitializeParams, InitializeResult,
-    OneOf, Position, PrepareRenameResponse, RenameOptions, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextEdit, Url, WorkDoneProgressOptions,
+    DocumentSymbol, DocumentSymbolResponse, InitializeParams, InitializeResult, OneOf, Position,
+    PrepareRenameResponse, RenameOptions, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextEdit,
+    Url, WorkDoneProgressOptions,
     request::{
         CodeActionRequest, CodeLensRequest, ColorPresentationRequest, Completion, DocumentColor,
         DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand, Formatting,
@@ -168,6 +172,9 @@ async fn register_file_watcher(ctx: &Context) -> common::Result<()> {
         .and_then(|wf| wf.dynamic_registration)
         .unwrap_or(false)
     {
+        tracing::trace!(
+            "Client supports dynamic file watcher registration, registering for all files"
+        );
         let fs_watcher = lsp_types::DidChangeWatchedFilesRegistrationOptions {
             watchers: vec![lsp_types::FileSystemWatcher {
                 glob_pattern: lsp_types::GlobPattern::String("**/*".to_string()),
@@ -970,24 +977,35 @@ pub async fn delete_document(ctx: &mut Context, url: lsp_types::Url) -> common::
     // The preview cares about resources and slint files, so forward everything
     ctx.to_preview.send(&LspToPreviewMessage::ForgetFile { url: url.clone() });
 
-    drop_document_impl(ctx, url)
+    #[cfg(feature = "preview-engine")]
+    let version = ctx.document_cache.document_version(&url);
+
+    let result = drop_document_impl(ctx, url.clone());
+
+    // make sure to clear the diagnostics on this file.
+    // This is especially important for deleted files, but also for renamed files to clear the diagnostics on the old file.
+    // Otherwise they will stick around forever (e.g. in VS Code).
+    #[cfg(feature = "preview-engine")]
+    let _ =
+        common::lsp_to_editor::notify_lsp_diagnostics(&ctx.server_notifier, url, version, vec![]);
+
+    result
 }
 
 pub async fn trigger_file_watcher(
     ctx: &mut Context,
     url: lsp_types::Url,
-    typ: lsp_types::FileChangeType,
+    typ: FileChangeKind,
 ) -> common::Result<()> {
     if !ctx.open_urls.contains(&url) {
         tracing::debug!("File watcher triggered for {url} (type: {:?})", typ);
         match typ {
-            FileChangeType::DELETED => delete_document(ctx, url).await?,
+            FileChangeKind::Deleted => delete_document(ctx, url).await?,
             // If the file was newly created, we still need to drop it as another file may
             // already depend on it by trying to import it before it exists.
             // This is especially common on file renames.
             // See also #11304
-            FileChangeType::CHANGED | FileChangeType::CREATED => drop_document(ctx, url).await?,
-            _ => tracing::warn!("Unknown file change type: {:?} for {url}", typ),
+            FileChangeKind::Changed | FileChangeKind::Created => drop_document(ctx, url).await?,
         }
     } else {
         tracing::trace!("Ignoring file watcher event for open document: {url}");

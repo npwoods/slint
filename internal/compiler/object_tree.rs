@@ -375,6 +375,10 @@ pub struct PopupWindow {
     pub close_policy: EnumerationValue,
     pub parent_element: ElementRc,
     pub is_tooltip: bool,
+    /// A reference to a synthesized property on the *parent* component that the runtime keeps in sync
+    /// with the popup's visibility (`true` while shown, `false` once closed). This is `Some` only when
+    /// the parent reads the PopupWindow's `is-open` property; see the `lower_popups` pass.
+    pub is_open: Option<NamedReference>,
 }
 
 #[derive(Debug, Clone)]
@@ -642,6 +646,9 @@ pub struct PropertyDeclaration {
     pub visibility: PropertyVisibility,
     /// For function or callback: whether it is declared as `pure` (None for private function for which this has to be deduced)
     pub pure: Option<bool>,
+    /// Whether the declaration shadows a builtin element member of the same name
+    /// (diagnosed by the check_builtin_shadowing pass)
+    pub shadows_builtin: bool,
 }
 
 impl PropertyDeclaration {
@@ -1256,9 +1263,15 @@ impl Element {
             let PropertyLookupResult {
                 resolved_name: prop_name,
                 property_type: maybe_existing_prop_type,
+                is_shadowable,
                 ..
             } = r.lookup_property(&unresolved_prop_name);
+            let shadows_builtin = maybe_existing_prop_type != Type::Invalid && is_shadowable;
             match maybe_existing_prop_type {
+                Type::Invalid => {} // Ok to proceed with a new declaration
+                // The declaration shadows a shadowable builtin member;
+                // the check_builtin_shadowing pass emits the diagnostic
+                _ if shadows_builtin => {}
                 Type::Callback { .. } => {
                     diag.push_error(
                         format!("Cannot declare property '{prop_name}' when a callback with the same name exists"),
@@ -1273,7 +1286,6 @@ impl Element {
                     );
                     continue;
                 }
-                Type::Invalid => {} // Ok to proceed with a new declaration
                 _ => {
                     diag.push_error(
                         format!("Cannot override property '{unresolved_prop_name}'"),
@@ -1322,19 +1334,22 @@ impl Element {
                 );
             }
 
+            // Use the name as declared, not the resolved name: when the declaration
+            // shadows a builtin member, the resolved name may be a native alias.
             r.property_declarations.insert(
-                prop_name.clone().into(),
+                unresolved_prop_name.clone(),
                 PropertyDeclaration {
                     property_type: prop_type,
                     node: Some(prop_decl.clone().into()),
                     visibility,
+                    shadows_builtin,
                     ..Default::default()
                 },
             );
 
             if let Some(csn) = prop_decl.BindingExpression() {
                 property_bindings.push((
-                    prop_name.clone().into(),
+                    unresolved_prop_name.clone(),
                     csn,
                     prop_decl.DeclaredIdentifier(),
                 ));
@@ -1343,7 +1358,7 @@ impl Element {
             if let Some(csn) = prop_decl.TwoWayBinding() {
                 #[cfg(feature = "slint-sc")]
                 diag.slint_sc_error("Two-way bindings are", &csn);
-                two_way_bindings.push((prop_name.into(), csn, prop_decl.DeclaredIdentifier()));
+                two_way_bindings.push((unresolved_prop_name, csn, prop_decl.DeclaredIdentifier()));
             }
         }
 
@@ -1399,9 +1414,13 @@ impl Element {
             let PropertyLookupResult {
                 resolved_name: existing_name,
                 property_type: maybe_existing_prop_type,
+                is_shadowable,
                 ..
             } = r.lookup_property(&name);
-            if !matches!(maybe_existing_prop_type, Type::Invalid) {
+            // When the declaration shadows a shadowable builtin member, proceed;
+            // the check_builtin_shadowing pass emits the diagnostic
+            let shadows_builtin = !matches!(maybe_existing_prop_type, Type::Invalid);
+            if shadows_builtin && !is_shadowable {
                 if matches!(maybe_existing_prop_type, Type::Callback { .. }) {
                     if r.property_declarations.contains_key(&name) {
                         diag.push_error(
@@ -1436,6 +1455,7 @@ impl Element {
                         node: Some(sig_decl.into()),
                         visibility: PropertyVisibility::InOut,
                         pure,
+                        shadows_builtin,
                         ..Default::default()
                     },
                 );
@@ -1469,6 +1489,7 @@ impl Element {
                     node: Some(sig_decl.into()),
                     visibility: PropertyVisibility::InOut,
                     pure,
+                    shadows_builtin,
                     ..Default::default()
                 },
             );
@@ -1485,9 +1506,13 @@ impl Element {
             let PropertyLookupResult {
                 resolved_name: existing_name,
                 property_type: maybe_existing_prop_type,
+                is_shadowable,
                 ..
             } = r.lookup_property(&name);
-            if !matches!(maybe_existing_prop_type, Type::Invalid) {
+            // When the declaration shadows a shadowable builtin member, proceed;
+            // the check_builtin_shadowing pass emits the diagnostic
+            let shadows_builtin = !matches!(maybe_existing_prop_type, Type::Invalid);
+            if shadows_builtin && !is_shadowable {
                 if matches!(maybe_existing_prop_type, Type::Callback { .. } | Type::Function { .. })
                 {
                     diag.push_error(
@@ -1553,6 +1578,7 @@ impl Element {
                 node: Some(func.clone().into()),
                 visibility,
                 pure,
+                shadows_builtin,
                 ..Default::default()
             };
 
@@ -2041,6 +2067,7 @@ impl Element {
                 declared_pure: p.pure,
                 is_local_to_component: true,
                 is_in_direct_base: false,
+                is_shadowable: false,
                 builtin_function: None,
             },
         )
@@ -2267,6 +2294,17 @@ impl Element {
         } else {
             false
         }
+    }
+
+    /// Returns true if the property is set by a binding or an assignment expression
+    pub fn is_property_set(self: &Element, property_name: &str) -> bool {
+        self.bindings.contains_key(property_name)
+            || self
+                .property_analysis
+                .borrow()
+                .get(property_name)
+                .is_some_and(|a| a.is_set || a.is_linked)
+            || matches!(&self.base_type, ElementType::Component(base) if base.root_element.borrow().is_property_set(property_name))
     }
 
     /// Set the property `property_name` of this Element only if it was not set.
@@ -2927,6 +2965,9 @@ pub fn visit_all_named_references(
                 compo.popup_windows.borrow_mut().iter_mut().for_each(|p| {
                     vis(&mut p.x);
                     vis(&mut p.y);
+                    if let Some(is_open) = &mut p.is_open {
+                        vis(is_open);
+                    }
                 });
                 compo.timers.borrow_mut().iter_mut().for_each(|t| {
                     vis(&mut t.interval);

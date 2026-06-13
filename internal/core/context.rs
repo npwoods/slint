@@ -12,6 +12,7 @@ use crate::platform::{EventLoopProxy, Platform, WindowAdapter, WindowEvent};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::Cell;
+use core::cell::RefCell;
 use pin_weak::rc::PinWeak;
 
 /// Type alias for the closure type installed via [`set_window_event_hook`].
@@ -88,6 +89,7 @@ pub(crate) struct SlintContextInner {
     pub(crate) window_shown_hook:
         core::cell::RefCell<Option<Box<dyn FnMut(&Rc<dyn crate::platform::WindowAdapter>)>>>,
     pub(crate) window_event_hook: core::cell::RefCell<Option<WindowEventHook>>,
+    pub(crate) log_message_handler: RefCell<Option<crate::debug_log::LogMessageHandler>>,
     #[cfg(all(unix, not(target_os = "macos")))]
     xdg_app_id: core::cell::RefCell<Option<crate::SharedString>>,
     #[cfg(feature = "shared-parley")]
@@ -130,6 +132,7 @@ impl SlintContext {
             ),
             window_shown_hook: Default::default(),
             window_event_hook: Default::default(),
+            log_message_handler: Default::default(),
             #[cfg(all(unix, not(target_os = "macos")))]
             xdg_app_id: Default::default(),
             #[cfg(feature = "shared-parley")]
@@ -234,6 +237,24 @@ impl SlintContext {
     /// backends that track the system setting; `Property::set` short-circuits no-op writes.
     pub fn set_platform_default_font_size(&self, size: Option<LogicalLength>) {
         self.0.as_ref().project_ref().platform_default_font_size.set(size);
+    }
+
+    #[doc(hidden)]
+    pub fn dispatch_log_message(&self, message: crate::debug_log::LogMessage<'_>) {
+        if let Some(handler) = self.0.log_message_handler.borrow().as_ref() {
+            handler(message);
+        } else {
+            self.0.platform.debug_log(message.message_arguments());
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn set_log_message_handler(
+        &self,
+        handler: Option<crate::debug_log::LogMessageHandler>,
+    ) -> Option<crate::debug_log::LogMessageHandler> {
+        let mut slot = self.0.log_message_handler.borrow_mut();
+        core::mem::replace(&mut *slot, handler)
     }
 
     /// Add one to the counter of "things keeping the event loop alive".

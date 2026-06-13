@@ -25,7 +25,6 @@ use crate::item_rendering::{
 use crate::layout::{LayoutInfo, Orientation};
 use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalSize};
 use crate::platform::Clipboard;
-use crate::renderer::Renderer;
 #[cfg(feature = "rtti")]
 use crate::rtti::*;
 use crate::string::string_to_float;
@@ -636,23 +635,6 @@ impl SimpleText {
     }
 }
 
-/// The size of the text of the textitem considering the current font as minimum height
-fn text_size(
-    text_item: Pin<&dyn crate::item_rendering::RenderString>,
-    self_rc: &ItemRc,
-    renderer: &dyn Renderer,
-    max_width: Option<LogicalLength>,
-    text_wrap: TextWrap,
-) -> LogicalSize {
-    let mut size = renderer.text_size(text_item, self_rc, max_width, text_wrap);
-    // ensure that text input doesn't shrink when going from empty to text that ends up selecting a font that has
-    // an ascent - descent that's less than the requested default font.
-    let request = text_item.font_request(self_rc);
-    let metrics = renderer.font_metrics(request);
-    size.height = size.height.max(metrics.ascent - metrics.descent);
-    size
-}
-
 fn text_layout_info(
     text: Pin<&dyn RenderText>,
     self_rc: &ItemRc,
@@ -662,7 +644,7 @@ fn text_layout_info(
     cross_axis_constraint: Coord,
 ) -> LayoutInfo {
     let implicit_size = |max_width, text_wrap| {
-        text_size(text, self_rc, window_adapter.renderer(), max_width, text_wrap)
+        window_adapter.renderer().text_size(text, self_rc, max_width, text_wrap)
     };
 
     // Stretch uses `round_layout` to explicitly align the top left and bottom right of layout nodes
@@ -809,7 +791,7 @@ impl Item for TextInput {
         self_rc: &ItemRc,
     ) -> LayoutInfo {
         let implicit_size = |max_width, text_wrap| {
-            text_size(self, self_rc, window_adapter.renderer(), max_width, text_wrap)
+            window_adapter.renderer().text_size(self, self_rc, max_width, text_wrap)
         };
 
         // Stretch uses `round_layout` to explicitly align the top left and bottom right of layout nodes
@@ -2105,7 +2087,7 @@ impl TextInput {
         self.undo_items.set(items);
     }
 
-    fn undo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
+    pub fn undo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
         let mut items = self.undo_items.take();
         let Some(last) = items.pop() else {
             return;
@@ -2150,7 +2132,7 @@ impl TextInput {
         Self::FIELD_OFFSETS.edited().apply_pin(self).call(&());
     }
 
-    fn redo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
+    pub fn redo(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {
         let mut items = self.redo_items.take();
         let Some(last) = items.pop() else {
             return;
@@ -2370,6 +2352,36 @@ pub unsafe extern "C" fn slint_textinput_paste(
         let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
         let self_rc = ItemRc::new(self_component.clone(), self_index);
         text_input.paste(window_adapter, &self_rc);
+    }
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_textinput_undo(
+    text_input: Pin<&TextInput>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        let self_rc = ItemRc::new(self_component.clone(), self_index);
+        text_input.undo(window_adapter, &self_rc);
+    }
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_textinput_redo(
+    text_input: Pin<&TextInput>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        let self_rc = ItemRc::new(self_component.clone(), self_index);
+        text_input.redo(window_adapter, &self_rc);
     }
 }
 
