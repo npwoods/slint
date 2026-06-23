@@ -2,7 +2,7 @@
 # Changelog
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [1.17.0] - Unreleased
 
 ### General
 
@@ -22,6 +22,7 @@ All notable changes to this project are documented in this file.
  - winit: Honor the system cursor blink rate.
  - `TextInput`: Show caret and allow selection in read-only text inputs
  - FemtoVG: Fixed rounded clip rendering when children don't fill the clip. (#11608)
+ - FemtoVG WGPU: Honor window transparency by selecting a non-opaque swapchain composite alpha mode.
  - Instantiate `for` and `if` eagerly via an update pass.
  - PopupWindow now react on change in their geometry properties after being shown (#6000)
  - iOS: Added detection of system dark/light theme
@@ -30,6 +31,8 @@ All notable changes to this project are documented in this file.
  - Fixed per-corner radii for drop shadows
  - Upgraded fontique and parley to 0.10: The `unstable-fontique-09` Cargo feature is renamed to
    `unstable-fontique-010`, and the `slint::fontique_09` module to `slint::fontique_010`.
+ - The default font size for application is read from system settings on Windows and Linux.
+ - Software renderer: Support binding the `Path` element's `commands` property (SVG path data) in `no_std` builds.
 
 ### Slint language
 
@@ -43,10 +46,11 @@ All notable changes to this project are documented in this file.
  - Added `DragArea` and `DropArea` elements for drag and drop support within a window.
  - Added `data-transfer` type
  - Deprecated calling `init()` explicitly (#11696)
- - Added `ToolTip` element
+ - Added `Tooltip` element
  - Added `minimized`, `maximized`, `close`, and `hide` on `Window`
  - Added `drop-shadow-spread` and `inner-shadow-{color,blur,offset-x,offset-y,spread}` properties to rectangle. (Only supported in Skia)
  - added `Platform.macos-bring-all-windows-to-front()`
+ - Added `undo()` and `redo()` functions to `TextInput`.
  - Fixed percentage size in children impacting parent layout (#3346)
  - Re-evaluate property bindings when a callback handler is changed from native code (#9551)
  - TextInput: allow setting the accessibility value
@@ -54,10 +58,14 @@ All notable changes to this project are documented in this file.
  - `animate`: Added `enabled` boolean to toggle animations on/off (defaults to `true`). (#9604)
  - Conversions between `float` and `string` now use the locale's decimal separator,
    which is exposed as `Platform.decimal-separator`. (#10857)
+ - Globals can implement callbacks aliasing another global callback.
+ - Added `InputType.search` to identify search input fields and inform assistive technologies about their purpose.
+ - `@conic-gradient` and `@radial-gradient` now supports `at <x> <y>` and an optional radius. (#11760)
 
 ### Widgets
 
 - ComboBox: Fixed long selected values (#11332)
+- ComboBox: warn when changing current-value programmatically as this has no effect
 - CheckBox: Added `font-size` and `font-weight`
 - Added `RadioGroup` widget (#11141)
 
@@ -69,6 +77,7 @@ All notable changes to this project are documented in this file.
  - Made `PointerEvent` and `PointerEventKind` types public in `language` module (#11587)
  - Added `StyledText` struct that maps to a `styled-text` slint type and can parse markdown at runtime.
  - Added public API to create `keys`
+ - Cache the slint! macro expension for better experience with rust-analyzer  (#12145)
 
 ### C++
 
@@ -77,6 +86,8 @@ All notable changes to this project are documented in this file.
 - Added `StyledText` struct that maps to a `styled-text` slint type and can parse markdown at runtime.
 - Added public API to create `keys`
 - Use Astro for the documentation
+- Fixed setting a model to nullptr when using the live preview
+- Fix memory leak in the C++ `changed` callbacks (#12135)
 
 ### JavaScript
 
@@ -86,6 +97,8 @@ All notable changes to this project are documented in this file.
  - exposed StyledText markdown parsing API.
  - Added `ArrayModel.splice` to remove and/or insert values at a given index, following the semantics of `Array.prototype.splice`.
  - Added public API to create `keys`
+ - `npm install slint-ui` no longer falls back to building from source when no pre-built binary matches the
+   platform; the install script that did this made pnpm >= 10 fail the installation.
 
 ### Python
 
@@ -101,15 +114,18 @@ All notable changes to this project are documented in this file.
 
 ### Tooling
 
- - slint-viewer gained `--remote` to connect to a slint LSP from a mobile device or another device
  - SlintPad: Show download progress for the LSP wasm on the splash screen.
  - LSP: `@markdown` completion is now supported.
  - LSP: Fixed selection of imported sub-components in preview.
  - LSP: Update the preview highlight on hover
+ - LSP: formatter preserve newlines in expression, as well as enum declarations and export lists.
+ - LSP: show runtime warnings in the console (eg: missing image file)
  - Improved file watcher by tracking new file and moved directories.
  - Compiler: Report precise error location within `@markdown` and `@tr` strings. (#11577)
  - Added MCP server feature. (#11542)
  - Viewer can now work on iOS and Android.
+ - Added `slint-viewer --remote` to connect to a slint LSP from a mobile device or another device.
+ - Added `slint-viewer --screenshot` and `slint-viewer --check`.
 
 ## [1.16.1] - 2026-04-23
 
