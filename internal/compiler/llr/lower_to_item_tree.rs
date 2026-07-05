@@ -200,9 +200,21 @@ pub struct LoweringState {
     sub_component_mapping: HashMap<ByAddress<Rc<Component>>, SubComponentIdx>,
     #[cfg(feature = "bundle-translations")]
     pub translation_builder: Option<crate::translations::TranslationsBuilder>,
+    /// Counter for the unique `struct_assignment{n}` local variable names. Local
+    /// to one lowering (a fresh `LoweringState` is created per backend), so the
+    /// numbering is deterministic regardless of how many backends run.
+    struct_assignment_count: usize,
 }
 
 impl LoweringState {
+    /// Return a fresh unique name for a temporary used when lowering an
+    /// assignment to a struct field.
+    pub fn unique_struct_assignment_name(&mut self) -> SmolStr {
+        let n = self.struct_assignment_count;
+        self.struct_assignment_count += 1;
+        format_smolstr!("struct_assignment{n}")
+    }
+
     pub fn map_property_reference(&self, from: &NamedReference) -> MemberReference {
         if let Some(x) = self.global_properties.get(from) {
             return x.clone();
@@ -615,12 +627,23 @@ fn lower_sub_component(
         None,
     )
     .into();
+    // Measure the root's height for its preferred width, not an unbounded one, so a
+    // height-for-width Image doesn't report infinite height (mirrors the interpreter).
+    let v_cross_constraint = component
+        .root_element
+        .borrow()
+        .layout_info_v_with_constraint
+        .is_some()
+        .then(|| {
+            super::lower_layout_expression::default_cross_axis_constraint(&component.root_element)
+        })
+        .flatten();
     sub_component.layout_info_v = super::lower_layout_expression::get_layout_info(
         &component.root_element,
         &mut ctx,
         &component.root_constraints.borrow(),
         crate::layout::Orientation::Vertical,
-        None,
+        v_cross_constraint,
     )
     .into();
     // For repeated elements in a FlexboxLayout, generate code to read flex properties

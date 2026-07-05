@@ -652,15 +652,22 @@ fn generate_shared_globals(
         impl SharedGlobals {
             #pub_token fn new(root_item_tree_weak : sp::VWeak<sp::ItemTreeVTable>) -> sp::Rc<Self> {
                 #(let #library_shared_globals_names = #library_shared_globals_types::new(root_item_tree_weak.clone());)*
-                let _self = sp::Rc::new(Self {
+                sp::Rc::new(Self {
                     #(#global_names : #global_types::new(),)*
                     #(#from_library_global_names : #library_global_vars.clone(),)*
                     window_adapter : ::core::default::Default::default(),
                     root_item_tree_weak,
                     #(#library_shared_globals_names,)*
-                });
-                #(_self.#global_names.clone().init(&_self);)*
-                _self
+                })
+            }
+
+            // Run the eager initialization of the globals. This must be called only *after* the
+            // root component's `globals` field has been set (see the root component's `new`),
+            // because a global's init may evaluate a binding (e.g. `Palette.color-scheme`) that
+            // resolves the root's window adapter through `globals`, which would otherwise panic.
+            #pub_token fn init_globals(self: &sp::Rc<Self>) {
+                #(self.#library_shared_globals_names.init_globals();)*
+                #(self.#global_names.clone().init(self);)*
             }
 
             // Clone the SharedGlobals struct but use a different window adapter. This is for example used for popup windows, because they need access to the globals, but need their own window adapter
@@ -2052,12 +2059,26 @@ fn generate_item_tree(
         })
         .collect::<Vec<_>>();
 
+    let is_root_component = !is_popup && parent_ctx.is_none();
     let globals = if is_popup {
         quote!(globals)
     } else if parent_ctx.is_some() {
         quote!(parent.upgrade().unwrap().globals.get().unwrap().clone())
     } else {
         quote!(SharedGlobals::new(sp::VRc::downgrade(&self_dyn_rc)))
+    };
+    // The root component owns the freshly created `SharedGlobals` and is responsible for running
+    // its eager initialization. The root's own `globals` field must be set *before* that init
+    // runs, because a global binding (e.g. `Palette.color-scheme`) may resolve the root's window
+    // adapter through `globals` during evaluation. Popups and sub-components receive an already
+    // initialized `SharedGlobals`, so they skip this step.
+    let set_and_init_globals = if is_root_component {
+        quote!(
+            let _ = sp::VRc::map(self_rc.clone(), |x| x).as_pin_ref().globals.set(globals.clone());
+            globals.init_globals();
+        )
+    } else {
+        quote!()
     };
     let globals_arg = is_popup.then(|| quote!(globals: sp::Rc<SharedGlobals>));
 
@@ -2203,6 +2224,7 @@ fn generate_item_tree(
                 let self_rc = sp::VRc::new(_self);
                 let self_dyn_rc = sp::VRc::into_dyn(self_rc.clone());
                 let globals = #globals;
+                #set_and_init_globals
                 sp::register_item_tree(&self_dyn_rc, #register_window_adapter_arg);
                 Self::init(sp::VRc::map(self_rc.clone(), |x| x), globals, 0, 1);
                 ::core::result::Result::Ok(self_rc)
@@ -2388,10 +2410,10 @@ fn generate_repeated_component(
                             let inner_len = _self.as_ref().#inner_rep_id.len();
                             for _i in 0..inner_len {
                                 if write_idx < result.len() {
-                                    result[write_idx] = sp::GridLayoutInputData {
-                                        new_row: write_idx == 0 && new_row,
-                                        ..Default::default()
-                                    };
+                                    // Let the inner cell report its own col/row/colspan/rowspan.
+                                    if let Some(inner) = _self.as_ref().#inner_rep_id.instance_at(_i) {
+                                        inner.as_pin_ref().grid_layout_input_data(write_idx == 0 && new_row, core::slice::from_mut(&mut result[write_idx]));
+                                    }
                                 }
                                 write_idx += 1;
                             }
@@ -2987,8 +3009,19 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                         #ignore_shift,
                         #ignore_alt))
         },
-        Expression::NumberLiteral(n) if n.is_finite() => quote!(#n),
-        Expression::NumberLiteral(_) => quote!(0.),
+        Expression::NumberLiteral(n) => {
+            if n.is_nan() {
+                quote!(f64::NAN)
+            } else if n.is_infinite() {
+                if *n > 0. {
+                    quote!(f64::INFINITY)
+                } else {
+                    quote!(f64::NEG_INFINITY)
+                }
+            } else {
+                quote!(#n)
+            }
+        }
         Expression::BoolLiteral(b) => quote!(#b),
         Expression::Cast { from, to } => {
             let f = compile_expression(from, ctx);
@@ -3275,9 +3308,22 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
                 crate::expression_tree::ImageReference::None => {
                     quote!(sp::Image::default())
                 }
-                crate::expression_tree::ImageReference::AbsolutePath(path) => {
+                crate::expression_tree::ImageReference::Path(path) => {
                     let path = path.as_str();
                     quote!(sp::Image::load_from_path(::std::path::Path::new(#path)).unwrap_or_default())
+                }
+                crate::expression_tree::ImageReference::Url(url) => {
+                    let url = url.as_str();
+                    // URL image references only work on the web, where the browser fetches them.
+                    quote!({
+                        #[cfg(target_arch = "wasm32")]
+                        { sp::load_as_html_image(#url).unwrap_or_default() }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        { sp::Image::default() }
+                    })
+                }
+                crate::expression_tree::ImageReference::DataUri(_) => {
+                    unreachable!("data: URIs are embedded before code generation")
                 }
                 crate::expression_tree::ImageReference::EmbeddedData { resource_id, extension } => {
                     let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id.0);

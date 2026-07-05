@@ -9,11 +9,12 @@ use crate::layout::Orientation;
 use crate::lookup::LookupCtx;
 use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxNode};
+use crate::symbol_counters::SymbolCounters;
 use crate::typeregister;
 use core::cell::RefCell;
 use smol_str::{SmolStr, format_smolstr};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
 // FIXME remove the pub
@@ -788,7 +789,7 @@ pub enum Expression {
     },
     Struct {
         ty: Rc<Struct>,
-        values: HashMap<SmolStr, Expression>,
+        values: BTreeMap<SmolStr, Expression>,
     },
 
     PathData(Path),
@@ -1437,6 +1438,7 @@ impl Expression {
         target_type: Type,
         node: &dyn Spanned,
         diag: &mut BuildDiagnostics,
+        symbol_counters: &SymbolCounters,
     ) -> Expression {
         let ty = self.ty();
         if ty == target_type
@@ -1470,23 +1472,20 @@ impl Expression {
                     if left.fields != right.fields =>
                 {
                     if let Expression::Struct { mut values, .. } = self {
-                        let mut new_values = HashMap::new();
+                        let mut new_values = BTreeMap::new();
                         for (key, ty) in &right.fields {
                             let (key, expression) = values.remove_entry(key).map_or_else(
                                 || (key.clone(), Expression::default_value_for_type(ty)),
-                                |(k, e)| (k, e.maybe_convert_to(ty.clone(), node, diag)),
+                                |(k, e)| {
+                                    (k, e.maybe_convert_to(ty.clone(), node, diag, symbol_counters))
+                                },
                             );
                             new_values.insert(key, expression);
                         }
                         return Expression::Struct { values: new_values, ty: right.clone() };
                     }
-                    static COUNT: std::sync::atomic::AtomicUsize =
-                        std::sync::atomic::AtomicUsize::new(0);
-                    let var_name = format_smolstr!(
-                        "tmpobj_conv_{}",
-                        COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    );
-                    let mut new_values = HashMap::new();
+                    let var_name = symbol_counters.generate_name("tmpobj_conv_");
+                    let mut new_values = BTreeMap::new();
                     for (key, ty) in &right.fields {
                         let expression = if left.fields.contains_key(key) {
                             Expression::StructFieldAccess {
@@ -1496,7 +1495,12 @@ impl Expression {
                                 }),
                                 name: key.clone(),
                             }
-                            .maybe_convert_to(ty.clone(), node, diag)
+                            .maybe_convert_to(
+                                ty.clone(),
+                                node,
+                                diag,
+                                symbol_counters,
+                            )
                         } else {
                             Expression::default_value_for_type(ty)
                         };
@@ -1564,7 +1568,9 @@ impl Expression {
                 (Expression::Array { values, .. }, Type::Array(target_type)) => Expression::Array {
                     values: values
                         .into_iter()
-                        .map(|e| e.maybe_convert_to((*target_type).clone(), node, diag))
+                        .map(|e| {
+                            e.maybe_convert_to((*target_type).clone(), node, diag, symbol_counters)
+                        })
                         .take_while(|e| !matches!(e, Expression::Invalid))
                         .collect(),
                     element_ty: (*target_type).clone(),
@@ -1576,10 +1582,13 @@ impl Expression {
         {
             // Also special case struct literal in case they contain array literal
             let mut fields = struct_type.fields.clone();
-            let mut new_values = HashMap::new();
+            let mut new_values = BTreeMap::new();
             for (f, v) in values {
                 if let Some(t) = fields.remove(f) {
-                    new_values.insert(f.clone(), v.clone().maybe_convert_to(t, node, diag));
+                    new_values.insert(
+                        f.clone(),
+                        v.clone().maybe_convert_to(t, node, diag, symbol_counters),
+                    );
                 } else {
                     diag.push_error(format!("Cannot convert {ty} to {target_type}"), node);
                     return self;
@@ -1981,14 +1990,59 @@ pub enum EasingCurve {
     // Custom(Box<dyn Fn(f32)->f32>),
 }
 
-// The compiler generates ResourceReference::AbsolutePath for all references like @image-url("foo.png")
-// and the resource lowering path may change this to EmbeddedData if configured.
+// The compiler resolves every `@image-url("foo.png")` into a `Path`, `Url`, or
+// `DataUri` reference; the resource lowering pass may then replace it with
+// `EmbeddedData`/`EmbeddedTexture` if configured.
 #[derive(Clone, Debug)]
 pub enum ImageReference {
     None,
-    AbsolutePath(SmolStr),
-    EmbeddedData { resource_id: crate::embedded_resources::EmbeddedResourcesIdx, extension: String },
-    EmbeddedTexture { resource_id: crate::embedded_resources::EmbeddedResourcesIdx },
+    /// An absolute path to a local image file on disk.
+    Path(SmolStr),
+    /// A non-`data:` URL, e.g. `builtin:/`, `http(s):`, or `user://`.
+    Url(url::Url),
+    /// An inline `data:` URI carrying the image content.
+    DataUri(SmolStr),
+    EmbeddedData {
+        resource_id: crate::embedded_resources::EmbeddedResourcesIdx,
+        extension: String,
+    },
+    EmbeddedTexture {
+        resource_id: crate::embedded_resources::EmbeddedResourcesIdx,
+    },
+}
+
+impl ImageReference {
+    /// Classify a resolved `@image-url` string (an absolute path, a URL, or a
+    /// `data:` URI) into the matching reference kind.
+    pub fn from_resolved(reference: SmolStr) -> Self {
+        if reference.starts_with("data:") {
+            return Self::DataUri(reference);
+        }
+        // A single-character scheme is a Windows drive letter (`c:\...`), i.e. a
+        // path rather than a URL.
+        match url::Url::parse(&reference) {
+            Ok(url) if url.scheme().len() > 1 => Self::Url(url),
+            _ => Self::Path(reference),
+        }
+    }
+
+    /// Classify a URL returned by the resource mapper. It is already a URL, so
+    /// the only distinction is a `data:` URI (kept as a string, see
+    /// [`Self::DataUri`]) from any other URL.
+    pub fn from_mapped_url(url: url::Url) -> Self {
+        if url.scheme() == "data" { Self::DataUri(url.as_str().into()) } else { Self::Url(url) }
+    }
+
+    /// The image source loaded at run-time for a non-embedded reference: the
+    /// path, the URL, or the `data:` URI, as the string handed to
+    /// `Image::load_from_path`. `None` for embedded references.
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::Path(source) | Self::DataUri(source) => Some(source),
+            Self::Url(url) => Some(url.as_str()),
+            Self::None | Self::EmbeddedData { .. } | Self::EmbeddedTexture { .. } => None,
+        }
+    }
 }
 
 /// Print the expression as a .slint code (not necessarily valid .slint)

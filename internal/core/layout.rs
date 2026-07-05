@@ -328,7 +328,7 @@ mod grid_internal {
             orientation,
             &repeater_indices,
             &repeater_steps,
-        ) as usize;
+        );
         if num < 1 {
             return Default::default();
         }
@@ -381,8 +381,8 @@ mod grid_internal {
                     &repeater_steps,
                 );
                 if span > 1 {
-                    let span_data =
-                        &mut layout_data[(col_or_row as usize)..(col_or_row + span) as usize];
+                    let span_data = &mut layout_data
+                        [(col_or_row as usize)..(col_or_row as usize + span as usize)];
 
                     // Adjust minimum sizes
                     let mut min = constraint.min;
@@ -561,14 +561,16 @@ impl GridLayoutOrganizedData {
         orientation: Orientation,
         repeater_indices: &Slice<u32>,
         repeater_steps: &Slice<u32>,
-    ) -> u16 {
+    ) -> usize {
         let mut max = 0;
         // This could be rewritten more efficiently to avoid a loop calling a loop, by keeping track of the repeaters we saw until now
         // Not sure it's worth the complexity though
         for idx in 0..num_cells {
             let (col_or_row, span) =
                 self.col_or_row_and_span(idx, orientation, repeater_indices, repeater_steps);
-            max = max.max(col_or_row + span.max(1));
+            // Widen to usize: a cell with an out-of-range row/col is clamped to u16::MAX, so adding
+            // the span here in u16 would overflow and under-size the layout vector.
+            max = max.max(col_or_row as usize + span.max(1) as usize);
         }
         max
     }
@@ -1906,18 +1908,37 @@ pub fn flexbox_layout_info_main_axis(
             + spacing * num_spacings
             + extra_pad
     } else {
-        // Wrapping: estimate a roughly square layout using only main-axis sizes.
-        // Approximate total area assuming each item is square (width == height),
-        // then take sqrt to get a reasonable main-axis extent.
-        let total_area: Coord = cells
+        // Wrapping: aim for a roughly square (pixel-area) arrangement, using only
+        // main-axis sizes so this stays independent of the cross axis. The square
+        // side is the sqrt of the total area; each item is approximated as a
+        // (size + spacing) square, so the gaps count toward the area and the grid
+        // stays roughly square as spacing grows (otherwise a spacing-blind target
+        // is reached with fewer items, skewing the grid taller). Snap that up to a
+        // whole number of items, so a line holds a clean grid row instead of
+        // wrapping mid-item (which would over-count columns: e.g. 3 equal items
+        // want `A B / C`, not `A B C`).
+        // Accumulate the area in f64: with the integer Coord build, Coord-typed
+        // products (and their sum) would overflow for large items.
+        let total_area: f64 = cells
             .iter()
-            .map(|c| {
-                let w = c.constraint.preferred_bounded();
-                w * w
-            })
+            .map(|c| c.constraint.preferred_bounded() as f64 + spacing as f64)
+            .map(|w| w * w)
             .sum();
-        let count = cells.len();
-        Float::sqrt(total_area as f32) as Coord + spacing * (count - 1) as Coord + extra_pad
+        let target = Float::sqrt(total_area as f32) as Coord;
+        let mut acc = 0 as Coord;
+        let mut started = false;
+        for c in cells.iter() {
+            acc += if started {
+                spacing + c.constraint.preferred_bounded()
+            } else {
+                c.constraint.preferred_bounded()
+            };
+            started = true;
+            if acc >= target {
+                break;
+            }
+        }
+        acc + extra_pad
     };
     let stretch = cells.iter().map(|c| c.constraint.stretch).sum::<f32>();
     LayoutInfo {
@@ -2728,7 +2749,7 @@ mod tests {
                 &repeater_indices,
                 &repeater_steps
             ),
-            num_rows as u16 // max row (4) + rowspan (1) = 5
+            num_rows as usize // max row (4) + rowspan (1) = 5
         );
 
         // Now test GridLayoutCacheGenerator
