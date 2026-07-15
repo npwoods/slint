@@ -4,7 +4,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
-"POT-Creation-Date: 2026-06-12 07:20+0000\n"
+"POT-Creation-Date: 2026-07-15 05:28+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -32,6 +32,18 @@ msgstr ""
 #: ui/pages/easings_page.slint:102
 msgctxt "EasingsPage"
 msgid "Duration:"
+msgstr ""
+
+#: ui/pages/about_page.slint:9
+msgctxt "AboutPage"
+msgid "About"
+msgstr ""
+
+#: ui/pages/about_page.slint:11
+msgctxt "AboutPage"
+msgid ""
+"Are you curious now? Check out the docs and getting starteds from the Github "
+"repository and the website https://slint.dev and try it yourself."
 msgstr ""
 
 #: ui/pages/controls_page.slint:10
@@ -193,6 +205,57 @@ msgctxt "ControlsPage"
 msgid "Content of tab 3"
 msgstr ""
 
+#: ui/pages/text_edit_page.slint:9
+msgctxt "TextEditPage"
+msgid "TextEdit"
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:10
+msgctxt "TextEditPage"
+msgid ""
+"Similar to LineEdit, but can be used to enter several lines of text. The "
+"widget can be imported from \"std-widgets.slint\"."
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:14
+msgctxt "TextEditPage"
+msgid "Word-Wrap"
+msgstr ""
+
+#. min-width: 200px;
+#: ui/pages/text_edit_page.slint:18
+msgctxt "TextEditPage"
+msgid ""
+"This is our TextEdit widget, which allows for editing text that spans over "
+"multiple paragraphs.\n"
+"For example this line starts in a new paragraph.\n"
+"\n"
+"When the amount of lines - due to wrapping and number of paragraphs - "
+"exceeds the available vertical height, a vertical scrollbar is shown that "
+"allows scrolling.\n"
+"You may want to enter a bit of text here then in order to make them visible."
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:19
+msgctxt "TextEditPage"
+msgid "Add some text"
+msgstr ""
+
+#: ui/pages/text_edit_page.slint:26
+msgctxt "TextEditPage"
+msgid "No-Wrap"
+msgstr ""
+
+#: ui/pages/page.slint:24
+msgctxt "Page"
+msgid "Widgets enabled"
+msgstr ""
+
+#: ui/pages/page.slint:31
+msgctxt "Page"
+msgid "Dark Mode"
+msgstr ""
+
 #: ui/pages/table_view_page.slint:25
 msgctxt "TableViewPage"
 msgid "TableView"
@@ -238,18 +301,6 @@ msgstr ""
 #: ui/pages/table_view_page.slint:65
 msgctxt "TableViewPage"
 msgid "Enter filter text"
-msgstr ""
-
-#: ui/pages/about_page.slint:9
-msgctxt "AboutPage"
-msgid "About"
-msgstr ""
-
-#: ui/pages/about_page.slint:11
-msgctxt "AboutPage"
-msgid ""
-"Are you curious now? Check out the docs and getting starteds from the Github "
-"repository and the website https://slint.dev and try it yourself."
 msgstr ""
 
 #: ui/pages/list_view_page.slint:9 ui/pages/list_view_page.slint:55
@@ -333,57 +384,6 @@ msgstr ""
 #: ui/pages/list_view_page.slint:81 ui/pages/list_view_page.slint:82 ui/pages/list_view_page.slint:83 ui/pages/list_view_page.slint:84 ui/pages/list_view_page.slint:85 ui/pages/list_view_page.slint:86 ui/pages/list_view_page.slint:87
 msgctxt "ListViewPage"
 msgid "consetetur"
-msgstr ""
-
-#: ui/pages/text_edit_page.slint:9
-msgctxt "TextEditPage"
-msgid "TextEdit"
-msgstr ""
-
-#: ui/pages/text_edit_page.slint:10
-msgctxt "TextEditPage"
-msgid ""
-"Similar to LineEdit, but can be used to enter several lines of text. The "
-"widget can be imported from \"std-widgets.slint\"."
-msgstr ""
-
-#: ui/pages/text_edit_page.slint:14
-msgctxt "TextEditPage"
-msgid "Word-Wrap"
-msgstr ""
-
-#. min-width: 200px;
-#: ui/pages/text_edit_page.slint:18
-msgctxt "TextEditPage"
-msgid ""
-"This is our TextEdit widget, which allows for editing text that spans over "
-"multiple paragraphs.\n"
-"For example this line starts in a new paragraph.\n"
-"\n"
-"When the amount of lines - due to wrapping and number of paragraphs - "
-"exceeds the available vertical height, a vertical scrollbar is shown that "
-"allows scrolling.\n"
-"You may want to enter a bit of text here then in order to make them visible."
-msgstr ""
-
-#: ui/pages/text_edit_page.slint:19
-msgctxt "TextEditPage"
-msgid "Add some text"
-msgstr ""
-
-#: ui/pages/text_edit_page.slint:26
-msgctxt "TextEditPage"
-msgid "No-Wrap"
-msgstr ""
-
-#: ui/pages/page.slint:24
-msgctxt "Page"
-msgid "Widgets enabled"
-msgstr ""
-
-#: ui/pages/page.slint:31
-msgctxt "Page"
-msgid "Dark Mode"
 msgstr ""
 
 #: gallery.slint:14 gallery.slint:19
