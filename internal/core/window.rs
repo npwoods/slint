@@ -9,6 +9,7 @@ use crate::api::{
     CloseRequestResponse, LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize,
     PlatformError, Window, WindowPosition, WindowSize,
 };
+use crate::cursor::MouseCursorInner;
 use crate::input::{
     ClickState, DragData, FocusEvent, FocusReason, InternalKeyEvent, KeyEventResult, KeyEventType,
     Keys, MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker, TouchPhase,
@@ -18,7 +19,9 @@ use crate::item_tree::{
     ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable, ItemTreeWeak, ItemWeak,
     ParentItemTraversalMode,
 };
-use crate::items::{InputType, ItemRef, MenuEntry, MouseCursor, PopupClosePolicy};
+use crate::items::{
+    BuiltInMouseCursor, InputMethodHints, InputType, ItemRef, MenuEntry, PopupClosePolicy,
+};
 use crate::lengths::{LogicalLength, LogicalPoint, LogicalRect, LogicalVector, SizeLengths};
 use crate::menus::MenuVTable;
 use crate::properties::{Property, PropertyTracker};
@@ -62,7 +65,7 @@ pub enum WindowKind {
 ///
 /// - When receiving messages from the windowing system about state changes, such as the window being resized,
 ///   the user requested the window to be closed, input being received, etc. you need to create a
-///   [`WindowEvent`](crate::platform::WindowEvent) and send it to Slint via [`Window::try_dispatch_event()`].
+///   [`WindowEvent`](crate::platform::WindowEvent) and send it to Slint via [`Window::dispatch_event_with_result()`].
 ///
 /// - Slint sends requests to change visibility, position, size, etc. via functions such as [`Self::set_visible`],
 ///   [`Self::set_size`], [`Self::set_position`], or [`Self::update_window_properties()`]. Re-implement these functions
@@ -252,7 +255,7 @@ pub trait WindowAdapterInternal: core::any::Any {
 
     /// Set the mouse cursor
     // TODO: Make the enum public and make public
-    fn set_mouse_cursor(&self, _cursor: MouseCursor) {}
+    fn set_mouse_cursor(&self, _cursor: MouseCursorInner) {}
 
     /// This method allow editable input field to communicate with the platform about input methods
     fn input_method_request(&self, _: InputMethodRequest) {}
@@ -321,6 +324,13 @@ pub trait WindowAdapterInternal: core::any::Any {
     fn start_drag(&self, _request: &DragRequest) -> bool {
         false
     }
+
+    /// Ask the windowing system to start an interactive, user-driven move of the window,
+    /// as if the user had dragged the window's title bar.
+    ///
+    /// This is called while the user holds a mouse button pressed.
+    /// The default implementation does nothing; backends without support ignore the request.
+    fn start_window_move(&self) {}
 }
 
 /// This is the parameter from [`WindowAdapterInternal::input_method_request()`] which lets the editable text input field
@@ -363,6 +373,8 @@ pub struct InputMethodProperties {
     pub anchor_point: LogicalPosition,
     /// The type of input for the text edit.
     pub input_type: InputType,
+    /// The hints for the input method for the text edit.
+    pub input_method_hints: InputMethodHints,
     /// The clip rect in window coordinates
     pub clip_rect: Option<LogicalRect>,
 }
@@ -752,6 +764,14 @@ impl WindowInner {
         let item_tree = self.try_component()?;
         self.ensure_tree_instantiated();
 
+        // If the focused item became invisible (e.g. a TabWidget switched away from
+        // the tab holding it), drop the focus so that input methods get torn down.
+        // The key-event handler does the same, but a tab is switched with a pointer
+        // tap, not a key press, so it must also happen here.
+        if self.focus_item.borrow().upgrade().is_some_and(|i| !i.is_visible()) {
+            self.take_focus_item(&FocusEvent::FocusOut(FocusReason::TabNavigation));
+        }
+
         // handle multiple press release
         event = self.click_state.check_repeat(event, self.context().platform().click_interval());
 
@@ -759,7 +779,10 @@ impl WindowInner {
         let mut mouse_input_state = self.mouse_input_state.take();
 
         let was_dragging = mouse_input_state.drag_data.is_some();
-        let old_cursor = core::mem::replace(&mut mouse_input_state.cursor, MouseCursor::Default);
+        let old_cursor = core::mem::replace(
+            &mut mouse_input_state.cursor,
+            MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default),
+        );
 
         // drag-finished firing is deferred until after dispatch so the DropArea has had
         // a chance to fire its own `dropped` callback first; that callback returns the
@@ -819,7 +842,8 @@ impl WindowInner {
                         d.event.position = drop_event.position;
                         d.event.proposed_action = drop_event.proposed_action;
                     }
-                    mouse_input_state.cursor = MouseCursor::NoDrop;
+                    mouse_input_state.cursor =
+                        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NoDrop);
                     event = MouseEvent::DragMove { event: drop_event, allowed };
                 }
                 MouseEvent::Exit => {
@@ -996,7 +1020,7 @@ impl WindowInner {
         } else if old_cursor != mouse_input_state.cursor
             && let Some(window_adapter) = window_adapter.internal(crate::InternalToken)
         {
-            window_adapter.set_mouse_cursor(mouse_input_state.cursor);
+            window_adapter.set_mouse_cursor(mouse_input_state.cursor.clone());
         }
 
         let is_dragging = mouse_input_state.drag_data.is_some();
@@ -2675,10 +2699,10 @@ pub mod ffi {
                     let cpp_graphics_api = match graphics_api {
                         crate::api::GraphicsAPI::NativeOpenGL { .. } => GraphicsAPI::NativeOpenGL,
                         crate::api::GraphicsAPI::WebGL { .. } => unreachable!(), // We don't support wasm with C++
-                        #[cfg(feature = "unstable-wgpu-28")]
-                        crate::api::GraphicsAPI::WGPU28 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                         #[cfg(feature = "unstable-wgpu-29")]
                         crate::api::GraphicsAPI::WGPU29 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
+                        #[cfg(feature = "unstable-wgpu-30")]
+                        crate::api::GraphicsAPI::WGPU30 { .. } => GraphicsAPI::Inaccessible, // There is no C++ API for wgpu (maybe wgpu c in the future?)
                     };
                     (self.callback)(state, cpp_graphics_api, self.user_data)
                 }

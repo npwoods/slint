@@ -48,6 +48,7 @@ impl DefaultFontSize {
 pub struct GlobalAnalysis {
     pub default_font_size: DefaultFontSize,
     pub const_scale_factor: Option<f32>,
+    pub const_image_sizes: bool,
 }
 
 /// Maps the alias in the other direction than what the BindingExpression::two_way_binding does.
@@ -62,6 +63,7 @@ pub fn binding_analysis(
 ) -> GlobalAnalysis {
     let mut global_analysis = GlobalAnalysis {
         const_scale_factor: compiler_config.const_scale_factor,
+        const_image_sizes: compiler_config.const_image_sizes,
         ..Default::default()
     };
     let mut reverse_aliases = Default::default();
@@ -254,8 +256,18 @@ fn analyze_element(
         });
         if let Some(lv) = &repeated.is_listview {
             process_property(&lv.viewport_y.clone().into(), P, context, reverse_aliases, diag);
-            process_property(&lv.viewport_height.clone().into(), P, context, reverse_aliases, diag);
-            process_property(&lv.viewport_width.clone().into(), P, context, reverse_aliases, diag);
+            if let Some(viewport_height) = &lv.viewport_height {
+                process_property(
+                    &viewport_height.clone().into(),
+                    P,
+                    context,
+                    reverse_aliases,
+                    diag,
+                );
+            }
+            if let Some(viewport_width) = &lv.viewport_width {
+                process_property(&viewport_width.clone().into(), P, context, reverse_aliases, diag);
+            }
             process_property(&lv.listview_height.clone().into(), P, context, reverse_aliases, diag);
             process_property(&lv.listview_width.clone().into(), P, context, reverse_aliases, diag);
         }
@@ -727,9 +739,10 @@ fn recurse_expression(
             }
             BuiltinFunction::ItemAbsolutePosition => {
                 if let Some(Expression::ElementReference(item)) = arguments.first() {
+                    // The result depends on the element's own geometry origin as well as every
+                    // ancestor's (map_to_window walks the whole ancestor chain).
                     let mut item = item.upgrade().unwrap();
-                    while let Some(parent) = find_parent_element(&item) {
-                        item = parent;
+                    loop {
                         vis(
                             &NamedReference::new(&item, SmolStr::new_static("x")).into(),
                             ReadType::NativeRead,
@@ -738,6 +751,8 @@ fn recurse_expression(
                             &NamedReference::new(&item, SmolStr::new_static("y")).into(),
                             ReadType::NativeRead,
                         );
+                        let Some(parent) = find_parent_element(&item) else { break };
+                        item = parent;
                     }
                 }
             }
@@ -1018,13 +1033,16 @@ fn check_window_properties(doc: &Document, global_analysis: &mut GlobalAnalysis)
                             .get(DEFAULT_FONT_SIZE)
                             .is_some_and(|a| a.is_set)
                     {
-                        let value = elem.borrow().bindings.get(DEFAULT_FONT_SIZE).and_then(|e| {
-                            match &e.borrow().expression {
-                                Expression::NumberLiteral(v, crate::expression_tree::Unit::Px) => {
-                                    Some(*v as f32)
-                                }
-                                _ => None,
+                        // Do not ignore debug hooks here. They make the expression variable, so the
+                        // const-check would incorrectly mark the font size as const, even if it is
+                        // not.
+                        let value = elem.borrow().binding(DEFAULT_FONT_SIZE).and_then(|e| match e
+                            .expression
+                        {
+                            Expression::NumberLiteral(v, crate::expression_tree::Unit::Px) => {
+                                Some(v as f32)
                             }
+                            _ => None,
                         });
                         let is_const = value.is_some()
                             || NamedReference::new(elem, SmolStr::new_static(DEFAULT_FONT_SIZE))

@@ -13,6 +13,9 @@ use smol_str::{SmolStr, ToSmolStr, format_smolstr};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+/// Number of slots a cell occupies in a box layout cache: position and size.
+pub const BOX_LAYOUT_CACHE_ENTRIES_PER_CELL: usize = 2;
+
 #[derive(Clone, Debug, Copy, Eq, PartialEq)]
 pub enum Orientation {
     Horizontal,
@@ -197,6 +200,16 @@ pub struct LayoutConstraints {
     pub fixed_height: bool,
 }
 
+/// The [`LayoutConstraints`] fields along one orientation.
+pub struct OrientationConstraints<'a> {
+    pub min: &'a Option<NamedReference>,
+    pub max: &'a Option<NamedReference>,
+    pub preferred: &'a Option<NamedReference>,
+    pub stretch: &'a Option<NamedReference>,
+    /// The size is set by an explicit `width`/`height` binding.
+    pub fixed: bool,
+}
+
 impl LayoutConstraints {
     /// Build the constraints for the given element.
     ///
@@ -284,36 +297,48 @@ impl LayoutConstraints {
         }
     }
 
+    pub fn for_orientation(&self, orientation: Orientation) -> OrientationConstraints<'_> {
+        match orientation {
+            Orientation::Horizontal => OrientationConstraints {
+                min: &self.min_width,
+                max: &self.max_width,
+                preferred: &self.preferred_width,
+                stretch: &self.horizontal_stretch,
+                fixed: self.fixed_width,
+            },
+            Orientation::Vertical => OrientationConstraints {
+                min: &self.min_height,
+                max: &self.max_height,
+                preferred: &self.preferred_height,
+                stretch: &self.vertical_stretch,
+                fixed: self.fixed_height,
+            },
+        }
+    }
+
     // Iterate over the constraint with a reference to a property, and the corresponding member in the i_slint_core::layout::LayoutInfo struct
     pub fn for_each_restrictions(
         &self,
         orientation: Orientation,
     ) -> impl Iterator<Item = (&NamedReference, &'static str)> {
-        let (min, max, preferred, stretch) = match orientation {
-            Orientation::Horizontal => {
-                (&self.min_width, &self.max_width, &self.preferred_width, &self.horizontal_stretch)
-            }
-            Orientation::Vertical => {
-                (&self.min_height, &self.max_height, &self.preferred_height, &self.vertical_stretch)
-            }
-        };
+        let c = self.for_orientation(orientation);
         std::iter::empty()
-            .chain(min.as_ref().map(|x| {
+            .chain(c.min.as_ref().map(|x| {
                 if Expression::PropertyReference(x.clone()).ty() != Type::Percent {
                     (x, "min")
                 } else {
                     (x, "min_percent")
                 }
             }))
-            .chain(max.as_ref().map(|x| {
+            .chain(c.max.as_ref().map(|x| {
                 if Expression::PropertyReference(x.clone()).ty() != Type::Percent {
                     (x, "max")
                 } else {
                     (x, "max_percent")
                 }
             }))
-            .chain(preferred.as_ref().map(|x| (x, "preferred")))
-            .chain(stretch.as_ref().map(|x| (x, "stretch")))
+            .chain(c.preferred.as_ref().map(|x| (x, "preferred")))
+            .chain(c.stretch.as_ref().map(|x| (x, "stretch")))
     }
 
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
@@ -648,6 +673,29 @@ pub struct FlexboxLayout {
 }
 
 impl FlexboxLayout {
+    /// If `elem` is a (lowered, inline) FlexboxLayout, return its layout
+    /// description. The struct is embedded in the synthesized
+    /// `layoutinfo-{h,v}` / `layout-cache` bindings on the element.
+    pub fn from_element(elem: &ElementRc) -> Option<FlexboxLayout> {
+        use crate::expression_tree::Expression;
+        // The `layoutinfo-{h,v}` property's binding (on this element or its
+        // base component's root) holds a `ComputeFlexboxLayoutInfo` with the
+        // layout when the element is a FlexboxLayout.
+        let nr = {
+            let eb = elem.borrow();
+            eb.layout_info_prop(Orientation::Vertical)
+                .or_else(|| eb.layout_info_prop(Orientation::Horizontal))
+                .cloned()
+        }?;
+        let target = nr.element();
+        let target = target.borrow();
+        let binding = target.bindings.get(nr.name())?;
+        match binding.borrow().expression.ignore_debug_hooks() {
+            Expression::ComputeFlexboxLayoutInfo { layout, .. } => Some(layout.clone()),
+            _ => None,
+        }
+    }
+
     /// Try to determine the flex direction at compile time from a constant binding.
     /// Returns None if the direction is set at runtime.
     fn compile_time_direction(&self) -> Option<FlexboxLayoutDirection> {
@@ -844,6 +892,16 @@ pub fn implicit_layout_info_call(
             }),
         };
     }
+}
+
+/// The stretch factor of elements based on text or image items, which never
+/// stretch: their `layout_info` always reports stretch 0, and a layoutinfo
+/// property synthesized later can only merge it with smaller values.
+pub fn static_native_stretch(elem: &ElementRc) -> Option<Expression> {
+    elem.borrow()
+        .builtin_type()
+        .filter(|b| matches!(b.name.as_str(), "Text" | "StyledText" | "TextInput" | "Image"))
+        .map(|_| Expression::NumberLiteral(0., Unit::None))
 }
 
 /// Create a new property based on the name. (it might get a different name if that property exist)

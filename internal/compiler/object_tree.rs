@@ -16,13 +16,13 @@ use crate::langtype::{
 use crate::langtype::{ElementType, PropertyLookupResult};
 use crate::layout::{LayoutConstraints, Orientation};
 use crate::namedreference::NamedReference;
-use crate::parser;
 use crate::parser::{SyntaxKind, SyntaxNode, syntax_nodes};
 use crate::typeloader::{ImportKind, ImportedTypes, LibraryInfo};
 use crate::typeregister::TypeRegister;
+use crate::{parser, reject_experimental_feature};
 use itertools::Either;
 use smol_str::{SmolStr, ToSmolStr, format_smolstr};
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
@@ -86,6 +86,7 @@ impl Document {
         diag: &mut BuildDiagnostics,
         parent_registry: &Rc<RefCell<TypeRegister>>,
         ignore_missing_font_files: bool,
+        symbol_counters: &Rc<crate::symbol_counters::SymbolCounters>,
     ) -> Self {
         debug_assert_eq!(node.kind(), SyntaxKind::Document);
 
@@ -144,6 +145,7 @@ impl Document {
                 diag,
                 local_registry,
                 parser::identifier_text(&n.DeclaredIdentifier()),
+                Some(symbol_counters),
             );
             assert!(matches!(ty, Type::Struct(_)));
             if !local_registry.insert_type(ty.clone()) {
@@ -516,8 +518,7 @@ impl Component {
                         ElementType::Global
                     }
                     Some(t) if t == "interface" => {
-                        if !diag.enable_experimental && !tr.expose_internal_types {
-                            diag.push_error("'interface' is an experimental feature".into(), &node);
+                        if reject_experimental_feature(diag, tr, "interface", &node) {
                             ElementType::Error
                         } else {
                             ElementType::Interface
@@ -534,6 +535,28 @@ impl Component {
             ..Default::default()
         };
         let c = Rc::new(c);
+        // x and y on a Window are meaningless
+        if c.root_element
+            .borrow()
+            .builtin_type()
+            .is_some_and(|b| matches!(b.name.as_str(), "Window" | "Dialog"))
+        {
+            for prop in ["x", "y"] {
+                if let Some(b) = c.root_element.borrow().bindings.get(prop) {
+                    #[cfg(feature = "slint-sc")]
+                    if diag.slint_sc {
+                        diag.slint_sc_error(&format!("The property '{prop}' is"), &*b.borrow());
+                        continue;
+                    }
+                    diag.push_warning(
+                        format!(
+                            "Setting '{prop}' on a Window is deprecated, it doesn't affect the position of the window"
+                        ),
+                        &*b.borrow(),
+                    );
+                }
+            }
+        }
         let weak = Rc::downgrade(&c);
         recurse_elem(&c.root_element, &(), &mut |e, _| {
             e.borrow_mut().enclosing_component = weak.clone();
@@ -543,7 +566,6 @@ impl Component {
                 *qualified_id = format_smolstr!("{}::{}", c.id, qualified_id);
             }
         });
-        interfaces::apply_uses_statement(&c.root_element, node.UsesSpecifier(), tr, diag);
         c
     }
 
@@ -653,6 +675,10 @@ pub struct PropertyDeclaration {
     /// Whether the declaration shadows a builtin element member of the same name
     /// (diagnosed by the check_builtin_shadowing pass)
     pub shadows_builtin: bool,
+    /// Some if the property was declared with `@deprecated`. The string is the hint shown after
+    /// "The property 'xxx' has been deprecated." in the warning: either derived from the two-way
+    /// binding target, or the custom message given as argument to `@deprecated("...")`.
+    pub deprecated: Option<SmolStr>,
 }
 
 impl PropertyDeclaration {
@@ -664,6 +690,18 @@ impl PropertyDeclaration {
         } else {
             node.clone().into()
         }
+    }
+
+    /// True when declared `@deprecated` without a custom message, so the hint in
+    /// [`Self::deprecated`] is derived from the two-way binding target.
+    pub fn has_derived_deprecation(&self) -> bool {
+        self.deprecated.is_some()
+            && self
+                .node
+                .as_ref()
+                .and_then(|n| syntax_nodes::PropertyDeclaration::new(n.clone()))
+                .and_then(|p| p.PropertyDeprecation())
+                .is_some_and(|d| d.child_token(SyntaxKind::StringLiteral).is_none())
     }
 }
 
@@ -883,6 +921,10 @@ pub struct Element {
 
     /// true when this item's geometry is handled by a layout
     pub child_of_layout: bool,
+    /// true when this item is a direct cell of a `FlexboxLayout`. Narrower
+    /// than `child_of_layout`: only flexbox cells need the per-repeater
+    /// `flexbox_layout_item_info` accessor.
+    pub child_of_flexbox: bool,
     /// The property pointing to the layout info. `(horizontal, vertical)`
     pub layout_info_prop: Option<(NamedReference, NamedReference)>,
     /// `pure function layoutinfo-v-with-constraint(width: length) -> LayoutInfo`
@@ -1102,8 +1144,12 @@ impl PropertyAnalysis {
 #[derive(Debug, Clone)]
 pub struct ListViewInfo {
     pub viewport_y: NamedReference,
-    pub viewport_height: NamedReference,
-    pub viewport_width: NamedReference,
+    /// `None` when the user explicitly sets `viewport-height` on the ListView;
+    /// `Some` when the ListView computes it from the content.
+    pub viewport_height: Option<NamedReference>,
+    /// `None` when the user explicitly sets `viewport-width` on the ListView;
+    /// `Some` when the ListView computes it from the content.
+    pub viewport_width: Option<NamedReference>,
     /// The ListView's inner visible height (not counting eventual scrollbar)
     pub listview_height: NamedReference,
     /// The ListView's inner visible width (not counting eventual scrollbar)
@@ -1144,6 +1190,11 @@ impl Element {
         diag: &mut BuildDiagnostics,
         tr: &TypeRegister,
     ) -> ElementRc {
+        // A child element's parent_type is the type of its parent; the root
+        // gets a sentinel from Component::from_node
+        #[cfg(feature = "slint-sc")]
+        let is_component_root =
+            !matches!(parent_type, ElementType::Builtin(_) | ElementType::Component(_));
         let base_type = if let Some(base_node) = node.QualifiedName() {
             let base = QualifiedTypeName::from_node(base_node.clone());
             let base_string = base.to_smolstr();
@@ -1207,10 +1258,19 @@ impl Element {
                     error_on(&cb, "an 'init' callback")
                 }
             });
+            node.MatchElement().for_each(|n| error_on(&n, "match statements"));
 
             if parent_type == ElementType::Interface {
                 node.Binding().for_each(|n| error_on(&n, "bindings"));
                 node.TwoWayBinding().for_each(|n| error_on(&n, "two-way bindings"));
+
+                node.ImplementStatement().for_each(|stmt| {
+                    diag.push_error("Interfaces cannot implement another interface".into(), &stmt);
+                });
+            } else {
+                node.ImplementStatement().for_each(|stmt| {
+                    diag.push_error("Globals cannot implement an interface".into(), &stmt);
+                });
             }
 
             parent_type
@@ -1260,8 +1320,14 @@ impl Element {
         )> = Vec::new();
 
         for prop_decl in node.PropertyDeclaration() {
+            // Only the root element's properties become part of the component's API
             #[cfg(feature = "slint-sc")]
-            diag.slint_sc_error("Property declarations are", &prop_decl);
+            if !is_component_root {
+                diag.slint_sc_error(
+                    "Declaring a property on an element other than the root is",
+                    &prop_decl,
+                );
+            }
             let prop_type = prop_decl
                 .Type()
                 .map(|type_node| type_from_node(type_node, diag, tr))
@@ -1358,6 +1424,37 @@ impl Element {
                 }
             }
 
+            let deprecated = prop_decl.PropertyDeprecation().and_then(|deprecation| {
+                if reject_experimental_feature(diag, tr, "@deprecated", &deprecation) {
+                    return None;
+                }
+                if let Some(message) = deprecation.child_token(SyntaxKind::StringLiteral) {
+                    crate::literals::unescape_string(message.text())
+                } else if let Some(qn) = prop_decl
+                    .TwoWayBinding()
+                    .and_then(|twb| twb.Expression().QualifiedName())
+                {
+                    // Keep the full target path (e.g. `a-struct.field`), dropping a leading
+                    // `self`/`root`. The resolving pass checks the target is actually reachable.
+                    let mut segments = qn
+                        .children_with_tokens()
+                        .filter(|t| t.kind() == SyntaxKind::Identifier)
+                        .map(|t| parser::normalize_identifier(t.as_token().unwrap().text()))
+                        .peekable();
+                    if segments.peek().is_some_and(|s| matches!(s.as_str(), "self" | "root")) {
+                        segments.next();
+                    }
+                    let path = segments.collect::<Vec<_>>().join(".");
+                    (!path.is_empty()).then(|| format_smolstr!("Please use '{path}' instead"))
+                } else {
+                    diag.push_error(
+                        "@deprecated without a message requires a two-way binding to derive the replacement from".into(),
+                        &deprecation,
+                    );
+                    None
+                }
+            });
+
             // Use the name as declared, not the resolved name: when the declaration
             // shadows a builtin member, the resolved name may be a native alias.
             r.property_declarations.insert(
@@ -1367,6 +1464,7 @@ impl Element {
                     node: Some(prop_decl.clone().into()),
                     visibility,
                     shadows_builtin,
+                    deprecated,
                     ..Default::default()
                 },
             );
@@ -1386,8 +1484,17 @@ impl Element {
             }
         }
 
-        let implemented_interface = interfaces::get_implemented_interface(&r, &node, tr, diag);
-        interfaces::apply_properties(&mut r, &implemented_interface, diag);
+        let (implemented_interfaces, child_implements) =
+            if matches!(r.base_type, ElementType::Global | ElementType::Interface) {
+                // Already rejected above with a more specific diagnostic.
+                (Vec::new(), Vec::new())
+            } else if r.id == "root" {
+                interfaces::get_implemented_interfaces(&r, &node, tr, diag)
+            } else {
+                interfaces::disallow_implement_in_non_root(&node, tr, diag);
+                (Vec::new(), Vec::new())
+            };
+        interfaces::apply_properties(&mut r, &implemented_interfaces, diag);
 
         for (prop_name, csn, source) in property_bindings {
             match r.bindings.entry(prop_name.clone()) {
@@ -1519,7 +1626,7 @@ impl Element {
             );
         }
 
-        interfaces::apply_callbacks(&mut r, &implemented_interface, diag);
+        interfaces::apply_callbacks(&mut r, &implemented_interfaces, diag);
 
         for func in node.Function() {
             #[cfg(feature = "slint-sc")]
@@ -1865,6 +1972,23 @@ impl Element {
                     )
                 }
                 r.borrow_mut().children.push(rep);
+            } else if se.kind() == SyntaxKind::MatchElement {
+                let mut sub_child_insertion_point = None;
+                let rep = Element::from_match_node(
+                    se.into(),
+                    r.borrow().base_type.clone(),
+                    &mut sub_child_insertion_point,
+                    is_legacy_syntax,
+                    diag,
+                    tr,
+                );
+                if let Some(ChildrenInsertionPoint { node: se, .. }) = sub_child_insertion_point {
+                    diag.push_error(
+                        "The @children placeholder cannot appear in a match element".into(),
+                        &se,
+                    )
+                }
+                r.borrow_mut().children.extend(rep);
             } else if se.kind() == SyntaxKind::ChildrenPlaceholder {
                 #[cfg(feature = "slint-sc")]
                 diag.slint_sc_error("The @children placeholder is", &se);
@@ -1955,8 +2079,8 @@ impl Element {
             }
         }
 
-        interfaces::apply_default_property_values(&r, &implemented_interface);
-        interfaces::validate_function_implementations(&r.borrow(), &implemented_interface, diag);
+        interfaces::validate_function_implementations(&r.borrow(), &implemented_interfaces, diag);
+        interfaces::apply_child_implement_statements(&r, child_implements, diag);
 
         r
     }
@@ -2023,19 +2147,36 @@ impl Element {
         let is_listview = if parent_is_listview
             && let Some(geometry_props) = e.borrow().geometry_props.as_ref()
         {
+            let parent_elem = parent.borrow();
+            // Check if viewport-width and viewport-height are explicitly set by the user
+            let viewport_width_is_explicitly_set = parent_elem
+                .bindings
+                .get("viewport-width")
+                .map(|b| b.borrow().has_binding())
+                .unwrap_or(false);
+            let viewport_height_is_explicitly_set = parent_elem
+                .bindings
+                .get("viewport-height")
+                .map(|b| b.borrow().has_binding())
+                .unwrap_or(false);
+            drop(parent_elem); // Drop the borrow before creating NamedReference
+
             let lvi = ListViewInfo {
                 viewport_y: NamedReference::new(parent, SmolStr::new_static("viewport-y")),
-                viewport_height: NamedReference::new(
-                    parent,
-                    SmolStr::new_static("viewport-height"),
-                ),
-                viewport_width: NamedReference::new(parent, SmolStr::new_static("viewport-width")),
+                viewport_height: (!viewport_height_is_explicitly_set)
+                    .then(|| NamedReference::new(parent, SmolStr::new_static("viewport-height"))),
+                viewport_width: (!viewport_width_is_explicitly_set)
+                    .then(|| NamedReference::new(parent, SmolStr::new_static("viewport-width"))),
                 listview_height: NamedReference::new(parent, SmolStr::new_static("visible-height")),
                 listview_width: NamedReference::new(parent, SmolStr::new_static("visible-width")),
             };
             // these properties are set by the ListView layouting code
-            lvi.viewport_height.mark_as_set();
-            lvi.viewport_width.mark_as_set();
+            if let Some(viewport_height) = &lvi.viewport_height {
+                viewport_height.mark_as_set();
+            }
+            if let Some(viewport_width) = &lvi.viewport_width {
+                viewport_width.mark_as_set();
+            }
             geometry_props.y.mark_as_set();
             Some(lvi)
         } else {
@@ -2087,6 +2228,86 @@ impl Element {
         e
     }
 
+    fn from_match_node(
+        node: syntax_nodes::MatchElement,
+        parent_type: ElementType,
+        component_child_insertion_point: &mut Option<ChildrenInsertionPoint>,
+        is_in_legacy_component: bool,
+        diag: &mut BuildDiagnostics,
+        tr: &TypeRegister,
+    ) -> Vec<ElementRc> {
+        if !diag.enable_experimental {
+            diag.push_error("match statements are an experimental feature".into(), &node);
+        }
+        let mut cases: Vec<ElementRc> = Vec::new();
+        let expr = node.Expression();
+        for case in node.MatchCase() {
+            let Some(sub_element) = case.SubElement() else {
+                continue;
+            };
+            let rei = RepeatedElementInfo {
+                model: Expression::BinaryExpression {
+                    lhs: (Box::new(Expression::Uncompiled(expr.clone().into()))),
+                    rhs: Box::new(Expression::Uncompiled(case.Expression().into())),
+                    op: '=',
+                },
+                model_data_id: SmolStr::default(),
+                index_id: SmolStr::default(),
+                is_conditional_element: true,
+                is_listview: None,
+            };
+            let e: Rc<RefCell<Element>> = Element::from_sub_element_node(
+                sub_element,
+                parent_type.clone(),
+                component_child_insertion_point,
+                is_in_legacy_component,
+                diag,
+                tr,
+            );
+            e.borrow_mut().repeated = Some(rei);
+            cases.push(e);
+        }
+        if let Some(wildcard) = node.WildcardMatchCase()
+            && let Some(sub_element) = wildcard.SubElement()
+        {
+            let case_exprs: Vec<_> = node.MatchCase().collect();
+            let mut condition = Expression::BinaryExpression {
+                lhs: Box::new(Expression::Uncompiled(expr.clone().into())),
+                rhs: Box::new(Expression::Uncompiled(case_exprs[0].Expression().into())),
+                op: '!',
+            };
+            for case in &case_exprs[1..] {
+                condition = Expression::BinaryExpression {
+                    lhs: Box::new(condition),
+                    rhs: Box::new(Expression::BinaryExpression {
+                        lhs: Box::new(Expression::Uncompiled(expr.clone().into())),
+                        rhs: Box::new(Expression::Uncompiled(case.Expression().into())),
+                        op: '!',
+                    }),
+                    op: '&',
+                };
+            }
+            let rei = RepeatedElementInfo {
+                model: condition,
+                model_data_id: SmolStr::default(),
+                index_id: SmolStr::default(),
+                is_conditional_element: true,
+                is_listview: None,
+            };
+            let e = Element::from_sub_element_node(
+                sub_element,
+                parent_type.clone(),
+                component_child_insertion_point,
+                is_in_legacy_component,
+                diag,
+                tr,
+            );
+            e.borrow_mut().repeated = Some(rei);
+            cases.push(e);
+        }
+        cases
+    }
+
     /// Return the type of a property in this element or its base, along with the final name, in case
     /// the provided name points towards a property alias. Type::Invalid is returned if the property does
     /// not exist.
@@ -2107,6 +2328,9 @@ impl Element {
                 is_in_direct_base: false,
                 is_shadowable: false,
                 builtin_function: None,
+                #[cfg(feature = "slint-sc")]
+                is_slint_sc: false,
+                deprecated: p.deprecated.clone(),
             },
         )
     }
@@ -2118,10 +2342,12 @@ impl Element {
         diag: &mut BuildDiagnostics,
     ) {
         for (name_token, b) in bindings {
-            #[cfg(feature = "slint-sc")]
-            diag.slint_sc_error("Bindings are", &name_token);
             let unresolved_name = crate::parser::normalize_identifier(name_token.text());
             let lookup_result = self.lookup_property(&unresolved_name);
+            #[cfg(feature = "slint-sc")]
+            if lookup_result.is_valid() && !lookup_result.is_slint_sc {
+                diag.slint_sc_error(&format!("The property '{unresolved_name}' is"), &name_token);
+            }
             if !lookup_result.property_type.is_property_type() {
                 match lookup_result.property_type {
                         Type::Invalid => {
@@ -2172,6 +2398,14 @@ impl Element {
                 diag.push_property_deprecation_warning(
                     &unresolved_name,
                     &lookup_result.resolved_name,
+                    &name_token,
+                );
+            } else if let Some(message) =
+                lookup_result.deprecated.as_ref().filter(|_| !lookup_result.is_local_to_component)
+            {
+                diag.push_property_deprecation_warning_with_message(
+                    &unresolved_name,
+                    message,
                     &name_token,
                 );
             }
@@ -2267,9 +2501,11 @@ impl Element {
             // Conservatively treat any wrap binding (including a literal
             // `no-wrap`) as height-for-width.
             "Text" | "TextInput" => self.is_binding_set("wrap", false),
-            // `StyledText` has no `wrap` property; markdown text always
-            // wraps to fill the given width.
-            "Image" | "ClippedImage" | "StyledText" => true,
+            // An Image is height-for-width only while its height comes from its
+            // width; with an explicit height it is fixed, so it is not.
+            "Image" | "ClippedImage" => !self.is_binding_set("height", true),
+            // Markdown text always wraps to fill the given width.
+            "StyledText" => true,
             _ => false,
         }
     }
@@ -2290,6 +2526,23 @@ impl Element {
             base = root.base_type.clone();
         }
         None
+    }
+
+    /// Whether [`Self::inherited_layout_info_v_with_constraint`] would return
+    /// `Some`, without cloning the `NamedReference`.
+    pub fn has_inherited_layout_info_v_with_constraint(&self) -> bool {
+        if self.layout_info_v_with_constraint.is_some() {
+            return true;
+        }
+        let mut base = self.base_type.clone();
+        while let ElementType::Component(base_comp) = base {
+            let root = base_comp.root_element.borrow();
+            if root.layout_info_v_with_constraint.is_some() {
+                return true;
+            }
+            base = root.base_type.clone();
+        }
+        false
     }
 
     /// Mirror of [`Self::inherited_layout_info_v_with_constraint`] for the
@@ -2322,6 +2575,9 @@ impl Element {
     ///
     /// If `need_explicit` is true, then only consider binding set in the code, not the ones set
     /// by the compiler later.
+    ///
+    /// Synthetic debug hooks (materialized for unbound properties) are never considered set
+    /// (`has_binding` treats them as "no expression").
     pub fn is_binding_set(self: &Element, property_name: &str, need_explicit: bool) -> bool {
         if self.bindings.get(property_name).is_some_and(|b| {
             b.borrow().has_binding() && (!need_explicit || b.borrow().priority > 0)
@@ -2335,8 +2591,12 @@ impl Element {
     }
 
     /// Returns true if the property is set by a binding or an assignment expression
+    ///
+    /// Synthetic debug hooks (materialized for unbound properties) are not considered set.
     pub fn is_property_set(self: &Element, property_name: &str) -> bool {
-        self.bindings.contains_key(property_name)
+        self.bindings
+            .get(property_name)
+            .is_some_and(|b| !b.borrow().expression.is_synthetic_debug_hook())
             || self
                 .property_analysis
                 .borrow()
@@ -2345,10 +2605,45 @@ impl Element {
             || matches!(&self.base_type, ElementType::Component(base) if base.root_element.borrow().is_property_set(property_name))
     }
 
-    /// Set the property `property_name` of this Element only if it was not set.
-    /// the `expression_fn` will only be called if it isn't set
+    /// The binding for `property_name`, if one exists and is not a synthetic debug hook.
     ///
-    /// returns true if the binding was changed
+    /// This is the hook-aware replacement for `self.bindings.get(..)`: a synthetic debug hook
+    /// is a materialized placeholder for an *unbound* property and must read as "no binding".
+    /// Use this instead of the raw map whenever the question is "did anything bind this
+    /// property" or "what is this property's binding".
+    pub fn binding(&self, property_name: &str) -> Option<Ref<'_, BindingExpression>> {
+        self.bindings
+            .get(property_name)
+            .filter(|binding| !binding.borrow().expression.is_synthetic_debug_hook())
+            .map(|binding| binding.borrow())
+    }
+
+    /// Same as [`Self::binding`], but returns a mutable reference to the binding.
+    pub fn binding_mut(&self, property_name: &str) -> Option<RefMut<'_, BindingExpression>> {
+        self.bindings
+            .get(property_name)
+            .filter(|binding| !binding.borrow().expression.is_synthetic_debug_hook())
+            .map(|binding| binding.borrow_mut())
+    }
+
+    /// Iterate over the bindings that are not synthetic debug hooks.
+    ///
+    /// The hook-aware replacement for iterating `self.bindings` directly when enumerating the
+    /// properties that are actually set on this element.
+    pub fn real_bindings(&self) -> impl Iterator<Item = (&SmolStr, &RefCell<BindingExpression>)> {
+        self.bindings
+            .iter()
+            .filter(|(_, binding)| !binding.borrow().expression.is_synthetic_debug_hook())
+    }
+
+    /// Set the property `property_name` of this Element only if it was not set.
+    /// the `expression_fn` will only be called if it isn't set.
+    ///
+    /// If a synthetic debug hook exists for this property, the hook's inner expression is
+    /// replaced with the new value (keeping the wrapper and id) and the hook is marked
+    /// non-synthetic — so the property becomes live-editable at its real computed value.
+    ///
+    /// Returns true if the binding was changed.
     pub fn set_binding_if_not_set(
         &mut self,
         property_name: SmolStr,
@@ -2365,12 +2660,60 @@ impl Element {
                 vacant_entry.insert(binding.into());
             }
             Entry::Occupied(mut existing_entry) => {
+                let inner = existing_entry.get_mut().get_mut();
                 let mut binding: BindingExpression = expression_fn().into();
                 binding.priority = i32::MAX;
-                existing_entry.get_mut().get_mut().merge_with(&binding);
+                // merge_with takes care of overwriting synthetic debug hooks.
+                inner.merge_with(&binding);
             }
         };
         true
+    }
+
+    /// Unconditionally set the property `property_name` to `new_binding`, but handle a synthetic
+    /// debug hook that already occupies the slot specially: instead of replacing it, upgrade it
+    /// in-place (replace its inner expression, clear `synthetic`, keep the wrapper+id so the
+    /// property stays live-editable).
+    ///
+    /// Returns the old `BindingExpression` if a *real* (non-synthetic) binding was displaced so
+    /// the caller can report a conflict.  Returns `None` if the slot was empty or held only a
+    /// synthetic hook (no conflict).
+    ///
+    /// This is intended for passes like `lower_layout` that must force-set a property and need to
+    /// distinguish a genuine conflict from a synthetic placeholder.
+    pub fn set_binding(
+        &mut self,
+        property_name: SmolStr,
+        mut new_binding: BindingExpression,
+    ) -> Option<BindingExpression> {
+        match self.bindings.entry(property_name) {
+            Entry::Vacant(v) => {
+                v.insert(RefCell::new(new_binding));
+                None
+            }
+            Entry::Occupied(mut e) => {
+                let existing = e.get_mut().get_mut();
+                if let expression_tree::Expression::DebugHook { expression: _, synthetic, id } =
+                    &mut existing.expression
+                    && *synthetic
+                {
+                    // Adopt the previous synthetic debug hook into the new binding, which is now no
+                    // longer synthetic.
+                    let new_debug_hook = expression_tree::Expression::DebugHook {
+                        expression: Box::new(new_binding.expression),
+                        id: id.clone(),
+                        synthetic: false,
+                    };
+                    new_binding.expression = new_debug_hook;
+                    *existing = new_binding;
+                    // previously the binding was only a synthetic debug hook - don't report a
+                    // conflict
+                    return None;
+                }
+                // Real (non-synthetic) binding exists: replace it and report the conflict.
+                Some(std::mem::replace(e.get_mut().get_mut(), new_binding))
+            }
+        }
     }
 
     pub fn sub_component(&self) -> Option<&Rc<Component>> {
@@ -2452,7 +2795,9 @@ pub fn type_from_node(
         let prop_type = tr.lookup_qualified(&qualified_type.members);
 
         #[cfg(feature = "slint-sc")]
-        diag.slint_sc_error(&format!("The type '{qualified_type}' is"), &qualified_type_node);
+        if !prop_type.is_slint_sc() {
+            diag.slint_sc_error(&format!("The type '{qualified_type}' is"), &qualified_type_node);
+        }
 
         if prop_type == Type::Invalid && tr.lookup_element(&qualified_type.to_smolstr()).is_err() {
             diag.push_error(format!("Unknown type '{qualified_type}'"), &qualified_type_node);
@@ -2466,7 +2811,7 @@ pub fn type_from_node(
     } else if let Some(object_node) = node.ObjectType() {
         #[cfg(feature = "slint-sc")]
         diag.slint_sc_error("Inline struct types are", &object_node);
-        type_struct_from_node(object_node, diag, tr, None)
+        type_struct_from_node(object_node, diag, tr, None, None)
     } else if let Some(array_node) = node.ArrayType() {
         #[cfg(feature = "slint-sc")]
         diag.slint_sc_error("Array types are", &array_node);
@@ -2478,25 +2823,119 @@ pub fn type_from_node(
 }
 
 /// Create a [`Type::Struct`] from a [`syntax_nodes::ObjectType`]
+///
+/// `symbol_counters` is only available for named struct declarations,
+/// where field default values (`struct Foo { bar: int = 42 }`) are supported.
 pub fn type_struct_from_node(
     object_node: syntax_nodes::ObjectType,
     diag: &mut BuildDiagnostics,
     tr: &TypeRegister,
     name: Option<SmolStr>,
+    symbol_counters: Option<&Rc<crate::symbol_counters::SymbolCounters>>,
 ) -> Type {
-    let fields = object_node
+    let mut field_defaults = BTreeMap::default();
+    let fields: BTreeMap<SmolStr, Type> = object_node
         .ObjectTypeMember()
         .map(|member| {
-            (
-                parser::identifier_text(&member).unwrap_or_default(),
-                type_from_node(member.Type(), diag, tr),
-            )
+            let field_name = parser::identifier_text(&member).unwrap_or_default();
+            let field_ty = type_from_node(member.Type(), diag, tr);
+            if let Some(default_value_node) = member.Expression() {
+                if name.is_none() {
+                    diag.push_error(
+                        "Field default values are only supported in named struct declarations"
+                            .into(),
+                        &default_value_node,
+                    );
+                } else if let Some(expr) = resolve_struct_field_default_value(
+                    default_value_node,
+                    &field_ty,
+                    diag,
+                    tr,
+                    symbol_counters.expect("named struct declarations have symbol counters"),
+                ) {
+                    field_defaults.insert(field_name.clone(), expr);
+                }
+            }
+            (field_name, field_ty)
         })
         .collect();
     Type::Struct(Rc::new(Struct {
         fields,
+        field_defaults,
         name: name.map_or(StructName::None, |name| StructName::User { name, node: object_node }),
     }))
+}
+
+/// Resolve, type-check, and constant-fold the default value expression of a struct field.
+/// Returns `None` (with a diagnostic) if the expression is not a compile time constant.
+fn resolve_struct_field_default_value(
+    node: syntax_nodes::Expression,
+    field_ty: &Type,
+    diag: &mut BuildDiagnostics,
+    tr: &TypeRegister,
+    symbol_counters: &Rc<crate::symbol_counters::SymbolCounters>,
+) -> Option<crate::langtype::ConstantExpression> {
+    let mut expr = {
+        let mut ctx = crate::lookup::LookupCtx::empty_context(tr, diag, symbol_counters.clone());
+        ctx.property_type = field_ty.clone();
+        Expression::from_expression_node(node.clone(), &mut ctx).maybe_convert_to(
+            field_ty.clone(),
+            &node,
+            ctx.diag,
+            &ctx.symbol_counters,
+        )
+    };
+    crate::passes::const_propagation::fold_const_expression(&mut expr);
+    // An error was already reported when a part of the expression failed to resolve
+    // or convert; don't report a confusing constant-ness error on top of it
+    let mut has_invalid = false;
+    expr.visit_recursive(&mut |e| has_invalid |= matches!(e, Expression::Invalid));
+    if has_invalid {
+        return None;
+    }
+    let constant = crate::langtype::ConstantExpression::from_expression(&expr);
+    if constant.is_none() {
+        let reason = non_constant_expression_reason(&expr)
+            .map_or_else(Default::default, |reason| format!(": {reason}"));
+        diag.push_error(
+            format!("The default value of a struct field must be a constant expression{reason}"),
+            &node,
+        );
+    }
+    constant
+}
+
+/// A user-facing explanation of what makes the expression non-constant, if there is
+/// a better one than "it is not in the supported subset"
+fn non_constant_expression_reason(expr: &Expression) -> Option<String> {
+    use crate::expression_tree::{BuiltinFunction, Callable};
+    let mut reason = None;
+    expr.visit_recursive(&mut |e| {
+        if reason.is_some() {
+            return;
+        }
+        reason = match e {
+            Expression::PropertyReference(nr) => {
+                Some(format!("it references the property '{}'", nr.name()))
+            }
+            Expression::FunctionCall { function, .. } => match function {
+                Callable::Function(nr) => Some(format!("it calls the function '{}'", nr.name())),
+                Callable::Callback(nr) => Some(format!("it calls the callback '{}'", nr.name())),
+                Callable::Builtin(BuiltinFunction::GetWindowScaleFactor) => Some(
+                    "the conversion to logical pixels depends on the window's scale factor".into(),
+                ),
+                Callable::Builtin(BuiltinFunction::GetWindowDefaultFontSize) => Some(
+                    "the conversion from 'rem' depends on the window's default font size".into(),
+                ),
+                Callable::Builtin(BuiltinFunction::Translate) => {
+                    Some("the translation is selected at run-time".into())
+                }
+                Callable::Builtin(_) => Some("functions are not evaluated at compile time".into()),
+            },
+            _ => None,
+        };
+    });
+    reason
 }
 
 fn animation_element_from_node(
@@ -2923,8 +3362,12 @@ pub fn visit_all_named_references_in_element(
         && let Some(lv) = &mut r.is_listview
     {
         vis(&mut lv.viewport_y);
-        vis(&mut lv.viewport_height);
-        vis(&mut lv.viewport_width);
+        if let Some(viewport_height) = &mut lv.viewport_height {
+            vis(viewport_height);
+        }
+        if let Some(viewport_width) = &mut lv.viewport_width {
+            vis(viewport_width);
+        }
         vis(&mut lv.listview_height);
         vis(&mut lv.listview_width);
     }
@@ -3301,7 +3744,7 @@ impl Exports {
                     diag.push_warning(
                         format!(
                             "'{}' is already exported in this file; it will not be re-exported",
-                            &*export.0
+                            *export.0
                         ),
                         &export.0.name_ident,
                     );
@@ -3386,6 +3829,29 @@ pub fn inject_element_as_repeated_element(repeated_element: &ElementRc, new_root
 
     new_root.borrow_mut().child_of_layout =
         std::mem::replace(&mut old_root.borrow_mut().child_of_layout, false);
+    // The injected parent becomes the repeated element, so it takes over the grid cell role.
+    new_root.borrow_mut().grid_layout_cell = old_root.borrow_mut().grid_layout_cell.take();
+    // Likewise it takes over the flexbox cell role, so the flex item-info accessor is
+    // generated on the wrapper the layout actually calls it on.
+    if old_root.borrow().child_of_flexbox {
+        new_root.borrow_mut().child_of_flexbox = true;
+        // That accessor reads the flex-* properties from the repeated root (now the
+        // wrapper). Link them to the inner element that still carries the bindings
+        // (and the FlexboxLayout's captured references keeping them alive), rather
+        // than moving them, which would leave those references dangling.
+        for prop in
+            ["flex-grow", "flex-shrink", "flex-basis", "flex-order", "flex-align-self"].iter()
+        {
+            if old_root.borrow().bindings.contains_key(*prop) {
+                new_root.borrow_mut().bindings.insert(
+                    SmolStr::new_static(prop),
+                    RefCell::new(BindingExpression::new_two_way(
+                        NamedReference::new(old_root, SmolStr::new_static(prop)).into(),
+                    )),
+                );
+            }
+        }
+    }
     let layout_info_prop = old_root.borrow().layout_info_prop.clone().or_else(|| {
         // generate the layout_info_prop that forward to the implicit layout for that item
         let li_v = crate::layout::create_new_prop(

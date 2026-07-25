@@ -8,6 +8,7 @@ import SlintProperty from '@slint/common-files/src/components/SlintProperty.astr
 import Link from '@slint/common-files/src/components/Link.astro';
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import LangRefLink from '@slint/common-files/src/components/LangRefLink.astro';
+import BuiltInMouseCursor from '/src/content/docs/generated/reference/enums/_BuiltInMouseCursor.md';
 
 Slint is a statically typed language and offers a rich range of primitive types.
 
@@ -115,6 +116,34 @@ export component StringToUppercase {
     property<string> new-year: "农历新年".to-uppercase(); // "农历新年"
 }
 ```
+
+#### starts-with(pat: string) -> bool
+
+Returns `true` if the given pattern matches a prefix of this string.
+
+Returns `false` if it does not.
+
+```slint
+export component StringStartsWith {
+    property<bool> res1: "Hello".starts-with("He"); // true
+    property<bool> res2: "你好".starts-with("好"); // false
+}
+```
+
+#### ends-with(pat: string) -> bool
+
+Returns `true` if the given pattern matches a suffix of this string.
+
+Returns `false` if it does not.
+
+```slint
+export component StringEndsWith {
+    property<bool> res1: "Hello".ends-with("lo"); // true
+    property<bool> res2: "你好".ends-with("你"); // false
+}
+```
+
+Returns a string with leading and trailing whitespace removed.
 
 #### to-float() -> float
 
@@ -362,6 +391,9 @@ For example: `@image-url("data:image/png;base64,iVBORw0KGgo...")`.
 Supported format are SVG, and formats supported by the [`image` crate](https://crates.io/crates/image):
 AVIF, BMP, DDS, Farbfeld, GIF, HDR, ICO, JPEG, EXR, PNG, PNM, QOI, TGA, TIFF, WebP.
 
+On the web, the browser decodes images, so every format the browser supports works.
+Compressed SVG (`.svgz`) is the exception: browsers don't render it.
+
 <Tabs syncKey="dev-language">
 <TabItem label="Rust" icon="seti:rust">
 In Rust, properties or struct fields of the image type are mapped to <LangRefLink lang="rust-slint" relpath="struct.Image">`slint::Image`</LangRefLink>.
@@ -369,6 +401,7 @@ In Rust, properties or struct fields of the image type are mapped to <LangRefLin
 By default, only PNG, JPEG, and SVG are supported.
 Enable the `image-default-formats` Cargo feature to support the other formats listed above,
 which comes at a cost of increased binary size and compilation time.
+This feature has no effect on the web, where the browser decodes images.
 :::
 </TabItem>
 <TabItem label="C++" icon="seti:cpp">
@@ -441,6 +474,7 @@ export component Example inherits Window {
 
 A `data-transfer` value is the payload carried by drag-and-drop and clipboard operations.
 It abstracts over the file-type transfer mechanisms supported by each platform.
+It can carry plain text, an image, and a list of local file paths simultaneously.
 
 The type is opaque in Slint code:
 construct a `data-transfer` value and read its content via callbacks implemented in the host language.
@@ -460,6 +494,38 @@ In JavaScript, properties or struct fields of the data-transfer type are mapped 
 In Python, properties or struct fields of the data-transfer type are mapped to <LangRefLink lang="python" relpath="api/classes/datatransfer/">`DataTransfer`</LangRefLink>.
 </TabItem>
 </Tabs>
+
+</SlintProperty>
+
+### MouseCursor
+<SlintProperty propName="mouse-cursor" typeName="MouseCursor" defaultValue='default'>
+The `MouseCursor` type is used in the <Link type="TouchArea" label="TouchArea element"/>.
+
+#### Built-in shape
+
+Set to one of the built-in shapes by specifying the name:
+
+```slint
+TouchArea {
+    mouse-cursor: ew-resize;
+}
+
+TouchArea {
+    mouse-cursor: MouseCursor.ew-resize;
+}
+```
+
+<BuiltInMouseCursor />
+
+#### Custom shape
+
+To set a custom mouse cursor, provide an `image` and a hotspot. The hotspot is the point in the image, given in image pixels from the top-left corner, that is aligned with the actual pointer position. It is clamped to the image bounds.
+
+```slint
+TouchArea {
+    mouse-cursor: MouseCursor.custom(@image-url("cursor.png"), 0, 0);
+}
+```
 
 </SlintProperty>
 

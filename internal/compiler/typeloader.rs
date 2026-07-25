@@ -517,8 +517,11 @@ impl Snapshotter {
                 is_conditional_element: r.is_conditional_element,
                 is_listview: r.is_listview.as_ref().map(|lv| object_tree::ListViewInfo {
                     viewport_y: lv.viewport_y.snapshot(self),
-                    viewport_height: lv.viewport_height.snapshot(self),
-                    viewport_width: lv.viewport_width.snapshot(self),
+                    viewport_height: lv
+                        .viewport_height
+                        .as_ref()
+                        .map(|height| height.snapshot(self)),
+                    viewport_width: lv.viewport_width.as_ref().map(|width| width.snapshot(self)),
                     listview_height: lv.listview_height.snapshot(self),
                     listview_width: lv.listview_width.snapshot(self),
                 }),
@@ -546,6 +549,7 @@ impl Snapshotter {
                     visibility: v.visibility,
                     pure: v.pure,
                     shadows_builtin: v.shadows_builtin,
+                    deprecated: v.deprecated.clone(),
                 };
                 (k.clone(), decl)
             })
@@ -556,6 +560,7 @@ impl Snapshotter {
 
         target_element.change_callbacks = elem.change_callbacks.clone();
         target_element.child_of_layout = elem.child_of_layout;
+        target_element.child_of_flexbox = elem.child_of_flexbox;
         target_element.default_fill_parent = elem.default_fill_parent;
         target_element.has_popup_child = elem.has_popup_child;
         target_element.inline_depth = elem.inline_depth;
@@ -972,7 +977,7 @@ impl TypeLoader {
             diag.push_diagnostic_with_span(
                 format!(
                     "Style {} is not known. Use one of the builtin styles [{}] or make sure your custom style is found in the include directories",
-                    &style,
+                    style,
                     known_styles.join(", ")
                 ),
                 Default::default(),
@@ -1600,6 +1605,7 @@ impl TypeLoader {
 
         let ignore_missing_font_files =
             state.borrow().tl.compiler_config.resource_url_mapper.is_some();
+        let symbol_counters = state.borrow().tl.symbol_counters.clone();
         if state.borrow().diag.has_errors() {
             // If there was error (esp parse error) we don't want to report further error in this document.
             // because they might be nonsense (TODO: we should check that the parse error were really in this document).
@@ -1616,6 +1622,7 @@ impl TypeLoader {
                 &mut ignore_diag,
                 &dependency_registry,
                 ignore_missing_font_files,
+                &symbol_counters,
             );
             return (path.to_owned(), doc);
         }
@@ -1628,6 +1635,7 @@ impl TypeLoader {
             state.diag,
             &dependency_registry,
             ignore_missing_font_files,
+            &symbol_counters,
         );
         (path.to_owned(), doc)
     }

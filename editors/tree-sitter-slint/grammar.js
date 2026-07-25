@@ -96,30 +96,7 @@ module.exports = grammar({
         $.block,
       ),
 
-    component_modifier: ($) =>
-      choice(
-        $.uses_clause,
-        $.implements_clause,
-        seq("inherits", field("base_type", $.user_type_identifier)),
-      ),
-
-    uses_clause: ($) =>
-      seq(
-        "uses",
-        "{",
-        commaSep1($.used_interface),
-        optional(","),
-        "}",
-      ),
-
-    used_interface: ($) =>
-      seq(
-        field("interface", $.user_type_identifier),
-        "from",
-        field("source", $.simple_identifier),
-      ),
-
-    implements_clause: ($) => seq("implements", commaSep1($.user_type_identifier)),
+    component_modifier: ($) => seq("inherits", field("base_type", $.user_type_identifier)),
 
     _property_type: ($) => seq("<", field("type", $.type), ">"),
 
@@ -152,8 +129,15 @@ module.exports = grammar({
         choice(seq($.imperative_block, optional(";")), seq($.expression, ";")),
       ),
 
+    property_deprecation: ($) =>
+      seq(
+        "@deprecated",
+        optional(seq("(", field("message", $.string_value), ")")),
+      ),
+
     property: ($) =>
       seq(
+        field("deprecation", optional($.property_deprecation)),
         field("visibility", optional($.property_visibility)),
         "property",
         seq(
@@ -169,11 +153,21 @@ module.exports = grammar({
 
     binding_alias: ($) =>
       seq(
+        field("deprecation", optional($.property_deprecation)),
         field("visibility", optional($.property_visibility)),
         optional("property"),
         field("name", $.simple_identifier),
         "<=>",
         field("alias", $.expression),
+        ";",
+      ),
+
+    implement_statement: ($) =>
+      seq(
+        "implement",
+        field("interface", $.user_type_identifier),
+        "<=>",
+        field("target", $.simple_identifier),
         ";",
       ),
 
@@ -213,7 +207,12 @@ module.exports = grammar({
       seq("interface", field("name", $.user_type_identifier), $.interface_block),
 
     struct_field_definition: ($) =>
-      seq(field("name", $.simple_identifier), ":", field("type", $.type)),
+      seq(
+        field("name", $.simple_identifier),
+        ":",
+        field("type", $.type),
+        optional(seq("=", field("default_value", $.expression))),
+      ),
 
     struct_block: ($) =>
       seq(
@@ -275,6 +274,8 @@ module.exports = grammar({
         $.for_loop,
         $.function_definition,
         $.if_statement,
+        $.implement_statement,
+        $.match_statement,
         $.property,
         $.property_assignment,
         $.states_definition,
@@ -369,6 +370,26 @@ module.exports = grammar({
       ),
 
     for_range: ($) => choice($.value_list, $.expression),
+
+    match_statement: ($) =>
+      seq("match",
+        field("value", $.simple_identifier),
+        "{",
+        repeat($.match_case),
+        optional($.wildcard_match_case),
+        "}",
+      ),
+
+    match_case: ($) =>
+      seq(
+        field("case", choice($._basic_value,
+          seq($.user_type_identifier, ".", $.user_type_identifier))),
+        ":",
+        choice($.component, seq("{", "}"))
+      ),
+
+    wildcard_match_case: ($) =>
+      seq("*", ":", $.component),
 
     type_list: ($) => seq("[", commaSep($.type), optional(","), "]"),
 
