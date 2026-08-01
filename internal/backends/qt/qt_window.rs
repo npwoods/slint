@@ -918,7 +918,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
     ) {
         self.save_state();
         self.pixel_align_origin();
-        sharedparley::draw_text_input(self, text_input, self_rc, size, Some(qt_password_character));
+        sharedparley::draw_text_input(self, text_input, self_rc, size, self.text_layout_cache);
         self.restore_state();
     }
 
@@ -1180,8 +1180,8 @@ impl ItemRenderer for QtItemRenderer<'_> {
         self.painter.restore()
     }
 
-    fn scale_factor(&self) -> f32 {
-        1.
+    fn scale_factor(&self) -> ScaleFactor {
+        ScaleFactor::new(1.)
         /* cpp! { unsafe [painter as "QPainterPtr*"] -> f32 as "float" {
             return (*painter)->paintEngine()->paintDevice()->devicePixelRatioF();
         }} */
@@ -1207,7 +1207,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
             self,
             std::pin::pin!((SharedString::from(string), Brush::from(color))),
             None,
-            logical_size_from_api(self.window.size().to_logical(self.scale_factor())),
+            logical_size_from_api(self.window.size().to_logical(self.scale_factor().get())),
             None,
         );
     }
@@ -1217,7 +1217,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
         if source_size.is_empty() {
             return;
         }
-        let scale_factor = ScaleFactor::new(self.scale_factor());
+        let scale_factor = self.scale_factor();
         let target_size = LogicalSize::from_untyped(source_size.cast()) * scale_factor;
         let image_inner: &ImageInner = (&image).into();
         // Rasterize scalable sources at scale_factor so SVGs are crisp on high-DPI displays
@@ -1708,7 +1708,7 @@ impl QtItemRenderer<'_> {
                     // Source size & clipping is not implemented yet
                     None
                 } else {
-                    let scale_factor = ScaleFactor::new(self.scale_factor());
+                    let scale_factor = self.scale_factor();
                     let actual_target_size = i_slint_core::graphics::fit(
                         image.image_fit(),
                         // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
@@ -1757,7 +1757,7 @@ impl QtItemRenderer<'_> {
         let image_size = pixmap.size();
         let source_rect = source_rect
             .unwrap_or_else(|| euclid::rect(0, 0, image_size.width as _, image_size.height as _));
-        let scale_factor = ScaleFactor::new(self.scale_factor());
+        let scale_factor = self.scale_factor();
 
         let fit = if let ImageInner::NineSlice(nine) = <&ImageInner>::from(&image.source()) {
             i_slint_core::graphics::fit9slice(
@@ -2111,7 +2111,6 @@ impl QtWindow {
         let window_adapter = runtime_window.window_adapter();
         runtime_window.draw_contents(|components, post_render| {
             i_slint_core::animations::update_animations();
-            self.text_layout_cache.clear_cache_if_scale_factor_changed(&self.window);
 
             let mut renderer = QtItemRenderer {
                 painter,
@@ -2859,7 +2858,13 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
         item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
     ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
+        sharedparley::text_input_byte_offset_for_position(
+            self,
+            text_input,
+            item_rc,
+            pos,
+            Some(&self.text_layout_cache),
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -2868,7 +2873,13 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
         item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
     ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(self, text_input, item_rc, byte_offset)
+        sharedparley::text_input_cursor_rect_for_byte_offset(
+            self,
+            text_input,
+            item_rc,
+            byte_offset,
+            Some(&self.text_layout_cache),
+        )
     }
 
     fn register_font_from_memory(
@@ -3086,11 +3097,4 @@ pub(crate) mod ffi {
                 win.widget_ptr().cast::<c_void>().as_ptr()
             })
     }
-}
-
-fn qt_password_character() -> char {
-    char::from_u32(cpp! { unsafe [] -> i32 as "int" {
-        return qApp->style()->styleHint(QStyle::SH_LineEdit_PasswordCharacter, nullptr, nullptr);
-    }} as u32)
-    .unwrap_or('●')
 }

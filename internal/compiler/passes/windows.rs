@@ -61,7 +61,7 @@ pub fn ensure_window(
         default_fill_parent: Default::default(),
         accessibility_props: Default::default(),
         geometry_props: Default::default(),
-        is_flickable_viewport: false,
+        is_flickable_content: false,
         is_tooltip: false,
         item_index: Default::default(),
         item_index_of_first_children: Default::default(),
@@ -70,6 +70,8 @@ pub fn ensure_window(
 
         inline_depth: 0,
         is_legacy_syntax: false,
+        slot_target: None,
+        forwarded_slots: Vec::new(),
     };
     let new_root = new_root.make_rc();
     win_elem_mut.children.push(new_root.clone());
@@ -178,6 +180,19 @@ pub fn warn_about_child_windows(doc: &crate::object_tree::Document, diag: &mut B
                     "".to_owned()
                 };
                 if matches!(builtin.name.as_str(), "Window" | "WindowItem") {
+                    // The SC generator renders Window only as the root, so
+                    // the compatibility warning is a hard error there.
+                    #[cfg(feature = "slint-sc")]
+                    if diag.slint_sc {
+                        diag.push_error(
+                            format!(
+                                "Instantiating Window as an element is not supported in Slint SC\
+                                {inheritance_hint}"
+                            ),
+                            &*elem,
+                        );
+                        return;
+                    }
                     diag.push_warning(
                         format!(
                             "Window elements as children do not create separate windows (this may change in the future)\n\

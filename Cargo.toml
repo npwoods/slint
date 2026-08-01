@@ -32,6 +32,7 @@ members = [
   'internal/renderers/software',
   'internal/renderers/skia',
   'internal/renderers/femtovg',
+  'internal/renderers/anyrender',
   'internal/common',
   'internal/compiler',
   'internal/compiler/parser-test-macro',
@@ -94,6 +95,7 @@ i-slint-compiler = { version = "=1.18.0", path = "internal/compiler", default-fe
 i-slint-core = { version = "=1.18.0", path = "internal/core", default-features = false }
 i-slint-core-macros = { version = "=1.18.0", path = "internal/core-macros", default-features = false }
 i-slint-live-preview = { version = "=1.18.0", path = "internal/live-preview", default-features = false }
+i-slint-renderer-anyrender = { version = "=1.18.0", path = "internal/renderers/anyrender", default-features = false }
 i-slint-renderer-femtovg = { version = "=1.18.0", path = "internal/renderers/femtovg", default-features = false }
 i-slint-renderer-skia = { version = "=1.18.0", path = "internal/renderers/skia", default-features = false }
 i-slint-renderer-software = { version = "=1.18.0", path = "internal/renderers/software", default-features = false }
@@ -145,6 +147,7 @@ raw-window-handle-06 = { package = "raw-window-handle", version = "0.6", feature
 # parley uses the icu crates internally as well, so we'll share the dependency there.
 unicode-segmentation = { version = "1.12.0" }
 icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.2.0", features = ["compiled_data"] }
 
 glow = { version = "0.18" }
 tikv-jemallocator = { version = "0.7" }

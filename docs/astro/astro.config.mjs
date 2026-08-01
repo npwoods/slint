@@ -36,6 +36,19 @@ export default defineConfig({
     site: `${BASE_URL}${BASE_PATH}`,
     base: BASE_PATH,
     trailingSlash: SLINT_STARLIGHT_TRAILING_SLASH,
+    // Pages that moved into the language reference. Astro serves the source
+    // routes under the base path but uses the destinations verbatim, so they
+    // need the prefix.
+    redirects: {
+        "/reference/primitive-types/": `${BASE_PATH}reference/property-types/numeric-types/`,
+        "/reference/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
+        "/reference/language/builtin-types/": `${BASE_PATH}reference/property-types/numeric-types/`,
+        "/reference/property-types/builtin-types/": `${BASE_PATH}reference/property-types/`,
+        "/reference/property-types/type-conversions/": `${BASE_PATH}reference/language/type-conversions/`,
+        "/reference/language/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
+        "/reference/language/arrays-and-models/": `${BASE_PATH}reference/property-types/arrays-and-models/`,
+        "/reference/global-structs-enums/": `${BASE_PATH}reference/property-types/builtin-structs/`,
+    },
     markdown: {
         gfm: true,
         rehypePlugins: [
@@ -251,6 +264,10 @@ export default defineConfig({
                                                   slug: "guide/experimental/match-elements",
                                               },
                                               {
+                                                  label: "Named Slots",
+                                                  slug: "guide/experimental/named-slots",
+                                              },
+                                              {
                                                   label: "Deprecated Properties",
                                                   slug: "guide/experimental/deprecated",
                                               },
@@ -289,10 +306,14 @@ export default defineConfig({
                                         label: "File Structure",
                                         slug: "reference/language/file-structure",
                                     },
-                                    // {
-                                    //     label: "Imports",
-                                    //     slug: "reference/language/imports",
-                                    // },
+                                    {
+                                        label: "Name Resolution",
+                                        slug: "reference/language/name-resolution",
+                                    },
+                                    {
+                                        label: "Imports",
+                                        slug: "reference/language/imports",
+                                    },
                                     {
                                         label: "Exports",
                                         slug: "reference/language/exports",
@@ -306,8 +327,60 @@ export default defineConfig({
                                         slug: "reference/language/bindings",
                                     },
                                     {
-                                        label: "Types",
-                                        slug: "reference/language/types",
+                                        label: "Two-Way Bindings",
+                                        slug: "reference/language/two-way-bindings",
+                                    },
+                                    {
+                                        label: "Expressions",
+                                        slug: "reference/language/expressions",
+                                    },
+                                    {
+                                        label: "Operators",
+                                        slug: "reference/language/operators",
+                                    },
+                                    {
+                                        label: "Type Conversions",
+                                        slug: "reference/language/type-conversions",
+                                    },
+                                    {
+                                        label: "Statements",
+                                        slug: "reference/language/statements",
+                                    },
+                                    {
+                                        label: "Functions",
+                                        slug: "reference/language/functions",
+                                    },
+                                    {
+                                        label: "Callbacks",
+                                        slug: "reference/language/callbacks",
+                                    },
+                                    {
+                                        label: "Evaluation and Purity",
+                                        slug: "reference/language/evaluation-and-purity",
+                                    },
+                                    {
+                                        label: "Structs and Enums",
+                                        slug: "reference/language/structs-and-enums",
+                                    },
+                                    {
+                                        label: "Globals",
+                                        slug: "reference/language/globals",
+                                    },
+                                    {
+                                        label: "Repetition and Conditional Elements",
+                                        slug: "reference/language/repetition-and-conditional-elements",
+                                    },
+                                    {
+                                        label: "Container Components",
+                                        slug: "reference/language/container-components",
+                                    },
+                                    {
+                                        label: "Animations",
+                                        slug: "reference/language/animations",
+                                    },
+                                    {
+                                        label: "States and Transitions",
+                                        slug: "reference/language/states-and-transitions",
                                     },
                                     {
                                         label: "Geometry",
@@ -316,33 +389,57 @@ export default defineConfig({
                                 ],
                             },
                             {
-                                label: "Types and Properties",
+                                label: "Types",
                                 collapsed: true,
                                 items: [
                                     {
-                                        label: "Primitive Types",
-                                        slug: "reference/primitive-types",
+                                        label: "Overview",
+                                        slug: "reference/property-types",
                                     },
+                                    {
+                                        label: "Primitive & Numeric Types",
+                                        slug: "reference/property-types/numeric-types",
+                                    },
+                                    {
+                                        label: "Strings",
+                                        slug: "reference/property-types/strings",
+                                    },
+                                    {
+                                        label: "Colors & Brushes",
+                                        slug: "reference/property-types/colors-and-brushes",
+                                    },
+                                    {
+                                        label: "Images",
+                                        slug: "reference/property-types/images",
+                                    },
+                                    {
+                                        label: "Built-in Structs",
+                                        slug: "reference/property-types/builtin-structs",
+                                    },
+                                    {
+                                        label: "Built-in Enums",
+                                        slug: "reference/property-types/builtin-enums",
+                                    },
+                                    {
+                                        label: "Arrays and Models",
+                                        slug: "reference/property-types/arrays-and-models",
+                                    },
+                                    {
+                                        label: "Other",
+                                        slug: "reference/property-types/other-types",
+                                    },
+                                ],
+                            },
+                            {
+                                label: "Elements",
+                                collapsed: true,
+                                items: [
                                     {
                                         label: "Common Properties & Callbacks",
                                         slug: "reference/common",
                                     },
                                     {
-                                        label: "Colors & Brushes",
-                                        slug: "reference/colors-and-brushes",
-                                    },
-                                    {
-                                        label: "Timer",
-                                        slug: "reference/timer",
-                                    },
-                                ],
-                            },
-                            {
-                                label: "Visual Elements",
-                                collapsed: true,
-                                items: [
-                                    {
-                                        label: "Basic Elements",
+                                        label: "Basic Visual Elements",
                                         items: [
                                             {
                                                 autogenerate: {
@@ -433,39 +530,38 @@ export default defineConfig({
                                             },
                                         ],
                                     },
-                                ],
-                            },
-                            {
-                                label: "Globals",
-                                collapsed: true,
-                                items: [
                                     {
-                                        label: "Global Structs and Enums",
-                                        slug: "reference/global-structs-enums",
-                                    },
-                                    {
-                                        label: "Global Functions",
-                                        collapsed: true,
+                                        label: "Non-Visual Elements",
                                         items: [
                                             {
-                                                label: "Math",
-                                                slug: "reference/global-functions/math",
-                                            },
-                                            {
-                                                label: "animation-tick() / debug()",
-                                                slug: "reference/global-functions/builtinfunctions",
+                                                label: "Timer",
+                                                slug: "reference/timer",
                                             },
                                         ],
                                     },
+                                ],
+                            },
+                            {
+                                label: "Namespaces",
+                                collapsed: true,
+                                items: [
                                     {
-                                        label: "Platform Namespace",
+                                        label: "Math",
+                                        slug: "reference/global-functions/math",
+                                    },
+                                    {
+                                        label: "Platform",
                                         slug: "reference/platform",
                                     },
                                     {
-                                        label: "FontWeight Namespace",
+                                        label: "FontWeight",
                                         slug: "reference/global-namespaces/font-weight",
                                     },
                                 ],
+                            },
+                            {
+                                label: "Global Functions",
+                                slug: "reference/global-functions/builtinfunctions",
                             },
                             {
                                 label: "Std-Widgets",

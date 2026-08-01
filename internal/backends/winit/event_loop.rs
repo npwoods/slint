@@ -354,6 +354,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 };
                 let mut key_event = KeyEvent::default();
                 key_event.text = text;
+                key_event.repeat = event.repeat;
 
                 let event = corelib::input::InternalKeyEvent {
                     key_event,

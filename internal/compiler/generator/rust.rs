@@ -15,7 +15,7 @@ Some convention used in the generated code:
 use super::accessor_names::{self, AccessorKind};
 use crate::CompilerConfiguration;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp, OperatorClass};
-use crate::langtype::{Enumeration, EnumerationValue, Struct, StructName, Type};
+use crate::langtype::{DeclNode, Enumeration, EnumerationValue, Struct, StructName, Type};
 use crate::layout::Orientation;
 use crate::llr::lower_expression::lower_constant_expression;
 use crate::llr::{
@@ -708,6 +708,27 @@ fn generate_shared_globals(
     }
 }
 
+/// Compile the `@rust-attr(...)` captured on a struct or enum declaration into outer
+/// attributes, emitting a `compile_error!` for any whose text does not tokenize.
+fn rust_attributes_tokens(
+    attributes: &[SmolStr],
+    kind: &str,
+    name: &SmolStr,
+    node: Option<&DeclNode>,
+) -> TokenStream {
+    let attrs = attributes.iter().map(|attr| match TokenStream::from_str(attr) {
+        Ok(t) => quote!(#[#t]),
+        Err(_) => {
+            let source_location = node.map(|n| n.to_source_location()).unwrap_or_default();
+            let error = format!(
+                "Error parsing @rust-attr for {kind} '{name}' declared at {source_location}"
+            );
+            quote!(compile_error!(#error);)
+        }
+    });
+    quote! { #(#attrs)* }
+}
+
 fn generate_struct(the_struct: &Struct, unit: &llr::CompilationUnit) -> TokenStream {
     let component_id = struct_name_to_tokens(&the_struct.name).unwrap();
     let (declared_property_vars, declared_property_types): (Vec<_>, Vec<_>) = the_struct
@@ -716,26 +737,12 @@ fn generate_struct(the_struct: &Struct, unit: &llr::CompilationUnit) -> TokenStr
         .map(|(name, ty)| (ident(name), rust_primitive_type(ty).unwrap()))
         .unzip();
 
-    let StructName::User { name, node } = &the_struct.name else {
+    let StructName::User { name, .. } = &the_struct.name else {
         unreachable!("generating non-user struct")
     };
 
     let attributes =
-        node.parent().and_then(crate::parser::syntax_nodes::StructDeclaration::new).map(|node| {
-            let attrs = node.AtRustAttr().map(|attr| {
-                match TokenStream::from_str(&attr.text().to_string()) {
-                    Ok(t) => quote!(#[#t]),
-                    Err(_) => {
-                        let source_location = crate::diagnostics::Spanned::to_source_location(&attr);
-                        let error = format!(
-                            "Error parsing @rust-attr for struct '{name}' declared at {source_location}"
-                        );
-                        quote!(compile_error!(#error);)
-                    }
-                }
-            });
-            quote! { #(#attrs)* }
-        });
+        rust_attributes_tokens(the_struct.rust_attributes(), "struct", name, the_struct.node());
 
     // With user-declared field default values, `Default` cannot be derived anymore
     let default_impl = (!the_struct.field_defaults.is_empty()).then(|| {
@@ -781,28 +788,15 @@ fn generate_struct(the_struct: &Struct, unit: &llr::CompilationUnit) -> TokenStr
     }
 }
 
-fn generate_enum(en: &std::rc::Rc<Enumeration>) -> TokenStream {
+fn generate_enum(en: &std::sync::Arc<Enumeration>) -> TokenStream {
     let enum_name = ident(&en.name);
 
     let enum_values = (0..en.values.len()).map(|value| {
         let i = ident(&EnumerationValue { value, enumeration: en.clone() }.to_pascal_case());
         if value == en.default_value { quote!(#[default] #i) } else { quote!(#i) }
     });
-    let attributes = en.node.as_ref().map(|node| {
-        let attrs =
-            node.AtRustAttr().map(|attr| match TokenStream::from_str(&attr.text().to_string()) {
-                Ok(t) => quote!(#[#t]),
-                Err(_) => {
-                    let name = &en.name;
-                    let source_location = crate::diagnostics::Spanned::to_source_location(&attr);
-                    let error = format!(
-                        "Error parsing @rust-attr for enum '{name}' declared at {source_location}"
-                    );
-                    quote!(compile_error!(#error);)
-                }
-            });
-        quote! { #(#attrs)* }
-    });
+    let attributes =
+        rust_attributes_tokens(&en.rust_attributes, "enum", &en.name, en.node.as_ref());
     quote! {
         #attributes
         #[allow(dead_code)]
@@ -900,10 +894,28 @@ fn handle_property_init(
     let rust_property = access_member(prop, ctx).unwrap();
     let prop_type = ctx.property_ty(prop);
 
-    let init_self_pin_ref = if ctx.current_global().is_some() {
-        quote!(let _self = self_rc.as_ref();)
-    } else {
-        quote!(let _self = self_rc.as_pin_ref();)
+    // Components use the type-erased helpers, so the binding machinery is
+    // instantiated once per property type instead of per (property type,
+    // component). Globals are behind a plain Rc without a type-erased weak
+    // form and keep the helpers that are generic over the component.
+    let erased = ctx.current_global().is_none();
+    // A closure evaluating `body` on the component, in the form expected by
+    // the selected helper. Optionally takes extra arguments.
+    let self_closure = |args: TokenStream, body: TokenStream| {
+        if erased {
+            quote!(move |_self #args| #body)
+        } else {
+            quote!(move |self_rc #args| { let _self = self_rc.as_ref(); #body })
+        }
+    };
+    let helper = |name: &str| {
+        if erased {
+            let name = format_ident!("{name}_erased");
+            quote!(sp::#name)
+        } else {
+            let name = format_ident!("{name}");
+            quote!(slint::private_unstable_api::#name)
+        }
     };
 
     if let Type::Callback(callback) = &prop_type {
@@ -912,14 +924,11 @@ fn handle_property_init(
         let tokens_for_expression =
             compile_expression(&binding_expression.expression.borrow(), &ctx2);
         let as_ = if matches!(callback.return_type, Type::Void) { quote!(;) } else { quote!(as _) };
+        let set_callback_handler = helper("set_callback_handler");
+        let handler = self_closure(quote!(, args), quote!({ (#tokens_for_expression) #as_ }));
         init.push(quote!({
             #[allow(unreachable_code, unused)]
-            slint::private_unstable_api::set_callback_handler(#rust_property, &self_rc, {
-                move |self_rc, args| {
-                    #init_self_pin_ref
-                    (#tokens_for_expression) #as_
-                }
-            });
+            #set_callback_handler(#rust_property, &self_rc, { #handler });
         }));
     } else {
         let tokens_for_expression =
@@ -927,62 +936,61 @@ fn handle_property_init(
 
         let tokens_for_expression = set_primitive_property_value(prop_type, tokens_for_expression);
 
+        // Cast to the property type unless the Rust code is the never type, as with return
+        // statements inside a block the type of the return expression is `()` instead of `!`.
+        let maybe_cast = if binding_expression.expression.borrow().ty(ctx) == Type::Invalid {
+            None
+        } else {
+            Some(quote!(as _))
+        };
+        // The erased helpers take functions with an extra unused `&()` argument, so that
+        // erasing them does not change their arity. The global (non-erased) helpers don't.
+        let unit_arg = if erased { quote!(, _: &()) } else { quote!() };
         init.push(match binding_expression.kind {
             llr::BindingKind::Constant => {
                 let t = rust_property_type(prop_type).unwrap_or(quote!(_));
                 quote! { #rust_property.set({ (#tokens_for_expression) as #t }); }
             }
             llr::BindingKind::State => {
-                let maybe_cast = if binding_expression.expression.borrow().ty(ctx) == Type::Invalid {
-                    None
-                } else {
-                    Some(quote!(as _))
-                };
-                let binding_tokens = quote!(move |self_rc| {
-                    #init_self_pin_ref
-                    (#tokens_for_expression) #maybe_cast
-                });
+                let binding_tokens =
+                    self_closure(unit_arg.clone(), quote!((#tokens_for_expression) #maybe_cast));
+                let set_property_state_binding = helper("set_property_state_binding");
                 quote! { {
-                    slint::private_unstable_api::set_property_state_binding(#rust_property, &self_rc, #binding_tokens);
+                    #set_property_state_binding(#rust_property, &self_rc, #binding_tokens);
                 } }
             }
             llr::BindingKind::Normal => {
-                let maybe_cast = if binding_expression.expression.borrow().ty(ctx) == Type::Invalid {
-                    None
-                } else {
-                    Some(quote!(as _))
-                };
-                let binding_tokens = quote!(move |self_rc| {
-                    #init_self_pin_ref
-                    (#tokens_for_expression) #maybe_cast
-                });
+                let binding_tokens =
+                    self_closure(unit_arg.clone(), quote!((#tokens_for_expression) #maybe_cast));
                 match &binding_expression.animation {
                     Some(llr::Animation::Static(anim)) => {
                         let anim = compile_expression(anim, ctx);
+                        let set_animated_property_binding = helper("set_animated_property_binding");
+                        let details = self_closure(unit_arg.clone(), quote!((#anim, None)));
                         quote! { {
-                            #init_self_pin_ref
-                            slint::private_unstable_api::set_animated_property_binding(
-                                #rust_property, &self_rc, #binding_tokens, move |self_rc| {
-                                    #init_self_pin_ref
-                                    (#anim, None)
-                                });
+                            #set_animated_property_binding(
+                                #rust_property, &self_rc, #binding_tokens, #details);
                         } }
                     }
                     Some(llr::Animation::Transition(animation)) => {
                         let animation = compile_expression(animation, ctx);
-                        quote! {
-                            slint::private_unstable_api::set_animated_property_binding(
-                                #rust_property, &self_rc, #binding_tokens, move |self_rc| {
-                                    #init_self_pin_ref
-                                    let (animation, change_time) = #animation;
-                                    (animation, Some(change_time))
-                                }
-                            );
-                        }
+                        let set_animated_property_binding = helper("set_animated_property_binding");
+                        let details = self_closure(
+                            unit_arg.clone(),
+                            quote!({
+                                let (animation, change_time) = #animation;
+                                (animation, Some(change_time))
+                            }),
+                        );
+                        quote! { {
+                            #set_animated_property_binding(
+                                #rust_property, &self_rc, #binding_tokens, #details);
+                        } }
                     }
                     None => {
+                        let set_property_binding = helper("set_property_binding");
                         quote! { {
-                            slint::private_unstable_api::set_property_binding(#rust_property, &self_rc, #binding_tokens);
+                            #set_property_binding(#rust_property, &self_rc, #binding_tokens);
                         } }
                     }
                 }
@@ -991,24 +999,36 @@ fn handle_property_init(
     }
 }
 
+/// Token stream that walks up `parent_level` parent pointers (`_self.parent.upgrade()...`),
+/// or `None` when `parent_level` is 0 (the member lives on the current component).
+fn parent_access_path(parent_level: usize) -> Option<TokenStream> {
+    (parent_level != 0).then(|| {
+        let mut path = quote!(_self.parent.upgrade());
+        for _ in 1..parent_level {
+            path = quote!(#path.and_then(|x| x.parent.upgrade()));
+        }
+        path
+    })
+}
+
 /// Returns the code to access the change-tracker `Property<()>` for an exported callback.
 /// Returns `None` if the callback doesn't have a tracker.
 fn access_callback_tracker(
     reference: &llr::MemberReference,
     ctx: &EvaluationContext,
-) -> Option<TokenStream> {
+) -> Option<MemberAccess> {
     fn in_global(
         g: &llr::GlobalComponent,
         callback_idx: &llr::CallbackIdx,
         _self: TokenStream,
-    ) -> Option<TokenStream> {
+    ) -> Option<MemberAccess> {
         if !g.callbacks[*callback_idx].needs_tracker {
             return None;
         }
         let tracker_name = callback_tracker_ident(&g.callbacks[*callback_idx].name);
         let global_name = global_inner_name(g);
         let tracker_field = quote!({ *&#global_name::FIELD_OFFSETS.#tracker_name() });
-        Some(quote!(#tracker_field.apply_pin(#_self)))
+        Some(MemberAccess::Direct(quote!(#tracker_field.apply_pin(#_self))))
     }
 
     match reference {
@@ -1027,26 +1047,33 @@ fn access_callback_tracker(
             };
             in_global(global, callback_idx, s)
         }
-        llr::MemberReference::Relative { parent_level: 0, local_reference } => {
-            if let llr::LocalMemberIndex::Callback(callback_idx) = &local_reference.reference {
-                if let Some(current_global) = ctx.current_global() {
-                    return in_global(current_global, callback_idx, quote!(_self));
-                }
-                if local_reference.sub_component_path.is_empty()
-                    && let Some(sc_idx) = ctx.parent_sub_component_idx(0)
-                {
-                    let sc = &ctx.compilation_unit.sub_components[sc_idx];
-                    if sc.callbacks[*callback_idx].needs_tracker {
-                        let tracker_name =
-                            callback_tracker_ident(&sc.callbacks[*callback_idx].name);
-                        let component_id = inner_component_id(sc);
-                        let tracker_field =
-                            access_component_field_offset(&component_id, &tracker_name);
-                        return Some(quote!((#tracker_field).apply_pin(_self)));
-                    }
-                }
+        llr::MemberReference::Relative { parent_level, local_reference } => {
+            let llr::LocalMemberIndex::Callback(callback_idx) = &local_reference.reference else {
+                return None;
+            };
+            if let Some(current_global) = ctx.current_global() {
+                return in_global(current_global, callback_idx, quote!(_self));
             }
-            None
+            let sc_idx = ctx.parent_sub_component_idx(*parent_level)?;
+            let (compo_path, sub_component) = follow_sub_component_path(
+                ctx.compilation_unit,
+                sc_idx,
+                &local_reference.sub_component_path,
+            );
+            if !sub_component.callbacks[*callback_idx].needs_tracker {
+                return None;
+            }
+            let tracker_name = callback_tracker_ident(&sub_component.callbacks[*callback_idx].name);
+            let component_id = inner_component_id(sub_component);
+            let tracker_field = access_component_field_offset(&component_id, &tracker_name);
+
+            let parent_path = parent_access_path(*parent_level);
+            Some(parent_path.map_or_else(
+                || MemberAccess::Direct(quote!((#compo_path #tracker_field).apply_pin(_self))),
+                |parent_path| {
+                    MemberAccess::Option(quote!(#parent_path.as_ref().map(|x| (#compo_path #tracker_field).apply_pin(x.as_pin_ref()))))
+                },
+            ))
         }
         _ => None,
     }
@@ -1079,8 +1106,8 @@ fn public_api(
             ));
             let on_ident = accessor_names::rust_accessor_ident(name, AccessorKind::Handler);
             let args_index = (0..callback_args.len()).map(proc_macro2::Literal::usize_unsuffixed);
-            let tracker_access = access_callback_tracker(&p.prop, ctx);
-            let set_dirty = tracker_access.map(|t| quote!(#t.mark_dirty();));
+            let set_dirty = access_callback_tracker(&p.prop, ctx)
+                .map(|t| t.then(|t| quote!({ #t.mark_dirty(); })));
             property_and_callback_accessors.push(quote!(
                 #[allow(dead_code)]
                 pub fn #on_ident(&self, mut f: impl FnMut(#(#callback_args),*) -> #return_type + 'static) {
@@ -1380,17 +1407,17 @@ fn generate_sub_component(
                 });
             });
             if let Some(listview) = &repeated.listview {
-                let vp_y = access_member(&listview.viewport_y, &ctx).unwrap();
+                let content_y = access_member(&listview.content_y, &ctx).unwrap();
                 let lv_h = access_member(&listview.listview_height, &ctx).unwrap();
                 let lv_w = access_member(&listview.listview_width, &ctx).unwrap();
-                let vp_w = listview.viewport_width.as_ref().map_or_else(
+                let content_w = listview.content_width.as_ref().map_or_else(
                     || quote!(None),
                     |w| {
                         let w = access_member(w, &ctx).unwrap();
                         quote!(Some(#w))
                     },
                 );
-                let vp_h = listview.viewport_height.as_ref().map_or_else(
+                let content_h = listview.content_height.as_ref().map_or_else(
                     || quote!(None),
                     |h| {
                         let h = access_member(h, &ctx).unwrap();
@@ -1401,7 +1428,7 @@ fn generate_sub_component(
                 repeated_visit_branch.push(quote!(
                     #idx => {
                         #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).track_changes_listview(
-                            #vp_w, #vp_h, #vp_y, #lv_w.get(), #lv_h
+                            #content_w, #content_h, #content_y, #lv_w.get(), #lv_h
                         );
                         #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).visit(order, visitor)
                     }
@@ -1409,7 +1436,7 @@ fn generate_sub_component(
                 ensure_instantiated_stmts.push(quote!({
                     _changed |= #inner_component_id::FIELD_OFFSETS.#repeater_id().apply_pin(_self).ensure_updated_listview(
                         || { #rep_inner_component_id::new(_self.self_weak.get().unwrap().clone()).unwrap().into() },
-                        #vp_w, #vp_h, #vp_y, #lv_w.get(), #lv_h
+                        #content_w, #content_h, #content_y, #lv_w.get(), #lv_h
                     );
                 }));
             } else {
@@ -1654,20 +1681,12 @@ fn generate_sub_component(
         let prop = compile_expression(&Expression::PropertyReference(p.clone()), &ctx);
         let change_tracker = format_ident!("change_tracker{idx}");
         quote! {
-            let self_weak = sp::VRcMapped::downgrade(&self_rc);
             #[allow(dead_code, unused)]
-            _self.#change_tracker.init(
-                self_weak,
-                move |self_weak| {
-                    let self_rc = self_weak.upgrade().unwrap();
-                    let _self = self_rc.as_pin_ref();
-                    #prop
-                },
-                move |self_weak, _| {
-                    let self_rc = self_weak.upgrade().unwrap();
-                    let _self = self_rc.as_pin_ref();
-                    #code;
-                }
+            sp::change_tracker_init_erased(
+                &_self.#change_tracker,
+                &self_rc,
+                move |_self, _: &()| #prop,
+                move |_self, _| { #code; }
             );
         }
     }));
@@ -2445,11 +2464,15 @@ fn generate_item_tree(
             fn visit_children_item(self: ::core::pin::Pin<&Self>, index: isize, order: sp::TraversalOrder, visitor: sp::ItemVisitorRefMut<'_>)
                 -> sp::VisitChildrenResult
             {
-                return sp::visit_item_tree(self, &sp::VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap()), self.get_item_tree().as_slice(), index, order, visitor, visit_dynamic);
-                #[allow(unused)]
-                fn visit_dynamic(_self: ::core::pin::Pin<&#inner_component_id>, order: sp::TraversalOrder, visitor: sp::ItemVisitorRefMut<'_>, dyn_index: u32) -> sp::VisitChildrenResult  {
-                    _self.visit_dynamic_children(dyn_index, order, visitor)
-                }
+                let item_tree = sp::VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap());
+                sp::visit_item_tree(
+                    &item_tree,
+                    self.get_item_tree().as_slice(),
+                    index,
+                    order,
+                    visitor,
+                    &mut |order, visitor, dyn_index| self.visit_dynamic_children(dyn_index, order, visitor),
+                )
             }
 
             fn get_item_ref(self: ::core::pin::Pin<&Self>, index: u32) -> ::core::pin::Pin<sp::ItemRef<'_>> {
@@ -2814,6 +2837,37 @@ fn generate_repeated_component(
                                 self.layout_item_info(sp::Orientation::Vertical, sp::None).constraint;
                         }
                     });
+                // Mirror of `v_constrained` for the other axis: a width-for-height
+                // instance (e.g. a wrapping column FlexboxLayout) must not read
+                // self.height. Use the unbounded constrained horizontal info.
+                let h_constrained =
+                    root_sc.layout_info_h_constrained_for_repeated.as_ref().map(|e| {
+                        let h_info = compile_expression(&e.borrow(), &ctx);
+                        quote! {
+                            if matches!(o, sp::Orientation::Horizontal) && child_index.is_none() {
+                                info.constraint = #h_info;
+                                return info;
+                            }
+                        }
+                    });
+                // A FlexboxLayout calls this with the height it assigned, so a
+                // width-for-height instance resolves to the same width as an
+                // equivalent static cell (instead of the unbounded, unwrapped one
+                // that `flexbox_layout_item_info` returns). The expression reads
+                // the `flex_cross_height` local (matches FLEX_CROSS_HEIGHT_LOCAL).
+                let at_cross_height_body = root_sc
+                    .layout_info_h_at_cross_height_for_repeated
+                    .as_ref()
+                    .map(|e| {
+                        let h_info = compile_expression(&e.borrow(), &ctx);
+                        quote! { info.constraint = #h_info; }
+                    })
+                    .unwrap_or_else(|| {
+                        quote! {
+                            info.constraint =
+                                self.layout_item_info(sp::Orientation::Horizontal, sp::None).constraint;
+                        }
+                    });
                 quote! {
                     fn flexbox_layout_item_info(
                         self: ::core::pin::Pin<&Self>,
@@ -2824,6 +2878,7 @@ fn generate_repeated_component(
                         let _self = self.as_ref();
                         let mut info = self.as_ref().flexbox_layout_item_info_for_repeated();
                         #v_constrained
+                        #h_constrained
                         info.constraint = self.layout_item_info(o, child_index).constraint;
                         info
                     }
@@ -2836,6 +2891,17 @@ fn generate_repeated_component(
                         let _self = self.as_ref();
                         let mut info = self.as_ref().flexbox_layout_item_info_for_repeated();
                         #at_cross_width_body
+                        info
+                    }
+                    #[allow(unused_variables)]
+                    fn flexbox_layout_item_info_at_cross_height(
+                        self: ::core::pin::Pin<&Self>,
+                        flex_cross_height: f32,
+                    ) -> sp::FlexboxLayoutItemInfo {
+                        #[allow(unused)]
+                        let _self = self.as_ref();
+                        let mut info = self.as_ref().flexbox_layout_item_info_for_repeated();
+                        #at_cross_height_body
                         info
                     }
                 }
@@ -2959,13 +3025,7 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                 return in_global(current_global, &local_reference.reference, quote!(_self));
             }
 
-            let parent_path = (*parent_level != 0).then(|| {
-                let mut path = quote!(_self.parent.upgrade());
-                for _ in 1..*parent_level {
-                    path = quote!(#path.and_then(|x| x.parent.upgrade()));
-                }
-                path
-            });
+            let parent_path = parent_access_path(*parent_level);
 
             match &local_reference.reference {
                 llr::LocalMemberIndex::Property(property_index) => {
@@ -3216,8 +3276,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> TokenSt
     let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
         unreachable!()
     };
-    let llr::LocalMemberIndex::Native { item_index, prop_name: _, .. } = &local_reference.reference
-    else {
+    let llr::LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         unreachable!()
     };
 
@@ -3659,8 +3718,8 @@ fn compile_cast(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
 fn compile_callback_call(expr: &Expression, ctx: &EvaluationContext) -> TokenStream {
     let Expression::CallBackCall { callback, arguments } = expr else { unreachable!() };
     let f = access_member(callback, ctx);
-    let tracker = access_callback_tracker(callback, ctx);
-    let register_dep = tracker.map(|t| quote!(#t.get();));
+    let register_dep =
+        access_callback_tracker(callback, ctx).map(|t| t.then(|t| quote!({ #t.get(); })));
     let a = arguments.iter().map(|a| compile_expression_to_value(a, ctx));
     if expr.ty(ctx) == Type::Void {
         f.then(|f| quote!({ #register_dep #f.call(&(#(#a as _,)*)); }))
@@ -5517,8 +5576,22 @@ fn generate_solve_flexbox_layout_with_measure(
                             cursor += len;
                         }
                     ));
-                    // No width-for-height accessor on a repeated instance: keep its default.
-                    h_steps.push(quote!(cursor += _self.#repeater_id.len();));
+                    h_steps.push(quote!(
+                        {
+                            let len = _self.#repeater_id.len();
+                            if index >= cursor && index < cursor + len {
+                                if let Some(sub_comp) = _self.#repeater_id.instance_at(index - cursor) {
+                                    return (sub_comp
+                                        .as_pin_ref()
+                                        .flexbox_layout_item_info_at_cross_height(h)
+                                        .constraint
+                                        .preferred_bounded(), h);
+                                }
+                                return (w, h);
+                            }
+                            cursor += len;
+                        }
+                    ));
                 }
             }
         }

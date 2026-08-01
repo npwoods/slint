@@ -730,6 +730,7 @@ pub struct Clip {
     pub border_width: Property<LogicalLength>,
     pub cached_rendering_data: CachedRenderingData,
     pub clip: Property<bool>,
+    pub is_visibility_clip: Property<bool>,
 }
 
 impl Item for Clip {
@@ -1434,13 +1435,9 @@ impl WindowItem {
                 return Some(result);
             }
 
-            match window_item_rc
+            window_item_rc = window_item_rc
                 .parent_item(crate::item_tree::ParentItemTraversalMode::FindAllParents)
-                .and_then(|p| next_window_item(&p))
-            {
-                Some(item) => window_item_rc = item,
-                None => return None,
-            }
+                .and_then(|p| next_window_item(&p))?;
         }
     }
 
@@ -1505,12 +1502,11 @@ impl WindowItem {
             return false;
         }
         let inner = WindowInner::from_pub(window_adapter.window());
-        if inner.request_close()
-            && let Err(err) = inner.hide()
-        {
+        let accepted = inner.request_close();
+        if accepted && let Err(err) = inner.hide() {
             crate::debug_log!("Slint: Failed to hide window after close request: {err}");
         }
-        true
+        accepted
     }
 
     pub fn hide(self: Pin<&Self>, window_adapter: &Rc<dyn WindowAdapter>, self_rc: &ItemRc) {

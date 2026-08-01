@@ -106,11 +106,10 @@ fn lower_popup_window(
     parent_element_borrowed.children.remove(index);
     parent_element_borrowed.has_popup_child = true;
     drop(parent_element_borrowed);
-    if let Some(parent_cip) = &mut *parent_component.child_insertion_point.borrow_mut()
-        && Rc::ptr_eq(&parent_cip.parent, parent_element)
-        && parent_cip.insertion_index > index
-    {
-        parent_cip.insertion_index -= 1;
+    for parent_cip in parent_component.child_insertion_points.borrow_mut().values_mut() {
+        if Rc::ptr_eq(&parent_cip.parent, parent_element) && parent_cip.insertion_index > index {
+            parent_cip.insertion_index -= 1;
+        }
     }
 
     let map_close_on_click_value = |b: &BindingExpression| {
@@ -118,7 +117,7 @@ fn lower_popup_window(
             assert!(diag.has_errors());
             return None;
         };
-        let enum_ty = crate::typeregister::BUILTIN.with(|e| e.enums.PopupClosePolicy.clone());
+        let enum_ty = crate::typeregister::BUILTIN.enums.PopupClosePolicy.clone();
         let s = if *v { "close-on-click" } else { "no-auto-close" };
         Some(EnumerationValue {
             value: enum_ty.values.iter().position(|v| v == s).unwrap(),
@@ -177,7 +176,7 @@ fn lower_popup_window(
         })
         .unwrap_or_else(|| EnumerationValue {
             value: 0,
-            enumeration: crate::typeregister::BUILTIN.with(|e| e.enums.PopupClosePolicy.clone()),
+            enumeration: crate::typeregister::BUILTIN.enums.PopupClosePolicy.clone(),
         });
 
     let popup_comp = Rc::new(Component {

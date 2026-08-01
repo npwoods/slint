@@ -242,7 +242,6 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 self.graphics_cache.clear_cache_if_scale_factor_changed(window);
                 self.layer_cache.clear_cache_if_scale_factor_changed(window);
                 self.box_shadow_cache.clear_cache_if_scale_factor_changed(window);
-                self.text_layout_cache.clear_cache_if_scale_factor_changed(window);
 
                 let mut item_renderer = self::itemrenderer::GLItemRenderer::new(
                     &canvas,
@@ -395,7 +394,13 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         item_rc: &i_slint_core::item_tree::ItemRc,
         pos: LogicalPoint,
     ) -> usize {
-        sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
+        sharedparley::text_input_byte_offset_for_position(
+            self,
+            text_input,
+            item_rc,
+            pos,
+            Some(&self.text_layout_cache),
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -404,7 +409,13 @@ impl<B: GraphicsBackend> RendererSealed for FemtoVGRenderer<B> {
         item_rc: &i_slint_core::item_tree::ItemRc,
         byte_offset: usize,
     ) -> LogicalRect {
-        sharedparley::text_input_cursor_rect_for_byte_offset(self, text_input, item_rc, byte_offset)
+        sharedparley::text_input_cursor_rect_for_byte_offset(
+            self,
+            text_input,
+            item_rc,
+            byte_offset,
+            Some(&self.text_layout_cache),
+        )
     }
 
     fn register_font_from_memory(

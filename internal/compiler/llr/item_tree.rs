@@ -7,7 +7,7 @@ use derive_more::{From, Into};
 use smol_str::SmolStr;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
+use std::sync::Arc;
 use typed_index_collections::TiVec;
 
 #[derive(Debug, Clone, Copy, Into, From, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,8 +138,6 @@ pub struct GlobalComponent {
     pub functions: TiVec<FunctionIdx, Function>,
     /// One entry per property
     pub init_values: BTreeMap<LocalMemberIndex, BindingExpression>,
-    /// The animation for properties which are animated
-    pub animations: BTreeMap<LocalMemberIndex, Expression>,
     // maps property to its changed callback
     pub change_callbacks: BTreeMap<PropertyIdx, MutExpression>,
     pub const_properties: TiVec<PropertyIdx, bool>,
@@ -377,13 +375,13 @@ pub struct Function {
 /// The property references might be either in the parent context, or in the
 /// repeated's component context
 pub struct ListViewInfo {
-    pub viewport_y: MemberReference,
-    /// `None` when the user explicitly sets `viewport-height` on the ListView;
+    pub content_y: MemberReference,
+    /// `None` when the user explicitly sets `content-height` on the ListView;
     /// `Some` when the ListView computes it from the content.
-    pub viewport_height: Option<MemberReference>,
-    /// `None` when the user explicitly sets `viewport-width` on the ListView;
+    pub content_height: Option<MemberReference>,
+    /// `None` when the user explicitly sets `content-width` on the ListView;
     /// `Some` when the ListView computes it from the content.
-    pub viewport_width: Option<MemberReference>,
+    pub content_width: Option<MemberReference>,
     /// The ListView's inner visible height (not counting eventual scrollbar)
     pub listview_height: MemberReference,
     /// The ListView's inner visible width (not counting eventual scrollbar)
@@ -423,7 +421,7 @@ pub struct ComponentContainerElement {
 }
 
 pub struct Item {
-    pub ty: Rc<NativeClass>,
+    pub ty: Arc<NativeClass>,
     pub name: SmolStr,
     /// Index in the item tree array
     pub index_in_tree: u32,
@@ -542,6 +540,18 @@ pub struct SubComponent {
     /// which a column FlexboxLayout calls with its real container width so a
     /// repeated cell wraps to the same height as an equivalent static cell.
     pub layout_info_v_at_cross_width_for_repeated: Option<MutExpression>,
+    /// Horizontal counterpart of `layout_info_v_constrained_for_repeated`:
+    /// computed with an unbounded height constraint so a width-for-height
+    /// instance (e.g. a wrapping column FlexboxLayout) doesn't read
+    /// `self.height` and recurse through the parent flex cache. `Some` only
+    /// when the element carries a `layoutinfo-h-with-constraint`.
+    pub layout_info_h_constrained_for_repeated: Option<MutExpression>,
+    /// Same as `layout_info_h_constrained_for_repeated`, but measured at the
+    /// height passed in the `flex_cross_height` local. Drives the generated
+    /// `flexbox_layout_item_info_at_cross_height` method, which a FlexboxLayout
+    /// calls with the height it assigned so a repeated cell resolves to the
+    /// same width as an equivalent static cell.
+    pub layout_info_h_at_cross_height_for_repeated: Option<MutExpression>,
     /// True when this is a repeated Row in a GridLayout, meaning layout_item_info
     /// needs to be able to return layout info for individual children
     pub is_repeated_row: bool,
@@ -739,6 +749,12 @@ impl CompilationUnit {
                 visitor(e, ctx);
             }
             if let Some(e) = &sc.layout_info_v_at_cross_width_for_repeated {
+                visitor(e, ctx);
+            }
+            if let Some(e) = &sc.layout_info_h_constrained_for_repeated {
+                visitor(e, ctx);
+            }
+            if let Some(e) = &sc.layout_info_h_at_cross_height_for_repeated {
                 visitor(e, ctx);
             }
             for e in sc.accessible_prop.values() {

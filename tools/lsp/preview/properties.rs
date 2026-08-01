@@ -569,7 +569,7 @@ pub(super) fn get_properties(
             name: "accessible-role".into(),
             priority: DEFAULT_PRIORITY - 100,
             ty: Type::Enumeration(
-                i_slint_compiler::typeregister::BUILTIN.with(|e| e.enums.AccessibleRole.clone()),
+                i_slint_compiler::typeregister::BUILTIN.enums.AccessibleRole.clone(),
             ),
             visibility: PropertyVisibility::InOut,
             declared_at: None,
@@ -826,7 +826,7 @@ fn element_at_source_code_position(
         util::text_size_to_lsp_position(&source_file, position.offset(), document_cache.format);
 
     Ok(document_cache.element_at_position(position.url(), &element_position).ok_or_else(|| {
-        format!("No element found at the given start position {:?}", &element_position)
+        format!("No element found at the given start position {element_position:?}")
     })?)
 }
 

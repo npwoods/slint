@@ -18,16 +18,53 @@ const SPEC_DIR: &str = "docs/astro/src/content/docs/reference/language";
 
 /// Sidebar order of the specification pages in docs/safety/astro.config.mjs.
 /// Pages not listed here are ordered alphabetically.
-const SPEC_PAGE_ORDER: &[&str] =
-    &["index", "source-files", "lexical-structure", "file-structure", "imports", "exports"];
+const SPEC_PAGE_ORDER: &[&str] = &[
+    "index",
+    "source-files",
+    "lexical-structure",
+    "file-structure",
+    "imports",
+    "exports",
+    "properties",
+    "bindings",
+    "expressions",
+    "geometry",
+];
 
-/// Directories scanned for `.slint` test cases with `//#sls.…` references,
-/// as (kind label shown in the matrix, path relative to the repository root).
-const TEST_ROOTS: &[(&str, &str)] =
-    &[("case", "api/slint-sc/tests/cases"), ("syntax", "internal/compiler/tests/syntax/slint-sc")];
+/// A tree scanned for `//#sls.…` references.
+struct TestRoot {
+    /// The label shown in the matrix (`case`, `syntax`, `rust`).
+    label: &'static str,
+    /// Path relative to the repository root.
+    path: &'static str,
+    /// Extension of the files that carry the references.
+    extension: &'static str,
+}
+
+/// Roots scanned for `//#sls.…` references. The `.slint` cases and syntax
+/// tests carry them in `//#` comments; the Rust of the `slint-sc` crate and
+/// the compiler carry them where the code enforces a requirement -- e.g. the
+/// test driver links the generated code against the `slint-sc` rlib alone
+/// (verifying `sls.gen.output`), and the lexer unit tests exercise the token
+/// rules (verifying `sls.lex.…`).
+const TEST_ROOTS: &[TestRoot] = &[
+    TestRoot { label: "case", path: "api/slint-sc/tests/cases", extension: "slint" },
+    TestRoot {
+        label: "syntax",
+        path: "internal/compiler/tests/syntax/slint-sc",
+        extension: "slint",
+    },
+    TestRoot { label: "rust", path: "api/slint-sc", extension: "rs" },
+    TestRoot { label: "rust", path: "internal/compiler", extension: "rs" },
+];
 
 /// Handwritten safety-manual pages may also state requirements.
 const SAFETY_DOCS_DIR: &str = "docs/safety/src/content/docs";
+
+/// The property-types reference; the pages that opt into the SC corpus with
+/// `SC: true` are part of it. Anchors are scanned from this canonical location;
+/// the safety manual syncs and serves the SC ones under `reference/property-types/`.
+const PROPERTY_TYPES_DIR: &str = "docs/astro/src/content/docs/reference/property-types";
 
 /// Subdirectories of [`SAFETY_DOCS_DIR`] whose anchors are already scanned
 /// from their canonical source: the generated pages and the specification
@@ -38,15 +75,17 @@ const SAFETY_DOCS_EXCLUDE: &[&str] = &["generated", "language"];
 /// [`Config::qualification_plan_dir`], the section it belongs to.
 const MATRIX_FILE: &str = "traceability-matrix.mdx";
 
-const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+pub(crate) const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 struct SpecPage {
     /// Repository-relative path with `/` separators, for error messages.
     file: String,
     /// From the frontmatter.
     title: String,
-    /// Site-relative URL of the page, for linking its anchors from the matrix.
-    /// The matrix sits two levels deep, so it starts with `../../`.
+    /// URL of the page from the site root, for linking its anchors from the
+    /// matrix. Not relative, because starlight-links-validator skips relative
+    /// links: one here would go unchecked and could rot into a dead anchor.
+    /// remark-base-links.mjs adds the site base at build time.
     base: String,
     /// The specification index heads its section; every other page nests
     /// under one.
@@ -55,6 +94,14 @@ struct SpecPage {
     anchors: Vec<(String, usize)>,
     /// Draft pages aren't published, so their anchors don't exist.
     draft: bool,
+    /// Whether the page opts into the safety corpus with `SC: true`. Only the
+    /// content it wraps in `<SC>` is certified; other pages are left out.
+    sc: bool,
+    /// States requirements, the default. A navigational page like a section
+    /// landing page sets `normative: false`; rehype-sls-ids.mjs drops its
+    /// markers rather than turning them into anchors, so citing one here
+    /// would dead-link.
+    normative: bool,
 }
 
 struct TestRef {
@@ -63,19 +110,20 @@ struct TestRef {
     file: String,
     line: usize,
     /// The [`TEST_ROOTS`] entry the file was found under.
-    kind: &'static (&'static str, &'static str),
+    kind: &'static TestRoot,
 }
 
 impl TestRef {
     /// Path relative to the test root, for display.
     fn short(&self) -> &str {
-        &self.file[self.kind.1.len() + 1..]
+        &self.file[self.kind.path.len() + 1..]
     }
 }
 
 pub fn generate(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let root = crate::root_dir();
-    let spec_pages = scan_spec_pages(&root.join(SPEC_DIR))?;
+    let mut spec_pages = scan_spec_pages(&root.join(SPEC_DIR))?;
+    spec_pages.extend(scan_property_type_pages(&root)?);
     let reference_pages = scan_reference_pages(cfg, &root)?;
     let safety_pages = scan_safety_pages(&root)?;
 
@@ -170,11 +218,16 @@ fn parse_spec_page(file: &str, text: &str) -> (SpecPage, Option<String>) {
         top_level: false,
         anchors: Vec::new(),
         draft: false,
+        sc: false,
+        normative: true,
     };
     let mut in_comment = false;
     let mut in_fence = false;
-    // `<NotInSC>` regions aren't published in the safety manual, so whatever
-    // they enclose states no requirement. See rehype-not-in-sc.mjs.
+    // <SC> and the <OnlyInSC> that nests inside it are certified; a <NotInSC>
+    // nested in either opts a part back out. Count nesting depth so a closing
+    // </OnlyInSC> doesn't end the enclosing <SC>. See the SC/OnlyInSC/NotInSC
+    // components and rehype-sls-ids.mjs.
+    let mut sc_depth = 0u32;
     let mut in_not_in_sc = false;
     let mut frontmatter_delimiters = 0;
     for (i, line) in text.lines().enumerate() {
@@ -188,6 +241,10 @@ fn parse_spec_page(file: &str, text: &str) -> (SpecPage, Option<String>) {
                 slug = Some(s.trim().to_string());
             } else if t == "draft: true" {
                 page.draft = true;
+            } else if t == "SC: true" {
+                page.sc = true;
+            } else if t == "normative: false" {
+                page.normative = false;
             }
             continue;
         }
@@ -202,6 +259,14 @@ fn parse_spec_page(file: &str, text: &str) -> (SpecPage, Option<String>) {
         if in_fence {
             continue;
         }
+        if t == "<SC>" || t == "<OnlyInSC>" {
+            sc_depth += 1;
+            continue;
+        }
+        if t == "</SC>" || t == "</OnlyInSC>" {
+            sc_depth = sc_depth.saturating_sub(1);
+            continue;
+        }
         if t == "<NotInSC>" {
             in_not_in_sc = true;
             continue;
@@ -210,7 +275,11 @@ fn parse_spec_page(file: &str, text: &str) -> (SpecPage, Option<String>) {
             in_not_in_sc = false;
             continue;
         }
-        if in_not_in_sc {
+        // On an `SC: true` page anchors count only inside an <SC>/<OnlyInSC>
+        // block (and not inside a nested <NotInSC>). Generated reference pages
+        // carry no such wrapper -- the whole page is certified -- so they count
+        // every anchor outside a <NotInSC>.
+        if in_not_in_sc || (page.sc && sc_depth == 0) {
             continue;
         }
         // Both comment forms: markdown pages use `<!-- -->`, MDX `{/* */}`.
@@ -256,16 +325,43 @@ fn scan_spec_pages(dir: &Path) -> Result<Vec<SpecPage>, Box<dyn std::error::Erro
         let text = std::fs::read_to_string(&path).context(format!("error reading {path:?}"))?;
         let file = path.file_name().unwrap_or_default().to_string_lossy();
         let (mut page, _) = parse_spec_page(&format!("{SPEC_DIR}/{file}"), &text);
+        if !page.sc {
+            continue;
+        }
         // The index page is served at the root of the specification.
         page.top_level = stem == "index";
-        page.base = if page.top_level {
-            "../../language/".to_string()
-        } else {
-            format!("../../language/{stem}/")
-        };
+        page.base =
+            if page.top_level { "/language/".to_string() } else { format!("/language/{stem}/") };
         if !page.draft {
             pages.push(page);
         }
+    }
+    Ok(pages)
+}
+
+/// Parse the property-types reference pages under [`PROPERTY_TYPES_DIR`] for
+/// their anchors. Only pages that opt in with `SC: true` carry requirements;
+/// those are served in the safety manual under `reference/property-types/`.
+fn scan_property_type_pages(root: &Path) -> Result<Vec<SpecPage>, Box<dyn std::error::Error>> {
+    let dir = root.join(PROPERTY_TYPES_DIR);
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .context(format!("error reading {dir:?}"))?
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "md" || e == "mdx"))
+        .collect();
+    paths.sort();
+
+    let mut pages = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path).context(format!("error reading {path:?}"))?;
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let file = repo_relative(&path, root);
+        let (mut page, _) = parse_spec_page(&file, &text);
+        if !page.sc || page.anchors.is_empty() || page.draft {
+            continue;
+        }
+        page.base = format!("/reference/property-types/{stem}/");
+        pages.push(page);
     }
     Ok(pages)
 }
@@ -294,7 +390,7 @@ fn scan_reference_pages(
         // couldn't link to the anchors it just found.
         let slug = slug
             .ok_or_else(|| anyhow::anyhow!("{file}: generated page carries anchors but no slug"))?;
-        page.base = format!("../../{slug}/");
+        page.base = format!("/{slug}/");
         pages.push(page);
     }
     Ok(pages)
@@ -329,13 +425,18 @@ fn scan_safety_pages(repo_root: &Path) -> Result<Vec<SpecPage>, Box<dyn std::err
         }
         let file = repo_relative(path, repo_root);
         let text = std::fs::read_to_string(path).context(format!("error reading {path:?}"))?;
+        // The property-types pages are scanned from their canonical location,
+        // so skip the synced copies here to avoid duplicate anchors.
+        if file.contains("reference/property-types/") {
+            continue;
+        }
         let (mut page, slug) = parse_spec_page(&file, &text);
-        if page.anchors.is_empty() || page.draft {
+        if page.anchors.is_empty() || page.draft || !page.normative {
             continue;
         }
         let relative = repo_relative(path, &dir);
         let slug = slug.unwrap_or_else(|| safety_page_slug(&relative).to_string());
-        page.base = format!("../../{slug}/");
+        page.base = format!("/{slug}/");
         pages.push(page);
     }
     Ok(pages)
@@ -343,40 +444,43 @@ fn scan_safety_pages(repo_root: &Path) -> Result<Vec<SpecPage>, Box<dyn std::err
 
 fn scan_test_refs(
     repo_root: &Path,
-    kind: &'static (&'static str, &'static str),
+    kind: &'static TestRoot,
     refs: &mut Vec<TestRef>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in walkdir::WalkDir::new(repo_root.join(kind.1)).sort_by_file_name() {
+    for entry in walkdir::WalkDir::new(repo_root.join(kind.path)).sort_by_file_name() {
         let entry = entry?;
-        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "slint") {
+        if !entry.file_type().is_file()
+            || entry.path().extension().is_none_or(|e| e != kind.extension)
+        {
             continue;
         }
         let text = std::fs::read_to_string(entry.path())
             .context(format!("error reading {:?}", entry.path()))?;
         let file = repo_relative(entry.path(), repo_root);
         for (i, line) in text.lines().enumerate() {
-            if let Some(id) = line.trim().strip_prefix("//#") {
-                refs.push(TestRef {
-                    id: id.trim().to_string(),
-                    file: file.clone(),
-                    line: i + 1,
-                    kind,
-                });
+            // `//#sls.…` marks a covered requirement. Rust sources also carry
+            // unrelated `//#` comments (a commented-out `//#[cfg(…)]`), so
+            // require the `sls.` prefix rather than taking every `//#` line.
+            let Some(id) = line.trim().strip_prefix("//#").map(str::trim) else { continue };
+            if !id.starts_with("sls.") {
+                continue;
             }
+            refs.push(TestRef { id: id.to_string(), file: file.clone(), line: i + 1, kind });
         }
     }
     Ok(())
 }
 
 /// Whether a paragraph is informative rather than a testable requirement:
-/// the document conventions (`sls.meta.…`) and examples. These are excluded
-/// from the matrix; examples are compiled by the doctests test instead.
+/// ids with a `meta` segment (document conventions, definitional prose) and
+/// examples. These are excluded from the matrix; examples are compiled by
+/// the doctests test instead.
 fn informative(id: &str) -> bool {
-    id.starts_with("sls.meta.") || id.split('.').any(|s| s == "example")
+    id.split('.').any(|s| s == "meta" || s == "example")
 }
 
 /// The commit to link test files to on GitHub.
-fn git_head(repo_root: &Path) -> String {
+pub(crate) fn git_head(repo_root: &Path) -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
@@ -418,20 +522,21 @@ description: Mapping between the requirement paragraphs of the Language Specific
 slug: qualification-plan/traceability-matrix
 ---
 
-Each requirement paragraph in the [Language Specification](../../language/), the [SC API Reference](../../reference/), and the other chapters of this manual carries a unique identifier,
+Each requirement paragraph in the [Language Specification](/language/), the [SC API Reference](/reference/), and the other chapters of this manual carries a unique identifier,
 shown as a `[sls.…]` badge at the end of the paragraph.
 A test case declares which requirements it verifies by listing their identifiers in `//#sls.…` comments.
 This matrix lists every requirement paragraph with the test cases that declare it.
 Requirements not yet covered by any test are marked ❌.
-Informative paragraphs — the document conventions (`sls.meta.…`) and examples — are not listed;
+Informative paragraphs — those whose identifier contains a `meta` segment, and examples — are not listed;
 the examples are compiled by the doctests test instead.
 
 Tests marked `case:` are executed test cases from `{case_root}/`,
-tests marked `syntax:` are compiler syntax tests from `{syntax_root}/`.
+`syntax:` are compiler syntax tests from `{syntax_root}/`,
+and `rust:` are Rust unit tests and test drivers of the `slint-sc` crate and the compiler.
 
 **Coverage: {covered} of {total} requirement paragraphs are covered by at least one test.**"#,
-        case_root = TEST_ROOTS[0].1,
-        syntax_root = TEST_ROOTS[1].1,
+        case_root = TEST_ROOTS[0].path,
+        syntax_root = TEST_ROOTS[1].path,
     )?;
 
     for page in spec_pages {
@@ -481,7 +586,7 @@ fn write_page(
             Some(files) => files
                 .iter()
                 .map(|t| {
-                    format!("[`{}: {}`]({REPO_URL}/blob/{sha}/{})", t.kind.0, t.short(), t.file)
+                    format!("[`{}: {}`]({REPO_URL}/blob/{sha}/{})", t.kind.label, t.short(), t.file)
                 })
                 .collect::<Vec<_>>()
                 .join("<br/>"),
@@ -508,8 +613,11 @@ fn test_informative() {
     assert!(informative("sls.meta.purpose"));
     assert!(informative("sls.file.example.intro"));
     assert!(informative("sls.file.example.description"));
+    assert!(informative("sls.source.file-extension.meta"));
+    assert!(informative("sls.source.whitespace.meta.chars"));
     assert!(!informative("sls.lex.identifier.normalization-example"));
     assert!(!informative("sls.file.component.body"));
+    assert!(!informative("sls.source.metadata"));
 }
 
 #[test]
@@ -557,6 +665,34 @@ Another paragraph. {#sls.two}
     assert!(draft.draft);
     assert_eq!(draft.anchors, [("sls.d".to_string(), 5)]);
 
+    // A page without `SC: true` isn't part of the corpus, but its anchors are
+    // still parsed (the generated reference and safety pages rely on that).
+    assert!(!page.sc);
+    // On an `SC: true` page only anchors inside an <SC>/<OnlyInSC> block count;
+    // a nested <NotInSC> opts back out, and content outside is uncertified.
+    let sc_text = r#"---
+title: Geometry
+SC: true
+---
+
+<SC>
+Certified. {#sls.a}
+
+<OnlyInSC>
+Safety only. {#sls.b}
+</OnlyInSC>
+
+<NotInSC>
+Main only. {#sls.c}
+</NotInSC>
+</SC>
+
+Uncertified. {#sls.d}
+"#;
+    let (sc_page, _) = parse_spec_page("spec/geometry.mdx", sc_text);
+    assert!(sc_page.sc);
+    assert_eq!(sc_page.anchors, [("sls.a".to_string(), 7), ("sls.b".to_string(), 10)]);
+
     let (reference, slug) = parse_spec_page(
         "generated/elements/rectangle.mdx",
         "---\ntitle: Rectangle\nslug: reference/elements/rectangle\n---\nProse. \\{#sls.ref.rectangle.purpose}\n",
@@ -574,6 +710,8 @@ fn test_check_reports_all_errors() {
         top_level: false,
         anchors: anchors.iter().map(|(id, line)| (id.to_string(), *line)).collect(),
         draft: false,
+        sc: false,
+        normative: true,
     };
     let test_ref = |id: &str, file: &str, line| TestRef {
         id: id.to_string(),

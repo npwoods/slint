@@ -22,6 +22,7 @@ use core::num::IntErrorKind;
 use smol_str::{SmolStr, ToSmolStr};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod remove_noop;
@@ -1963,7 +1964,7 @@ impl Expression {
                 (name, value)
             })
             .collect();
-        let ty = Rc::new(Struct::new(
+        let ty = Arc::new(Struct::new(
             values.iter().map(|(k, v)| (k.clone(), v.ty())).collect(),
             StructName::None,
         ));
@@ -2063,7 +2064,7 @@ impl Expression {
                         }
                         // The field defaults must come from the same struct as the name
                         let source = if result.name.is_some() { &result } else { &elem };
-                        Type::Struct(Rc::new(Struct {
+                        Type::Struct(Arc::new(Struct {
                             fields,
                             field_defaults: source.field_defaults.clone(),
                             name: source.name.clone(),
@@ -2115,7 +2116,7 @@ fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Ty
     fn merge_struct(origin: &Struct, other: &Struct) -> Type {
         let mut fields = other.fields.clone();
         fields.extend(origin.fields.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Rc::new(Struct::new(fields, StructName::None)).into()
+        Arc::new(Struct::new(fields, StructName::None)).into()
     }
 
     if let Expression::Struct { ty, values } = true_expr {
@@ -2133,7 +2134,7 @@ fn common_expression_type(true_expr: &Expression, false_expr: &Expression) -> Ty
                     fields.insert(k.clone(), v.ty());
                 }
             }
-            return Type::Struct(Rc::new(Struct::new(fields, StructName::None)));
+            return Type::Struct(Arc::new(Struct::new(fields, StructName::None)));
         } else if let Type::Struct(false_ty) = false_expr.ty() {
             return merge_struct(&false_ty, ty);
         }
@@ -2182,6 +2183,16 @@ fn lookup_qualified_name_node(
     let global_lookup = crate::lookup::global_lookup();
     let result = match global_lookup.lookup(ctx, &first_str) {
         None => {
+            if let Some(slot_element) =
+                resolve_slot_reference_element(first_str.as_str(), ctx, &node)
+            {
+                return continue_lookup_within_element(&slot_element, &mut it, node, ctx);
+            }
+            if first_str == "children" || is_declared_slot_in_scope(first_str.as_str(), ctx) {
+                // resolve_slot_reference_element() already emitted a slot-specific diagnostic.
+                return None;
+            }
+
             if let Some(minus_pos) = first.text().find('-') {
                 // Attempt to recover if the user wanted to write "-" for minus
                 let first_str = &first.text()[0..minus_pos];
@@ -2245,6 +2256,63 @@ fn lookup_qualified_name_node(
         }
         result => maybe_lookup_object(result, it, ctx),
     }
+}
+
+fn resolve_slot_reference_element(
+    name: &str,
+    ctx: &mut LookupCtx,
+    node: &dyn Spanned,
+) -> Option<ElementRc> {
+    if name == "children" {
+        ctx.diag.push_error(
+            "The default slot '@children' cannot be referenced in expressions".into(),
+            node,
+        );
+        return None;
+    }
+
+    for scope_elem in ctx.component_scope.iter().rev() {
+        let scope_elem_ref = scope_elem.borrow();
+        let repeated = scope_elem_ref.repeated.is_some();
+        let mut matches = scope_elem_ref.children.iter().filter(|child| {
+            child.borrow().slot_target.as_ref().is_some_and(|slot| slot.as_str() == name)
+        });
+        if let Some(found) = matches.next() {
+            if matches.next().is_some() {
+                ctx.diag.push_error(format!("Duplicate assignment to slot '{name}'"), node);
+                return None;
+            }
+
+            if repeated {
+                ctx.diag.push_error(
+                    format!(
+                        "Slot '{name}' cannot be referenced inside repeated or conditional elements"
+                    ),
+                    node,
+                );
+                return None;
+            }
+
+            return Some(found.clone());
+        }
+    }
+
+    if is_declared_slot_in_scope(name, ctx) {
+        ctx.diag.push_error(format!("Slot '{name}' is not assigned in this instance"), node);
+        return None;
+    }
+
+    None
+}
+
+fn is_declared_slot_in_scope(name: &str, ctx: &LookupCtx) -> bool {
+    ctx.component_scope.iter().rev().any(|scope_elem| {
+        let scope_elem_ref = scope_elem.borrow();
+        let ElementType::Component(component) = &scope_elem_ref.base_type else {
+            return false;
+        };
+        component.declared_slots.borrow().iter().any(|slot| slot.name == name)
+    })
 }
 
 fn continue_lookup_within_element(

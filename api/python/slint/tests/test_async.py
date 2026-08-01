@@ -1,12 +1,16 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+# cSpell:ignore socketpair
+
 import asyncio
+import gc
 import platform
 import socket
 import sys
 import threading
 import typing
+import weakref
 from datetime import timedelta
 
 import aiohttp
@@ -14,6 +18,7 @@ import pytest
 from aiohttp import web
 
 import slint
+import slint.loop
 from slint import slint as native
 
 
@@ -325,3 +330,107 @@ if sys.platform != "win32":
 
         with pytest.raises(KeyboardInterrupt):
             slint.run_event_loop(run())
+
+
+def test_sleep_does_not_leak_timers() -> None:
+    """Repeatedly awaiting asyncio.sleep() must not accumulate objects.
+
+    `SlintEventLoop.call_later()` arms a native timer per call, so a timer that
+    outlives its callback leaks once per await.
+    See https://github.com/slint-ui/slint/issues/12679.
+    """
+
+    def live_objects() -> int:
+        gc.collect()
+        return len(gc.get_objects())
+
+    async def run() -> None:
+        # A non-zero delay so that both timers per await are exercised: asyncio
+        # short-circuits sleep(0) without going through call_later().
+        delay = 0.001
+
+        # Warm up, so that one-time allocations don't count towards the baseline.
+        for _ in range(100):
+            await asyncio.sleep(delay)
+        baseline = live_objects()
+
+        for _ in range(500):
+            await asyncio.sleep(delay)
+        growth = live_objects() - baseline
+
+        # Before the fix this grew by ~15 objects per iteration.
+        assert growth < 100, f"leaked {growth} objects over 500 awaits"
+
+        # The timers must not be reclaimed by a collection pass either: call_later()
+        # is on the per-await hot path, so it has to avoid building cycles at all.
+        for _ in range(500):
+            await asyncio.sleep(delay)
+        cyclic = gc.collect()
+        assert cyclic < 100, f"{cyclic} cyclic objects over 500 awaits"
+
+        slint.quit_event_loop()
+
+    slint.run_event_loop(run())
+
+
+def test_selector_adapter_cycle_is_collectable() -> None:
+    """`_SlintSelector.register()` hands the adapter its own bound methods.
+
+    The adapter keeps them behind an `Rc` the GC cannot see, so selector and adapter
+    would keep each other alive for the lifetime of the process.
+    """
+
+    class Owner:
+        def __init__(self, fd: int) -> None:
+            self.adapter = native.AsyncAdapter(fd)
+            self.adapter.wait_for_readable(self.on_readable)
+
+        def on_readable(self, fd: int) -> None:
+            pass
+
+    reader, writer = socket.socketpair()
+    try:
+        owner = Owner(reader.fileno())
+        weak_owner = weakref.ref(owner)
+
+        del owner
+        gc.collect()
+
+        assert weak_owner() is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_cancelling_handle_disarms_native_timer() -> None:
+    """Cancelling a `call_later()` handle must stop the timer it armed.
+
+    Otherwise the timer stays armed until its original deadline, waking the loop for a
+    callback that will not run and pinning itself until then.
+    """
+
+    async def run() -> None:
+        loop = typing.cast(slint.loop.SlintEventLoop, asyncio.get_event_loop())
+
+        called = False
+
+        def never() -> None:
+            nonlocal called
+            called = True
+
+        before = len(loop._timers)
+        handle = loop.call_later(3600, never)
+        assert len(loop._timers) == before + 1
+
+        handle.cancel()
+        assert len(loop._timers) == before, "native timer left armed after cancel()"
+
+        # Cancelling twice must not raise.
+        handle.cancel()
+
+        await asyncio.sleep(0.05)
+        assert not called
+
+        slint.quit_event_loop()
+
+    slint.run_event_loop(run())

@@ -4,6 +4,7 @@
 //! This pass computes the layout constraint
 
 use lyon_path::geom::euclid::approxeq::ApproxEq;
+use std::sync::Arc;
 
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
 use crate::expression_tree::*;
@@ -21,12 +22,12 @@ use std::rc::Rc;
 /// Add a `pure function layoutinfo-v-with-constraint(width: length) -> LayoutInfo`
 /// to `elem` with the given `body`. The body reads
 /// `FunctionParameterReference { index: 0 }` for the width.
-fn synthesize_layoutinfo_v_with_constraint_on(
+pub(crate) fn synthesize_layoutinfo_v_with_constraint_on(
     elem: &ElementRc,
     span: crate::diagnostics::SourceLocation,
     body: Expression,
 ) {
-    let function_ty = Type::Function(Rc::new(crate::langtype::Function {
+    let function_ty = Type::Function(Arc::new(crate::langtype::Function {
         return_type: crate::typeregister::layout_info_type().into(),
         args: vec![Type::LogicalLength],
         arg_names: vec![SmolStr::new_static("width")],
@@ -117,6 +118,38 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
                     prop_nr.name() == nr.name() && Rc::ptr_eq(&prop_nr.element(), &target)
                 })
                 .unwrap_or(false);
+            // A forwarded scalar constraint (`min-height: inner.min-height`) reads
+            // the target's implicit min/preferred/max-height, which is its
+            // layoutinfo-v at the *unconstrained* width. Thread the cross-axis
+            // width through the target's parametrized function instead.
+            let constraint_field = match nr.name().as_str() {
+                "min-height" => Some("min"),
+                "preferred-height" => Some("preferred"),
+                "max-height" => Some("max"),
+                "vertical-stretch" => Some("stretch"),
+                _ => None,
+            };
+            if let Some(field) = constraint_field {
+                if let Some(constrained_nr) =
+                    target.borrow().inherited_layout_info_v_with_constraint()
+                {
+                    *sub = Expression::StructFieldAccess {
+                        base: Expression::FunctionCall {
+                            function: Callable::Function(
+                                crate::namedreference::NamedReference::new(
+                                    &target,
+                                    constrained_nr.name().clone(),
+                                ),
+                            ),
+                            arguments: vec![width_param.clone()],
+                            source_location: None,
+                        }
+                        .into(),
+                        name: field.into(),
+                    };
+                }
+                return;
+            }
             if !is_vertical_layout_info {
                 return;
             }
@@ -137,12 +170,12 @@ fn rewrite_layoutinfo_v_for_constraint(expr: &mut Expression, width_param: &Expr
 }
 
 /// Mirror of [`synthesize_layoutinfo_v_with_constraint_on`] for the horizontal axis.
-fn synthesize_layoutinfo_h_with_constraint_on(
+pub(crate) fn synthesize_layoutinfo_h_with_constraint_on(
     elem: &ElementRc,
     span: crate::diagnostics::SourceLocation,
     body: Expression,
 ) {
-    let function_ty = Type::Function(Rc::new(crate::langtype::Function {
+    let function_ty = Type::Function(Arc::new(crate::langtype::Function {
         return_type: crate::typeregister::layout_info_type().into(),
         args: vec![Type::LogicalLength],
         arg_names: vec![SmolStr::new_static("height")],
@@ -350,7 +383,9 @@ pub fn synthesize_layoutinfo_v_with_constraint(component: &Rc<Component>) {
         if !has_v_cross || already_synthesized {
             return has_v_cross;
         }
-        let Some(v_nr) = v_nr_clone else { return has_v_cross };
+        let Some(v_nr) = v_nr_clone else {
+            return has_v_cross;
+        };
         let Some(v_binding) = elem.borrow().bindings.get(v_nr.name()).map(|b| b.borrow().clone())
         else {
             return has_v_cross;

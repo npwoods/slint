@@ -16,6 +16,7 @@ use smol_str::{SmolStr, format_smolstr};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 // FIXME remove the pub
 pub use crate::namedreference::NamedReference;
@@ -177,12 +178,12 @@ macro_rules! declare_builtin_function_types {
     ($( $Name:ident $(($Pattern:tt))? : ($( $Arg:expr ),*) -> $ReturnType:expr $(,)? )*) => {
         #[allow(non_snake_case)]
         pub struct BuiltinFunctionTypes {
-            $(pub $Name : Rc<Function>),*
+            $(pub $Name : Arc<Function>),*
         }
         impl BuiltinFunctionTypes {
             pub fn new() -> Self {
                 Self {
-                    $($Name : Rc::new(Function{
+                    $($Name : Arc::new(Function{
                         args: vec![$($Arg),*],
                         return_type: $ReturnType,
                         arg_names: Vec::new(),
@@ -190,7 +191,7 @@ macro_rules! declare_builtin_function_types {
                 }
             }
 
-            pub fn ty(&self, function: &BuiltinFunction) -> Rc<Function> {
+            pub fn ty(&self, function: &BuiltinFunction) -> Arc<Function> {
                 match function {
                     $(BuiltinFunction::$Name $(($Pattern))? => self.$Name.clone()),*
                 }
@@ -243,21 +244,21 @@ declare_builtin_function_types!(
     StringEndsWith: (Type::String, Type::String) -> Type::Bool,
     KeysToString: (Type::Keys) -> Type::String,
     ImplicitLayoutInfo(..): (Type::ElementReference, Type::Float32) -> typeregister::layout_info_type().into(),
-    ColorRgbaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct::new(IntoIterator::into_iter([
+    ColorRgbaStruct: (Type::Color) -> Type::Struct(Arc::new(Struct::new(IntoIterator::into_iter([
             (SmolStr::new_static("red"), Type::Int32),
             (SmolStr::new_static("green"), Type::Int32),
             (SmolStr::new_static("blue"), Type::Int32),
             (SmolStr::new_static("alpha"), Type::Int32),
         ])
         .collect(), BuiltinStruct::Color))),
-    ColorHsvaStruct: (Type::Color) -> Type::Struct(Rc::new(Struct::new(IntoIterator::into_iter([
+    ColorHsvaStruct: (Type::Color) -> Type::Struct(Arc::new(Struct::new(IntoIterator::into_iter([
             (SmolStr::new_static("hue"), Type::Float32),
             (SmolStr::new_static("saturation"), Type::Float32),
             (SmolStr::new_static("value"), Type::Float32),
             (SmolStr::new_static("alpha"), Type::Float32),
         ])
         .collect(), BuiltinStruct::Color))),
-    ColorOklchStruct: (Type::Color) -> Type::Struct(Rc::new(Struct::new(IntoIterator::into_iter([
+    ColorOklchStruct: (Type::Color) -> Type::Struct(Arc::new(Struct::new(IntoIterator::into_iter([
             (SmolStr::new_static("lightness"), Type::Float32),
             (SmolStr::new_static("chroma"), Type::Float32),
             (SmolStr::new_static("hue"), Type::Float32),
@@ -269,7 +270,7 @@ declare_builtin_function_types!(
     ColorTransparentize: (Type::Brush, Type::Float32) -> Type::Brush,
     ColorWithAlpha: (Type::Brush, Type::Float32) -> Type::Brush,
     ColorMix: (Type::Color, Type::Color, Type::Float32) -> Type::Color,
-    ImageSize: (Type::Image) -> Type::Struct(Rc::new(Struct::new(IntoIterator::into_iter([
+    ImageSize: (Type::Image) -> Type::Struct(Arc::new(Struct::new(IntoIterator::into_iter([
             (SmolStr::new_static("width"), Type::Int32),
             (SmolStr::new_static("height"), Type::Int32),
         ])
@@ -283,7 +284,7 @@ declare_builtin_function_types!(
     Hsv: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
     Oklch: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
     ColorScheme: () -> Type::Enumeration(
-        typeregister::BUILTIN.with(|e| e.enums.ColorScheme.clone()),
+        typeregister::BUILTIN.enums.ColorScheme.clone(),
     ),
     AccentColor: () -> Type::Color,
     SupportsNativeMenuBar: () -> Type::Bool,
@@ -295,9 +296,9 @@ declare_builtin_function_types!(
     MonthOffset: (Type::Int32, Type::Int32) -> Type::Int32,
     FormatDate: (Type::String, Type::Int32, Type::Int32, Type::Int32) -> Type::String,
     TextInputFocused: () -> Type::Bool,
-    DateNow: () -> Type::Array(Rc::new(Type::Int32)),
+    DateNow: () -> Type::Array(Arc::new(Type::Int32)),
     ValidDate: (Type::String, Type::String) -> Type::Bool,
-    ParseDate: (Type::String, Type::String) -> Type::Array(Rc::new(Type::Int32)),
+    ParseDate: (Type::String, Type::String) -> Type::Array(Arc::new(Type::Int32)),
     SetTextInputFocused: (Type::Bool) -> Type::Void,
     ItemAbsolutePosition: (Type::ElementReference) -> typeregister::logical_point_type().into(),
     RegisterCustomFontByPath: (Type::String) -> Type::Void,
@@ -308,7 +309,7 @@ declare_builtin_function_types!(
     Use24HourFormat: () -> Type::Bool,
     UpdateTimers: () -> Type::Void,
     DetectOperatingSystem: () -> Type::Enumeration(
-        typeregister::BUILTIN.with(|e| e.enums.OperatingSystemType.clone()),
+        typeregister::BUILTIN.enums.OperatingSystemType.clone(),
     ),
     StartTimer: (Type::ElementReference) -> Type::Void,
     StopTimer: (Type::ElementReference) -> Type::Void,
@@ -327,11 +328,10 @@ impl Default for BuiltinFunctionTypes {
 }
 
 impl BuiltinFunction {
-    pub fn ty(&self) -> Rc<Function> {
-        thread_local! {
-            static TYPES: BuiltinFunctionTypes = BuiltinFunctionTypes::new();
-        }
-        TYPES.with(|types| types.ty(self))
+    pub fn ty(&self) -> Arc<Function> {
+        static TYPES: std::sync::LazyLock<BuiltinFunctionTypes> =
+            std::sync::LazyLock::new(BuiltinFunctionTypes::new);
+        TYPES.ty(self)
     }
 
     /// It is const if the return value only depends on its argument and has no side effect
@@ -848,7 +848,7 @@ pub enum Expression {
         values: Vec<Expression>,
     },
     Struct {
-        ty: Rc<Struct>,
+        ty: Arc<Struct>,
         values: BTreeMap<SmolStr, Expression>,
     },
 
@@ -1080,7 +1080,7 @@ impl Expression {
                 }
             }
             Expression::UnaryOp { sub, .. } => sub.ty(),
-            Expression::Array { element_ty, .. } => Type::Array(Rc::new(element_ty.clone())),
+            Expression::Array { element_ty, .. } => Type::Array(Arc::new(element_ty.clone())),
             Expression::Struct { ty, .. } => ty.clone().into(),
             Expression::PathData { .. } => Type::PathData,
             Expression::EmptyDataTransfer => Type::DataTransfer,
@@ -1763,7 +1763,7 @@ impl Expression {
             },
             Type::Easing => Expression::EasingCurve(EasingCurve::default()),
             Type::MouseCursor => {
-                let e = crate::typeregister::BUILTIN.with(|e| e.enums.BuiltInMouseCursor.clone());
+                let e = crate::typeregister::BUILTIN.enums.BuiltInMouseCursor.clone();
                 Expression::MouseCursor(MouseCursorInner::BuiltIn(Box::new(
                     Expression::EnumerationValue(e.default_value()),
                 )))
@@ -1835,7 +1835,7 @@ impl Expression {
                     true
                 } else {
                     ctx.diag.push_error(
-                        format!("{what} on a {} property", lookup.property_visibility),
+                        format!("{what} on an {} property", lookup.property_visibility),
                         node,
                     );
                     false

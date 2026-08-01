@@ -12,7 +12,7 @@ use crate::layout::Orientation;
 use itertools::Either;
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum ArrayOutput {
@@ -162,7 +162,7 @@ pub enum Expression {
         output: ArrayOutput,
     },
     Struct {
-        ty: Rc<crate::langtype::Struct>,
+        ty: Arc<crate::langtype::Struct>,
         values: BTreeMap<SmolStr, Expression>,
     },
 
@@ -261,8 +261,9 @@ pub enum Expression {
     /// `(h_info, v_info)` at the default constraint (matching `data`'s cells);
     /// it provides the preferred size returned when taffy asks for a dimension
     /// without a known cross-axis size (mirroring the plain `solve_flexbox_layout`
-    /// measure). A repeater cell (the `Right` case) is measured by calling
-    /// `flexbox_layout_item_info_at_cross_width` on the instance taffy asks for.
+    /// measure). A repeater cell (the `Right` case) is measured by calling the
+    /// matching cross-axis accessor (`flexbox_layout_item_info_at_cross_width` or
+    /// `_at_cross_height`) on the instance taffy asks for.
     SolveFlexboxLayoutWithMeasure {
         /// The `FlexboxLayoutData` (built inline with the cell arrays, so its
         /// temporaries live for the duration of the solve call).
@@ -380,7 +381,7 @@ impl Expression {
             },
             Type::Easing => Expression::EasingCurve(crate::expression_tree::EasingCurve::default()),
             Type::MouseCursor => {
-                let e = crate::typeregister::BUILTIN.with(|e| e.enums.BuiltInMouseCursor.clone());
+                let e = crate::typeregister::BUILTIN.enums.BuiltInMouseCursor.clone();
                 Expression::MouseCursor(MouseCursorInner::BuiltIn(Box::new(
                     Expression::EnumerationValue(e.default_value()),
                 )))
@@ -851,15 +852,14 @@ impl<'a, T> EvaluationContext<'a, T> {
             r: &'_ LocalMemberIndex,
             map: ContextMap,
         ) -> PropertyInfoResult<'a> {
-            let binding = g.init_values.get(r).map(|b| (b, map.clone()));
-            let animation = g.animations.get(r).map(|a| (a, map));
+            let binding = g.init_values.get(r).map(|b| (b, map));
             match r {
                 LocalMemberIndex::Property(index) => {
                     let property_decl = &g.properties[*index];
                     PropertyInfoResult {
                         analysis: Some(&g.prop_analysis[*index]),
                         binding,
-                        animation,
+                        animation: None,
                         ty: property_decl.ty.clone(),
                         use_count: Some(&property_decl.use_count),
                     }

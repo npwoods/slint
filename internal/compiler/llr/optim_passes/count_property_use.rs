@@ -44,12 +44,12 @@ pub fn count_property_use(root: &CompilationUnit) {
         for (idx, r) in sc.repeated.iter_enumerated() {
             r.model.borrow().visit_property_references(ctx, &mut visit_property);
             if let Some(lv) = &r.listview {
-                visit_property(&lv.viewport_y, ctx);
-                if let Some(viewport_height) = &lv.viewport_height {
-                    visit_property(viewport_height, ctx);
+                visit_property(&lv.content_y, ctx);
+                if let Some(content_height) = &lv.content_height {
+                    visit_property(content_height, ctx);
                 }
-                if let Some(viewport_width) = &lv.viewport_width {
-                    visit_property(viewport_width, ctx);
+                if let Some(content_width) = &lv.content_width {
+                    visit_property(content_width, ctx);
                 }
                 visit_property(&lv.listview_width, ctx);
                 visit_property(&lv.listview_height, ctx);
@@ -86,6 +86,12 @@ pub fn count_property_use(root: &CompilationUnit) {
         if let Some(e) = &sc.layout_info_v_at_cross_width_for_repeated {
             e.borrow().visit_property_references(ctx, &mut visit_property);
         }
+        if let Some(e) = &sc.layout_info_h_constrained_for_repeated {
+            e.borrow().visit_property_references(ctx, &mut visit_property);
+        }
+        if let Some(e) = &sc.layout_info_h_at_cross_height_for_repeated {
+            e.borrow().visit_property_references(ctx, &mut visit_property);
+        }
         for child in &sc.grid_layout_children {
             child.layout_info_h.borrow().visit_property_references(ctx, &mut visit_property);
             child.layout_info_v.borrow().visit_property_references(ctx, &mut visit_property);
@@ -111,6 +117,12 @@ pub fn count_property_use(root: &CompilationUnit) {
                 local_reference.reference = p.into();
                 visit_property(&idx_prop, ctx);
             }
+        }
+
+        // 8. animations (`animate x { … }`): `remove_unused` keeps and remaps these,
+        // so the properties they read must be counted too.
+        for anim in sc.animations.values() {
+            anim.visit_property_references(ctx, &mut visit_property);
         }
 
         // Function bodies are visited on demand from visit_property when a call to

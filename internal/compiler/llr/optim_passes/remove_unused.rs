@@ -85,7 +85,6 @@ pub fn remove_unused(root: &mut CompilationUnit) {
     }
     for (idx, g) in root.globals.iter_mut_enumerated() {
         g.init_values.retain(|x, _| mappings.glob_mappings[idx].keep(x));
-        g.animations.retain(|x, _| mappings.glob_mappings[idx].keep(x));
     }
 
     macro_rules! remap_index {
@@ -309,6 +308,8 @@ mod visitor {
             flexbox_layout_item_info_for_repeated,
             layout_info_v_constrained_for_repeated,
             layout_info_v_at_cross_width_for_repeated,
+            layout_info_h_constrained_for_repeated,
+            layout_info_h_at_cross_height_for_repeated,
             is_repeated_row: _,
             grid_layout_children,
             accessible_prop,
@@ -344,12 +345,12 @@ mod visitor {
             }
 
             if let Some(listview) = listview {
-                visit_member_reference(&mut listview.viewport_y, &scope, state, visitor);
-                if let Some(viewport_height) = &mut listview.viewport_height {
-                    visit_member_reference(viewport_height, &scope, state, visitor);
+                visit_member_reference(&mut listview.content_y, &scope, state, visitor);
+                if let Some(content_height) = &mut listview.content_height {
+                    visit_member_reference(content_height, &scope, state, visitor);
                 }
-                if let Some(viewport_width) = &mut listview.viewport_width {
-                    visit_member_reference(viewport_width, &scope, state, visitor);
+                if let Some(content_width) = &mut listview.content_width {
+                    visit_member_reference(content_width, &scope, state, visitor);
                 }
                 visit_member_reference(&mut listview.listview_width, &scope, state, visitor);
                 visit_member_reference(&mut listview.listview_height, &scope, state, visitor);
@@ -412,6 +413,12 @@ mod visitor {
         if let Some(e) = layout_info_v_at_cross_width_for_repeated {
             visit_expression(e.get_mut(), &scope, state, visitor);
         }
+        if let Some(e) = layout_info_h_constrained_for_repeated {
+            visit_expression(e.get_mut(), &scope, state, visitor);
+        }
+        if let Some(e) = layout_info_h_at_cross_height_for_repeated {
+            visit_expression(e.get_mut(), &scope, state, visitor);
+        }
         for child in grid_layout_children {
             visit_expression(child.layout_info_h.get_mut(), &scope, state, visitor);
             visit_expression(child.layout_info_v.get_mut(), &scope, state, visitor);
@@ -438,7 +445,6 @@ mod visitor {
             callbacks: _,
             functions,
             init_values,
-            animations,
             change_callbacks,
             const_properties: _,
             public_properties,
@@ -462,15 +468,6 @@ mod visitor {
             .map(|(mut k, mut v)| {
                 visit_member_index(&mut k, &scope, state, visitor);
                 visit_binding_expression(&mut v, &scope, state, visitor);
-                (k, v)
-            })
-            .collect();
-
-        *animations = std::mem::take(animations)
-            .into_iter()
-            .map(|(mut k, mut v)| {
-                visit_member_index(&mut k, &scope, state, visitor);
-                visit_expression(&mut v, &scope, state, visitor);
                 (k, v)
             })
             .collect();

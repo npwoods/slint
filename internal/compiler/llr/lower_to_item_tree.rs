@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 use by_address::ByAddress;
+use std::sync::Arc;
 
 use super::lower_expression::{ExpressionLoweringCtx, ExpressionLoweringCtxInner};
 use crate::CompilerConfiguration;
@@ -320,6 +321,8 @@ fn lower_sub_component(
         flexbox_layout_item_info_for_repeated: None,
         layout_info_v_constrained_for_repeated: None,
         layout_info_v_at_cross_width_for_repeated: None,
+        layout_info_h_constrained_for_repeated: None,
+        layout_info_h_at_cross_height_for_repeated: None,
         is_repeated_row: component
             .root_element
             .borrow()
@@ -698,10 +701,16 @@ fn lower_sub_component(
                 root_elem,
                 &component.root_constraints.borrow(),
             );
+        let h_constrained =
+            super::lower_layout_expression::get_layout_info_h_constrained_for_repeated(
+                &mut ctx,
+                root_elem,
+                &component.root_constraints.borrow(),
+            );
         // Generate the flex item-info accessor when the element sets flex
-        // properties, or when it needs the constrained-vertical fix (a
-        // height-for-width instance in a column flex).
-        if has_flex_binding || v_constrained.is_some() {
+        // properties, or when it needs one of the constrained-axis fixes (a
+        // height-for-width instance in a column flex, or a width-for-height one).
+        if has_flex_binding || v_constrained.is_some() || h_constrained.is_some() {
             sub_component.flexbox_layout_item_info_for_repeated = Some(
                 super::lower_layout_expression::get_flexbox_layout_item_info_for_repeated(
                     &mut ctx, root_elem,
@@ -712,6 +721,14 @@ fn lower_sub_component(
         sub_component.layout_info_v_constrained_for_repeated = v_constrained.map(Into::into);
         sub_component.layout_info_v_at_cross_width_for_repeated =
             super::lower_layout_expression::get_layout_info_v_at_cross_width_for_repeated(
+                &mut ctx,
+                root_elem,
+                &component.root_constraints.borrow(),
+            )
+            .map(Into::into);
+        sub_component.layout_info_h_constrained_for_repeated = h_constrained.map(Into::into);
+        sub_component.layout_info_h_at_cross_height_for_repeated =
+            super::lower_layout_expression::get_layout_info_h_at_cross_height_for_repeated(
                 &mut ctx,
                 root_elem,
                 &component.root_constraints.borrow(),
@@ -853,7 +870,7 @@ fn lower_geometry(
         values
             .insert(f.into(), super::Expression::PropertyReference(ctx.map_property_reference(v)));
     }
-    super::Expression::Struct { ty: Rc::new(Struct::new(fields, StructName::None)), values }
+    super::Expression::Struct { ty: Arc::new(Struct::new(fields, StructName::None)), values }
 }
 
 fn get_property_analysis(elem: &ElementRc, p: &str) -> crate::object_tree::PropertyAnalysis {
@@ -900,15 +917,15 @@ fn lower_repeated_component(
     let listview = repeated.is_listview.as_ref().map(|lv| {
         let geom = component.root_element.borrow().geometry_props.clone().unwrap();
         ListViewInfo {
-            viewport_y: ctx.map_property_reference(&lv.viewport_y),
-            viewport_height: lv
-                .viewport_height
+            content_y: ctx.map_property_reference(&lv.content_y),
+            content_height: lv
+                .content_height
                 .as_ref()
-                .map(|viewport_height| ctx.map_property_reference(viewport_height)),
-            viewport_width: lv
-                .viewport_width
+                .map(|content_height| ctx.map_property_reference(content_height)),
+            content_width: lv
+                .content_width
                 .as_ref()
-                .map(|viewport_width| ctx.map_property_reference(viewport_width)),
+                .map(|content_width| ctx.map_property_reference(content_width)),
             listview_height: ctx.map_property_reference(&lv.listview_height),
             listview_width: ctx.map_property_reference(&lv.listview_width),
             prop_y: sc.mapping.map_property_reference(&geom.y, ctx.state),
@@ -1080,7 +1097,6 @@ fn lower_global(
     GlobalComponent {
         name: global.root_element.borrow().id.clone(),
         init_values: BTreeMap::new(),
-        animations: BTreeMap::new(),
         properties,
         callbacks,
         functions,
@@ -1108,13 +1124,9 @@ fn lower_global_expressions(
 
     for (prop, binding) in &global.root_element.borrow().bindings {
         assert!(binding.borrow().two_way_bindings.is_empty());
+        assert!(binding.borrow().animation.is_none());
         let expression =
             super::lower_expression::lower_expression(&binding.borrow().expression, &mut ctx);
-        let animation = binding
-            .borrow()
-            .animation
-            .as_ref()
-            .map(|a| super::lower_expression::lower_animation(a, &mut ctx));
 
         let nr = NamedReference::new(&global.root_element, prop.clone());
         let member_index = match &ctx.state.global_properties[&nr] {
@@ -1127,15 +1139,12 @@ fn lower_global_expressions(
             MemberReference::Global { member, .. } => member.clone(),
             _ => unreachable!(),
         };
-        if let Some(Animation::Static(animation)) = animation.as_ref() {
-            lowered.animations.insert(member_index.clone(), animation.clone());
-        }
         let is_constant = binding.borrow().analysis.as_ref().is_some_and(|a| a.is_const);
         lowered.init_values.insert(
             member_index,
             BindingExpression {
                 expression: expression.into(),
-                animation,
+                animation: None,
                 kind: if is_constant { BindingKind::Constant } else { BindingKind::Normal },
                 use_count: 0.into(),
             },

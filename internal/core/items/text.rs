@@ -186,6 +186,10 @@ impl RenderString for ComplexText {
     fn max_lines(self: Pin<&Self>) -> i32 {
         Self::FIELD_OFFSETS.max_lines().apply_pin(self).get()
     }
+
+    fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
+        (self.stroke(), self.stroke_width(), self.stroke_style())
+    }
 }
 
 impl RenderText for ComplexText {
@@ -195,10 +199,6 @@ impl RenderText for ComplexText {
 
     fn color(self: Pin<&Self>) -> Brush {
         self.color()
-    }
-
-    fn link_color(self: Pin<&Self>) -> Color {
-        Default::default()
     }
 
     fn alignment(
@@ -213,10 +213,6 @@ impl RenderText for ComplexText {
 
     fn overflow(self: Pin<&Self>) -> TextOverflow {
         self.overflow()
-    }
-
-    fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
-        (self.stroke(), self.stroke_width(), self.stroke_style())
     }
 
     fn is_markdown(self: Pin<&Self>) -> bool {
@@ -299,12 +295,12 @@ impl Item for StyledTextItem {
             let window_inner = WindowInner::from_pub(window_adapter.window());
             let scale_factor = crate::lengths::ScaleFactor::new(window_inner.scale_factor());
             crate::textlayout::sharedparley::link_under_cursor(
-                &mut window_inner.context().font_context().borrow_mut(),
                 scale_factor,
                 self,
                 self_rc,
                 LogicalSize::from_lengths(self.width(), self.height()),
                 *position * scale_factor,
+                window_adapter.window(),
                 None,
             )
         };
@@ -414,6 +410,10 @@ impl RenderString for StyledTextItem {
     fn max_lines(self: Pin<&Self>) -> i32 {
         Self::FIELD_OFFSETS.max_lines().apply_pin(self).get()
     }
+
+    fn link_color(self: Pin<&Self>) -> Color {
+        self.link_color()
+    }
 }
 
 impl RenderText for StyledTextItem {
@@ -423,10 +423,6 @@ impl RenderText for StyledTextItem {
 
     fn color(self: Pin<&Self>) -> Brush {
         self.default_color()
-    }
-
-    fn link_color(self: Pin<&Self>) -> Color {
-        self.link_color()
     }
 
     fn alignment(
@@ -441,10 +437,6 @@ impl RenderText for StyledTextItem {
 
     fn overflow(self: Pin<&Self>) -> TextOverflow {
         TextOverflow::Clip
-    }
-
-    fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
-        Default::default()
     }
 
     fn is_markdown(self: Pin<&Self>) -> bool {
@@ -613,10 +605,6 @@ impl RenderText for SimpleText {
         self.color()
     }
 
-    fn link_color(self: Pin<&Self>) -> Color {
-        Default::default()
-    }
-
     fn alignment(
         self: Pin<&Self>,
     ) -> (super::TextHorizontalAlignment, super::TextVerticalAlignment) {
@@ -629,10 +617,6 @@ impl RenderText for SimpleText {
 
     fn overflow(self: Pin<&Self>) -> TextOverflow {
         TextOverflow::default()
-    }
-
-    fn stroke(self: Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) {
-        Default::default()
     }
 
     fn is_markdown(self: Pin<&Self>) -> bool {
@@ -1329,7 +1313,10 @@ impl HasFont for TextInput {
 
 impl RenderString for TextInput {
     fn text(self: Pin<&Self>) -> PlainOrStyledText {
-        PlainOrStyledText::Plain(self.as_ref().visual_representation(None).text.clone())
+        // Deliberately not `visual_representation`, which would size the item off the cursor and
+        // the selection too -- see `text_with_preedit`.
+        let text = self.text_with_preedit().0;
+        PlainOrStyledText::Plain(if self.is_password() { mask_password(&text) } else { text })
     }
 }
 
@@ -1437,41 +1424,38 @@ pub struct TextInputVisualRepresentation {
     /// The color of the blinking cursor
     pub cursor_color: Color,
     text_without_password: Option<SharedString>,
-    password_character: char,
+}
+
+/// What the characters of a password field are displayed as. The same everywhere, so that
+/// measuring, hit-testing and drawing agree on the shaped text and can share it.
+const PASSWORD_CHARACTER: char = '\u{25cf}';
+
+/// Replaces every character of `text` with [`PASSWORD_CHARACTER`].
+fn mask_password(text: &str) -> SharedString {
+    core::iter::repeat_n(PASSWORD_CHARACTER, text.chars().count()).collect()
 }
 
 impl TextInputVisualRepresentation {
     /// If the given `TextInput` renders a password, then all characters in this `TextInputVisualRepresentation` are replaced
-    /// with the password character and the selection/preedit-ranges/cursor position are adjusted.
-    /// If `password_character_fn` is Some, it is called lazily to query the password character, otherwise a default is used.
-    fn apply_password_character_substitution(
-        &mut self,
-        text_input: Pin<&TextInput>,
-        password_character_fn: Option<fn() -> char>,
-    ) {
-        if !matches!(text_input.input_type(), InputType::Password) {
+    /// with [`PASSWORD_CHARACTER`] and the selection/preedit-ranges/cursor position are adjusted.
+    fn apply_password_character_substitution(&mut self, text_input: Pin<&TextInput>) {
+        if !text_input.is_password() {
             return;
         }
-
-        let password_character = password_character_fn.map_or('●', |f| f());
 
         let text = &mut self.text;
         let fixup_range = |r: &mut core::ops::Range<usize>| {
             if !core::ops::Range::is_empty(r) {
-                r.start = text[..r.start].chars().count() * password_character.len_utf8();
-                r.end = text[..r.end].chars().count() * password_character.len_utf8();
+                r.start = text[..r.start].chars().count() * PASSWORD_CHARACTER.len_utf8();
+                r.end = text[..r.end].chars().count() * PASSWORD_CHARACTER.len_utf8();
             }
         };
         fixup_range(&mut self.preedit_range);
         fixup_range(&mut self.selection_range);
         if let Some(cursor_pos) = self.cursor_position.as_mut() {
-            *cursor_pos = text[..*cursor_pos].chars().count() * password_character.len_utf8();
+            *cursor_pos = text[..*cursor_pos].chars().count() * PASSWORD_CHARACTER.len_utf8();
         }
-        self.text_without_password = Some(core::mem::replace(
-            text,
-            core::iter::repeat_n(password_character, text.chars().count()).collect(),
-        ));
-        self.password_character = password_character;
+        self.text_without_password = Some(core::mem::replace(text, mask_password(text)));
     }
 
     /// Use this function to make a byte offset in the visual text (used for rendering) back to a byte offset in the
@@ -1480,7 +1464,7 @@ impl TextInputVisualRepresentation {
         if let Some(text_without_password) = self.text_without_password.as_ref() {
             text_without_password
                 .char_indices()
-                .nth(byte_offset / self.password_character.len_utf8())
+                .nth(byte_offset / PASSWORD_CHARACTER.len_utf8())
                 .map_or(text_without_password.len(), |(r, _)| r)
         } else {
             byte_offset
@@ -1491,8 +1475,7 @@ impl TextInputVisualRepresentation {
     /// This is the opposite of `map_byte_offset_from_byte_offset_in_visual_text`.
     pub fn map_byte_offset_from_actual_to_visual_text(&self, byte_offset: usize) -> usize {
         if let Some(text_without_password) = self.text_without_password.as_ref() {
-            text_without_password[..byte_offset].chars().count()
-                * self.password_character.len_utf8()
+            text_without_password[..byte_offset].chars().count() * PASSWORD_CHARACTER.len_utf8()
         } else {
             byte_offset
         }
@@ -1822,6 +1805,11 @@ impl TextInput {
         safe_byte_offset(self.anchor_position_byte_offset(), text)
     }
 
+    /// Whether this input masks what is typed into it.
+    pub fn is_password(self: Pin<&Self>) -> bool {
+        matches!(self.input_type(), InputType::Password)
+    }
+
     pub fn cursor_position(self: Pin<&Self>, text: &str) -> usize {
         safe_byte_offset(self.cursor_position_byte_offset(), text)
     }
@@ -2066,33 +2054,48 @@ impl TextInput {
         }
     }
 
+    /// Returns the `text` property with the IME composition (preedit) inserted at the cursor, and
+    /// the byte range that composition occupies within the returned string. The range is empty
+    /// when no composition is in progress, in which case the text is returned unchanged.
+    ///
+    /// Password fields are *not* masked here; callers that render or measure the text apply the
+    /// substitution themselves, because the masking character is renderer-specific.
+    ///
+    /// Deliberately reads less than [`Self::visual_representation`]: neither the cursor visibility
+    /// nor the selection nor the colors, so that callers which only need the string -- sizing above
+    /// all -- don't end up making the layout depend on the blinking cursor.
+    fn text_with_preedit(self: Pin<&Self>) -> (SharedString, core::ops::Range<usize>) {
+        let text = self.text();
+        let preedit_text = self.preedit_text();
+        if preedit_text.is_empty() {
+            return (text, Default::default());
+        }
+        let cursor_position = self.cursor_position(&text);
+        (
+            [&text[..cursor_position], &preedit_text, &text[cursor_position..]].concat().into(),
+            cursor_position..cursor_position + preedit_text.len(),
+        )
+    }
+
     /// Returns a [`TextInputVisualRepresentation`] struct that contains all the fields necessary for rendering the text input,
     /// after making adjustments such as applying a substitution of characters for password input fields, or making sure
     /// that the selection start is always less or equal than the selection end.
-    pub fn visual_representation(
-        self: Pin<&Self>,
-        password_character_fn: Option<fn() -> char>,
-    ) -> TextInputVisualRepresentation {
-        let mut text = self.text();
+    pub fn visual_representation(self: Pin<&Self>) -> TextInputVisualRepresentation {
+        let (text, composition) = self.text_with_preedit();
 
-        let preedit_text = self.preedit_text();
-        let (preedit_range, selection_range, cursor_position) = if !preedit_text.is_empty() {
-            let cursor_position = self.cursor_position(&text);
-
-            text =
-                [&text[..cursor_position], &preedit_text, &text[cursor_position..]].concat().into();
-            let preedit_range = cursor_position..cursor_position + preedit_text.len();
+        let (preedit_range, selection_range, cursor_position) = if !composition.is_empty() {
+            // Where the composition was inserted, i.e. the cursor within the pre-composition text.
+            let cursor_position = composition.start;
 
             if let Some(preedit_sel) = self.preedit_selection().as_option() {
                 let preedit_selection = cursor_position + preedit_sel.start as usize
                     ..cursor_position + preedit_sel.end as usize;
-                (preedit_range, preedit_selection, Some(cursor_position + preedit_sel.end as usize))
+                (composition, preedit_selection, Some(cursor_position + preedit_sel.end as usize))
             } else {
-                let cur = preedit_range.end;
-                (preedit_range, cur..cur, None)
+                let cur = composition.end;
+                (composition, cur..cur, None)
             }
         } else {
-            let preedit_range = Default::default();
             let (selection_anchor_pos, selection_cursor_pos) = self.selection_anchor_and_cursor();
             let selection_range = selection_anchor_pos..selection_cursor_pos;
             let cursor_position = self.cursor_position(&text);
@@ -2102,7 +2105,7 @@ impl TextInput {
             } else {
                 None
             };
-            (preedit_range, selection_range, cursor_position)
+            (composition, selection_range, cursor_position)
         };
 
         let text_color = self.color();
@@ -2124,11 +2127,10 @@ impl TextInput {
             selection_range,
             cursor_position,
             text_without_password: None,
-            password_character: Default::default(),
             text_color,
             cursor_color,
         };
-        repr.apply_password_character_substitution(self, password_character_fn);
+        repr.apply_password_character_substitution(self);
         repr
     }
 

@@ -70,8 +70,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String 
     let llr::MemberReference::Relative { parent_level, local_reference } = pr else {
         unreachable!()
     };
-    let llr::LocalMemberIndex::Native { item_index, prop_name: _, .. } = &local_reference.reference
-    else {
+    let llr::LocalMemberIndex::Native { item_index, .. } = &local_reference.reference else {
         unreachable!()
     };
 
@@ -95,7 +94,7 @@ fn access_item_rc(pr: &llr::MemberReference, ctx: &EvaluationContext) -> String 
         format!("{component_access}tree_index_of_first_child + {item_index_in_tree} - 1")
     };
 
-    format!("{}, {}", &component_rc, item_index)
+    format!("{component_rc}, {item_index}")
 }
 
 /// This module contains some data structure that helps represent a C++ code.
@@ -1329,7 +1328,7 @@ fn generate_struct(
     unit: &llr::CompilationUnit,
     conditional_includes: &ConditionalIncludes,
 ) {
-    let StructName::User { name: user_name, node } = &the_struct.name else {
+    let StructName::User { name: user_name, .. } = &the_struct.name else {
         panic!("internal error: Cannot generate anonymous struct");
     };
     // Constant expressions cannot access the globals; make sure a bug in that
@@ -1342,13 +1341,14 @@ fn generate_struct(
         },
     );
     let name = ident(user_name);
-    let mut members = node
-        .ObjectTypeMember()
-        .map(|n| crate::parser::identifier_text(&n).unwrap())
+    // Emit members in declaration order: C++ users initialize structs positionally.
+    let mut members = the_struct
+        .field_order()
+        .iter()
         .map(|name| {
             // When any field has a declared default value, initialize the remaining fields, too,
             // so that default construction is fully deterministic, like in the other language backends.
-            let init = match the_struct.field_defaults.get(&name) {
+            let init = match the_struct.field_defaults.get(name) {
                 Some(default_value) => {
                     Some(compile_expression(&lower_constant_expression(default_value), &ctx))
                 }
@@ -1358,8 +1358,8 @@ fn generate_struct(
             (
                 Access::Public,
                 Declaration::Var(Var {
-                    ty: the_struct.fields.get(&name).unwrap().cpp_type().unwrap(),
-                    name: ident(&name),
+                    ty: the_struct.fields.get(name).unwrap().cpp_type().unwrap(),
+                    name: ident(name),
                     init,
                     ..Default::default()
                 }),
@@ -1381,7 +1381,7 @@ fn generate_struct(
     file.declarations.push(Declaration::Struct(Struct { name, members, ..Default::default() }))
 }
 
-fn generate_enum(file: &mut File, en: &std::rc::Rc<Enumeration>) {
+fn generate_enum(file: &mut File, en: &std::sync::Arc<Enumeration>) {
     file.declarations.push(Declaration::Enum(Enum {
         name: ident(&en.name),
         values: (0..en.values.len())
@@ -1692,7 +1692,7 @@ fn generate_item_tree(
                     "{{ {}, {} offsetof({}, {}) }}",
                     item.ty.cpp_vtable_getter,
                     compo_offset,
-                    &ident(&sub_component.name),
+                    ident(&sub_component.name),
                     field_name(&item.name),
                 ));
             }
@@ -1796,19 +1796,19 @@ fn generate_item_tree(
                 // weak (matches the Rust backend).
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("if (auto parent = self->parent.lock()) {{"),
+                    "if (auto parent = self->parent.lock()) {".to_string(),
                     // TODO: store popup index in ctx and set it here instead of 0?
-                    format!("    *result = {{ (*parent)->self_weak, 0 }};"),
-                    format!("}}"),
+                    "    *result = { (*parent)->self_weak, 0 };".to_string(),
+                    "}".to_string(),
                     ]
                 }, |idx| {
                 let current_sub_component = &root.sub_components[parent.sub_component];
                 let parent_index = current_sub_component.repeated[idx].index_in_tree;
                 vec![
                     format!("auto self = reinterpret_cast<const {item_tree_class_name}*>(component.instance);"),
-                    format!("if (auto parent = self->parent.lock()) {{"),
+                    "if (auto parent = self->parent.lock()) {".to_string(),
                     format!("    *result = {{ (*parent)->self_weak, (*parent)->tree_index_of_first_child + {} }};", parent_index - 1),
-                    format!("}}"),
+                    "}".to_string(),
                 ]
             })
         })
@@ -2154,8 +2154,8 @@ fn generate_item_tree(
         }),
     ));
 
-    let destructor = vec![format!(
-        "if (auto &window = globals->m_window) window->window_handle().unregister_item_tree(this, item_array());"
+    let destructor = vec![String::from(
+        "if (auto &window = globals->m_window) window->window_handle().unregister_item_tree(this, item_array());",
     )];
 
     target_struct.members.push((
@@ -2496,17 +2496,17 @@ fn generate_sub_component(
         ));
 
         if let Some(listview) = &repeated.listview {
-            let vp_y = access_member(&listview.viewport_y, &ctx).unwrap();
+            let content_y = access_member(&listview.content_y, &ctx).unwrap();
             let lv_w = access_member(&listview.listview_width, &ctx).unwrap();
             let lv_h = access_member(&listview.listview_height, &ctx).unwrap();
-            let vp_w = listview.viewport_width.as_ref().map_or_else(
+            let content_w = listview.content_width.as_ref().map_or_else(
                 || "nullptr".to_string(),
                 |w| {
                     let w = access_member(w, &ctx).unwrap();
                     format!("&{w}")
                 },
             );
-            let vp_h = listview.viewport_height.as_ref().map_or_else(
+            let content_h = listview.content_height.as_ref().map_or_else(
                 || "nullptr".to_string(),
                 |h| {
                     let h = access_member(h, &ctx).unwrap();
@@ -2516,12 +2516,12 @@ fn generate_sub_component(
 
             children_visitor_cases.push(format!(
                 "\n        case {idx}: {{
-                self->{repeater_id}.track_changes_listview({vp_w}, {vp_h}, &{vp_y}, {lv_w}.get(), &{lv_h});
+                self->{repeater_id}.track_changes_listview({content_w}, {content_h}, &{content_y}, {lv_w}.get(), &{lv_h});
                 return self->{repeater_id}.visit(order, visitor);
             }}",
             ));
             ensure_instantiated_stmts.push(format!(
-                "_changed |= self->{repeater_id}.ensure_updated_listview(self, {vp_w}, {vp_h}, &{vp_y}, {lv_w}.get(), {lv_h}.get());"
+                "_changed |= self->{repeater_id}.ensure_updated_listview(self, {content_w}, {content_h}, &{content_y}, {lv_w}.get(), {lv_h}.get());"
             ));
         } else {
             children_visitor_cases.push(format!(
@@ -2972,10 +2972,25 @@ fn generate_flexbox_layout_item_info_decl(
                 )
             })
             .unwrap_or_default();
+        // Mirror of `v_constrained` for the other axis: a width-for-height
+        // instance (e.g. a wrapping column FlexboxLayout) must not read
+        // self.height. Use the unbounded constrained horizontal info.
+        let h_constrained = root_sc
+            .layout_info_h_constrained_for_repeated
+            .as_ref()
+            .map(|e| {
+                let h = compile_expression(&e.borrow(), ctx);
+                format!(
+                    "if (o == slint::cbindgen_private::Orientation::Horizontal && !child_index.has_value()) {{ \
+                         info.constraint = {h}; return info; }} "
+                )
+            })
+            .unwrap_or_default();
         format!(
             "[[maybe_unused]] auto self = this; \
              auto info = {compiled}; \
              {v_constrained}\
+             {h_constrained}\
              info.constraint = layout_item_info(o, child_index).constraint; \
              return info;"
         )
@@ -3013,6 +3028,26 @@ fn generate_flexbox_layout_item_info_decl(
             .to_owned(),
     };
 
+    // Mirror of `at_cross_width_body`: a FlexboxLayout calls this with the
+    // height it assigned so a width-for-height instance resolves to the width
+    // it really needs. The expression reads the `flex_cross_height` parameter.
+    let at_cross_height_body = match (
+        &for_repeated_compiled,
+        root_sc.layout_info_h_at_cross_height_for_repeated.as_ref(),
+    ) {
+        (Some(compiled), Some(e)) => {
+            let h = compile_expression(&e.borrow(), ctx);
+            format!(
+                "[[maybe_unused]] auto self = this; \
+                 auto info = {compiled}; \
+                 info.constraint = {h}; \
+                 return info;"
+            )
+        }
+        _ => "return flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt);"
+            .to_owned(),
+    };
+
     vec![
         Declaration::Function(Function {
             name: "flexbox_layout_item_info".into(),
@@ -3026,6 +3061,14 @@ fn generate_flexbox_layout_item_info_decl(
                 "([[maybe_unused]] float flex_cross_width) const -> slint::cbindgen_private::FlexboxLayoutItemInfo"
                     .to_owned(),
             statements: Some(vec![at_cross_width_body]),
+            ..Function::default()
+        }),
+        Declaration::Function(Function {
+            name: "flexbox_layout_item_info_at_cross_height".into(),
+            signature:
+                "([[maybe_unused]] float flex_cross_height) const -> slint::cbindgen_private::FlexboxLayoutItemInfo"
+                    .to_owned(),
+            statements: Some(vec![at_cross_height_body]),
             ..Function::default()
         }),
     ]
@@ -3318,7 +3361,7 @@ fn generate_global(
         )
     }
 
-    for (i, _) in global.change_callbacks.iter() {
+    for i in global.change_callbacks.keys() {
         global_struct.members.push((
             Access::Private,
             Declaration::Var(Var {
@@ -3509,7 +3552,7 @@ fn generate_public_api_for_properties(
                 format!("{}.set_handler(std::forward<Functor>(callback_handler));", access),
             ];
             if let Some(t) = &tracker {
-                on_stmts.push(format!("{t}.mark_dirty();"));
+                on_stmts.push(t.then(|x| format!("{x}.mark_dirty();")));
             }
             declarations.push((
                 Access::Public,
@@ -3563,7 +3606,7 @@ fn generate_public_api_for_properties(
                 Access::Public,
                 Declaration::Function(Function {
                     name: accessor_names::cpp_accessor_name(name, AccessorKind::Getter),
-                    signature: format!("() const -> {}", &cpp_property_type),
+                    signature: format!("() const -> {cpp_property_type}"),
                     statements: Some(prop_getter),
                     ..Default::default()
                 }),
@@ -3579,7 +3622,7 @@ fn generate_public_api_for_properties(
                     Access::Public,
                     Declaration::Function(Function {
                         name: accessor_names::cpp_accessor_name(name, AccessorKind::Setter),
-                        signature: format!("(const {} &value) const -> void", &cpp_property_type),
+                        signature: format!("(const {cpp_property_type} &value) const -> void"),
                         statements: Some(prop_setter),
                         ..Default::default()
                     }),
@@ -3656,14 +3699,20 @@ fn access_window_field(ctx: &EvaluationContext) -> String {
     format!("{}->window().window_handle()", ctx.generator_state.global_access)
 }
 
+/// Walks up `parent_level` parent pointers, starting from `self`.
+fn parent_access_path(parent_level: usize) -> MemberAccess {
+    let mut path = MemberAccess::Direct("self".to_string());
+    for _ in 0..parent_level {
+        path = path.and_then(|x| format!("{x}->parent.lock()"));
+    }
+    path
+}
+
 /// Returns the code that can access the given property (but without the set or get)
 fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> MemberAccess {
     match reference {
         llr::MemberReference::Relative { parent_level, local_reference } => {
-            let mut path = MemberAccess::Direct("self".to_string());
-            for _ in 0..*parent_level {
-                path = path.and_then(|x| format!("{x}->parent.lock()"));
-            }
+            let path = parent_access_path(*parent_level);
             if let Some(sub_component) = ctx.parent_sub_component_idx(*parent_level) {
                 let (compo_path, sub_component) = follow_sub_component_path(
                     ctx.compilation_unit,
@@ -3739,7 +3788,7 @@ fn access_member(reference: &llr::MemberReference, ctx: &EvaluationContext) -> M
                     field(&global.callbacks[*callback_index].name)
                 }
                 llr::LocalMemberIndex::Function(function_index) => {
-                    ident(&format!("fn_{}", &global.functions[*function_index].name))
+                    ident(&format!("fn_{}", global.functions[*function_index].name))
                 }
                 _ => unreachable!(),
             };
@@ -3781,17 +3830,17 @@ fn field_name(name: &str) -> SmolStr {
 fn access_callback_tracker_cpp(
     reference: &llr::MemberReference,
     ctx: &EvaluationContext,
-) -> Option<String> {
+) -> Option<MemberAccess> {
     fn in_global(
         g: &llr::GlobalComponent,
         callback_idx: &llr::CallbackIdx,
         self_: &str,
-    ) -> Option<String> {
+    ) -> Option<MemberAccess> {
         if !g.callbacks[*callback_idx].needs_tracker {
             return None;
         }
         let tracker_name = callback_tracker_name(&g.callbacks[*callback_idx].name);
-        Some(format!("{self_}{tracker_name}"))
+        Some(MemberAccess::Direct(format!("{self_}{tracker_name}")))
     }
 
     match reference {
@@ -3808,22 +3857,25 @@ fn access_callback_tracker_cpp(
                 in_global(global, callback_idx, &format!("{global_access}->{global_id}->"))
             }
         }
-        llr::MemberReference::Relative { parent_level: 0, local_reference } => {
-            if let llr::LocalMemberIndex::Callback(callback_idx) = &local_reference.reference {
-                if let Some(current_global) = ctx.current_global() {
-                    return in_global(current_global, callback_idx, "this->");
-                }
-                if local_reference.sub_component_path.is_empty()
-                    && let Some(sc_idx) = ctx.parent_sub_component_idx(0)
-                {
-                    let sc = &ctx.compilation_unit.sub_components[sc_idx];
-                    if sc.callbacks[*callback_idx].needs_tracker {
-                        let tracker_name = callback_tracker_name(&sc.callbacks[*callback_idx].name);
-                        return Some(format!("self->{tracker_name}"));
-                    }
-                }
+        llr::MemberReference::Relative { parent_level, local_reference } => {
+            let llr::LocalMemberIndex::Callback(callback_idx) = &local_reference.reference else {
+                return None;
+            };
+            if let Some(current_global) = ctx.current_global() {
+                return in_global(current_global, callback_idx, "this->");
             }
-            None
+            let sc_idx = ctx.parent_sub_component_idx(*parent_level)?;
+            let (compo_path, sub_component) = follow_sub_component_path(
+                ctx.compilation_unit,
+                sc_idx,
+                &local_reference.sub_component_path,
+            );
+            if !sub_component.callbacks[*callback_idx].needs_tracker {
+                return None;
+            }
+            let tracker_name = callback_tracker_name(&sub_component.callbacks[*callback_idx].name);
+            let path = parent_access_path(*parent_level);
+            Some(path.with_member(format!("->{compo_path}{tracker_name}")))
         }
         _ => None,
     }
@@ -4019,7 +4071,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         Expression::CallBackCall { callback, arguments } => {
             let f = access_member(callback, ctx);
             let tracker_get = access_callback_tracker_cpp(callback, ctx)
-                .map(|t| format!("(void){t}.get(), "))
+                .map(|t| format!("(void)({}), ", t.get_property()))
                 .unwrap_or_default();
             let mut a = arguments.iter().map(|a| compile_expression(a, ctx));
             if expr.ty(ctx) == Type::Void {
@@ -4648,8 +4700,15 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                                      return {{ w, h }}; }} \
                                  cursor += len; }}\n"
                             ));
-                            // No width-for-height accessor on a repeated instance: keep its default.
-                            h_steps.push_str(&format!("cursor += self->repeater_{i}.len();\n"));
+                            h_steps.push_str(&format!(
+                                "{{ auto len = self->repeater_{i}.len(); \
+                                 if (index >= cursor && index < cursor + len) {{ \
+                                     if (auto *sub_comp = self->repeater_{i}.typed_instance_at(index - cursor)) {{ \
+                                         auto li = sub_comp->flexbox_layout_item_info_at_cross_height(h).constraint; \
+                                         return {{ {BOUNDED}, h }}; }} \
+                                     return {{ w, h }}; }} \
+                                 cursor += len; }}\n"
+                            ));
                         }
                     }
                 }

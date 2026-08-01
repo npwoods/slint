@@ -50,7 +50,9 @@ impl Default for LayoutInfo {
 }
 
 impl LayoutInfo {
-    // Note: This "logic" is duplicated in the cpp generator's generated code for merging layout infos.
+    // Note: This "logic" is duplicated in the cpp generator's generated code for merging layout
+    // infos, and in the compiler's const_propagation pass, which folds merges of constant
+    // layout infos at compile time.
     #[must_use]
     pub fn merge(&self, other: &LayoutInfo) -> Self {
         Self {
@@ -1201,6 +1203,55 @@ impl From<LayoutItemInfo> for FlexboxLayoutItemInfo {
     }
 }
 
+impl FlexboxLayoutItemInfo {
+    /// The item's size along the main axis before growing or shrinking:
+    /// `flex-basis` when set (>= 0), otherwise the preferred size,
+    /// clamped to the item's min/max. This is CSS's hypothetical main size.
+    ///
+    /// Only meaningful for the main-axis cell list,
+    /// since `flex-basis` always refers to the main axis.
+    /// The cross axis must use `preferred_bounded()`.
+    #[must_use]
+    fn hypothetical_main_size(&self) -> Coord {
+        if self.flex_basis >= 0 as Coord {
+            self.flex_basis.min(self.constraint.max).max(self.constraint.min)
+        } else {
+            self.constraint.preferred_bounded()
+        }
+    }
+
+    /// What the item contributes to the container's preferred main size.
+    ///
+    /// A growable item treats its basis as a floor to grow from rather than a cap,
+    /// so it still needs room for its content: `flex-basis: 0` with `flex-grow: 1`
+    /// (the CSS `flex: 1 1 0` idiom) must not collapse the container to nothing.
+    ///
+    /// Taking the larger of the two is what taffy does: its max-content flex
+    /// fraction divides by the grow factor and then multiplies by it again, so the
+    /// factor cancels and an item contributes `max(content, basis)`. The spec would
+    /// scale every item by the line's largest fraction instead, but taffy, Chrome
+    /// and Firefox all skip that step.
+    #[must_use]
+    fn flex_preferred_main(&self) -> Coord {
+        if self.flex_grow > 0. {
+            self.hypothetical_main_size().max(self.constraint.preferred_bounded())
+        } else {
+            self.hypothetical_main_size()
+        }
+    }
+
+    /// The item's minimum size along the main axis.
+    /// An item that cannot shrink (`flex-shrink: 0`) never goes below its hypothetical
+    /// main size, so that is what it contributes; anything else can be squeezed down
+    /// to its own minimum.
+    ///
+    /// Never below `constraint.min`, since `hypothetical_main_size()` is already clamped to it.
+    #[must_use]
+    fn flex_min_main(&self) -> Coord {
+        if self.flex_shrink <= 0. { self.hypothetical_main_size() } else { self.constraint.min }
+    }
+}
+
 /// Solve a BoxLayout
 pub fn solve_box_layout(data: &BoxLayoutData, repeater_indices: Slice<u32>) -> SharedVector<Coord> {
     let mut result = SharedVector::<Coord>::default();
@@ -1375,7 +1426,7 @@ mod flexbox_taffy {
     use super::{
         Coord, CrossAxisAlignment, FlexboxLayoutAlignContent, FlexboxLayoutAlignSelf,
         FlexboxLayoutItemInfo, FlexboxLayoutWrap as SlintFlexboxLayoutWrap, LayoutAlignment,
-        Padding, Slice,
+        LayoutInfo, Padding, Slice,
     };
     use alloc::vec::Vec;
     pub use taffy::prelude::FlexDirection as TaffyFlexDirection;
@@ -1416,14 +1467,48 @@ mod flexbox_taffy {
         pub fn new(params: FlexboxLayoutParams) -> Self {
             let mut taffy = TaffyTree::<usize>::new();
 
+            // The container's content box on each axis (the outer size minus that
+            // axis' padding), against which percentage constraints resolve.
+            // `None` when that axis has no finite size: either unknown (an
+            // auto-sized container in the info path) or the `Coord::MAX`
+            // "unbounded" sentinel the info path passes for a no-wrap main axis.
+            // A percentage then has no basis and only the absolute constraint
+            // applies — resolving against `MAX` would overflow the `_percent * s`
+            // product (i32 build) or yield infinity (f32).
+            let content_box = |size: Option<Coord>, pad: &Padding| -> Option<Coord> {
+                size.filter(|s| *s < Coord::MAX).map(|s| (s - pad.begin - pad.end).max(0 as Coord))
+            };
+            let content_w = content_box(params.container_width, params.padding_h);
+            let content_h = content_box(params.container_height, params.padding_v);
+
             // Cross-axis (width) upper bound for a column item: never wider than
             // the container's content box, so height-for-width items (e.g. wrapped
             // Text) measure against a real width.
             let column_cross_cap = match params.flex_direction {
-                TaffyFlexDirection::Column | TaffyFlexDirection::ColumnReverse => params
-                    .container_width
-                    .map(|cw| (cw - params.padding_h.begin - params.padding_h.end).max(0 as Coord)),
+                TaffyFlexDirection::Column | TaffyFlexDirection::ColumnReverse => content_w,
                 _ => None,
+            };
+
+            // Resolve a percentage min/max against the container's content box and
+            // fold it into the absolute constraint, matching how the box layouts
+            // handle percentages (see `solve_box_layout`). Applied only when the
+            // percentage is non-default and the content size is known, so an item
+            // without a percentage size keeps its plain min/max unchanged.
+            let eff_min = |c: &LayoutInfo, content: Option<Coord>| -> Coord {
+                match content {
+                    Some(s) if c.min_percent > 0 as Coord => {
+                        c.min.max(c.min_percent * s / 100 as Coord)
+                    }
+                    _ => c.min,
+                }
+            };
+            let eff_max = |c: &LayoutInfo, content: Option<Coord>| -> Coord {
+                match content {
+                    Some(s) if c.max_percent < 100 as Coord => {
+                        c.max.min(c.max_percent * s / 100 as Coord)
+                    }
+                    _ => c.max,
+                }
             };
 
             // Create child nodes from Slint constraints
@@ -1466,7 +1551,8 @@ mod flexbox_taffy {
                         }
                     };
 
-                    let max_width = h_constraint.max.min(column_cross_cap.unwrap_or(Coord::MAX));
+                    let max_width = eff_max(h_constraint, content_w)
+                        .min(column_cross_cap.unwrap_or(Coord::MAX));
                     let max_width_dim = if max_width < Coord::MAX {
                         Dimension::length(max_width as _)
                     } else {
@@ -1521,21 +1607,20 @@ mod flexbox_taffy {
                                     },
                                 },
                                 min_size: Size {
-                                    width: Dimension::length(h_constraint.min as _),
+                                    width: Dimension::length(eff_min(h_constraint, content_w) as _),
                                     height: Dimension::length(
-                                        v_constraint.map(|vc| vc.min as f32).unwrap_or(0.0),
+                                        v_constraint
+                                            .map(|vc| eff_min(vc, content_h) as f32)
+                                            .unwrap_or(0.0),
                                     ),
                                 },
                                 max_size: Size {
                                     width: max_width_dim,
-                                    height: if let Some(vc) = v_constraint {
-                                        if vc.max < Coord::MAX {
-                                            Dimension::length(vc.max as _)
-                                        } else {
-                                            Dimension::auto()
+                                    height: match v_constraint.map(|vc| eff_max(vc, content_h)) {
+                                        Some(max_h) if max_h < Coord::MAX => {
+                                            Dimension::length(max_h as _)
                                         }
-                                    } else {
-                                        Dimension::auto()
+                                        _ => Dimension::auto(),
                                     },
                                 },
                                 flex_grow: cell_h.flex_grow,
@@ -1905,7 +1990,7 @@ pub fn flexbox_layout_unwrapped_main(
         return extra_pad;
     }
     let num_spacings = cells.len().saturating_sub(1) as Coord;
-    cells.iter().map(|c| c.constraint.preferred_bounded()).sum::<Coord>()
+    cells.iter().map(|c| c.flex_preferred_main()).sum::<Coord>()
         + spacing * num_spacings
         + extra_pad
 }
@@ -1929,10 +2014,10 @@ pub fn flexbox_layout_info_main_axis(
     }
     let num_spacings = cells.len().saturating_sub(1) as Coord;
     let min = if matches!(flex_wrap, FlexboxLayoutWrap::NoWrap) {
-        cells.iter().map(|c| c.constraint.min).sum::<Coord>() + spacing * num_spacings + extra_pad
+        cells.iter().map(|c| c.flex_min_main()).sum::<Coord>() + spacing * num_spacings + extra_pad
     } else {
         // Wrapping: the widest single item must fit
-        cells.iter().map(|c| c.constraint.min).fold(0.0 as Coord, |a, b| a.max(b)) + extra_pad
+        cells.iter().map(|c| c.flex_min_main()).fold(0.0 as Coord, |a, b| a.max(b)) + extra_pad
     };
     let preferred = if matches!(flex_wrap, FlexboxLayoutWrap::NoWrap) {
         // No wrapping: all items on one line
@@ -1951,18 +2036,17 @@ pub fn flexbox_layout_info_main_axis(
         // products (and their sum) would overflow for large items.
         let total_area: f64 = cells
             .iter()
-            .map(|c| c.constraint.preferred_bounded() as f64 + spacing as f64)
+            .map(|c| c.flex_preferred_main() as f64 + spacing as f64)
             .map(|w| w * w)
             .sum();
         let target = Float::sqrt(total_area as f32) as Coord;
         let mut acc = 0 as Coord;
         let mut started = false;
         for c in cells.iter() {
-            acc += if started {
-                spacing + c.constraint.preferred_bounded()
-            } else {
-                c.constraint.preferred_bounded()
-            };
+            // taffy breaks the lines on the hypothetical size, before any growing,
+            // so the line fitting has to measure the items the same way.
+            let size = c.hypothetical_main_size();
+            acc += if started { spacing + size } else { size };
             started = true;
             if acc >= target {
                 break;
@@ -2049,10 +2133,12 @@ pub fn flexbox_layout_info_cross_axis(
     } else {
         // Use actual item areas (main * cross) for the heuristic, since both
         // axes' cells are available here (unlike flexbox_layout_info_main_axis).
-        let total_area: Coord = main_cells
+        // Accumulate in f64: with the integer Coord build, Coord-typed products
+        // (and their sum) would overflow for large items.
+        let total_area: f64 = main_cells
             .iter()
             .zip(cross_cells.iter())
-            .map(|(m, c)| m.constraint.preferred_bounded() * c.constraint.preferred_bounded())
+            .map(|(m, c)| m.flex_preferred_main() as f64 * c.constraint.preferred_bounded() as f64)
             .sum();
         let count = main_cells.len();
         Float::sqrt(total_area as f32) as Coord
@@ -2918,5 +3004,280 @@ mod tests {
                 500., 20., 600., 20. // second repeater data
             ]
         );
+    }
+
+    /// `flexbox_layout_unwrapped_main()` computes the container's max-content main
+    /// size by hand, because the main-axis layout-info path may not read the
+    /// cross-axis cells (that would be a binding loop). taffy computes the same
+    /// thing from the same cells, so this pins the two together and fails the day
+    /// the hand-rolled version drifts.
+    ///
+    /// Only meaningful for `no-wrap`: at max-content taffy never wraps (it reports a
+    /// single line), while the wrapping branch of `flexbox_layout_info_main_axis()`
+    /// deliberately reports a roughly square arrangement instead.
+    mod max_content_matches_taffy {
+        use super::*;
+
+        const AUTO: Coord = -1 as Coord;
+
+        fn cell(
+            preferred: Coord,
+            basis: Coord,
+            grow: f32,
+            min: Coord,
+            max: Coord,
+        ) -> FlexboxLayoutItemInfo {
+            FlexboxLayoutItemInfo {
+                constraint: LayoutInfo { min, max, preferred, ..Default::default() },
+                flex_grow: grow,
+                flex_basis: basis,
+                ..Default::default()
+            }
+        }
+
+        /// What taffy makes of the same cells, asked for its max-content main size.
+        fn taffy_max_content_main(cells: &[FlexboxLayoutItemInfo]) -> Coord {
+            // The cross axis is deliberately left unconstrained: the main-axis result
+            // must not depend on it, which is what makes the loop-free path sound.
+            let cross: Vec<FlexboxLayoutItemInfo> = cells
+                .iter()
+                .map(|_| FlexboxLayoutItemInfo {
+                    constraint: LayoutInfo { max: Coord::MAX, ..Default::default() },
+                    ..Default::default()
+                })
+                .collect();
+            let cells_h = Slice::from_slice(cells);
+            let cells_v = Slice::from_slice(&cross);
+            let pad = Padding::default();
+            let mut builder =
+                flexbox_taffy::FlexboxTaffyBuilder::new(flexbox_taffy::FlexboxLayoutParams {
+                    cells_h: &cells_h,
+                    cells_v: &cells_v,
+                    spacing_h: 0 as Coord,
+                    spacing_v: 0 as Coord,
+                    padding_h: &pad,
+                    padding_v: &pad,
+                    alignment: LayoutAlignment::Start,
+                    align_content: FlexboxLayoutAlignContent::Stretch,
+                    cross_axis_alignment: CrossAxisAlignment::Stretch,
+                    flex_wrap: FlexboxLayoutWrap::NoWrap,
+                    flex_direction: flexbox_taffy::TaffyFlexDirection::Row,
+                    container_width: None,
+                    container_height: None,
+                    use_measure_for_cross_axis: false,
+                });
+            // A row item gets `size.width: auto`, so taffy asks the measure callback
+            // for its content size. That callback is how Slint reports an item's
+            // natural size, so the comparison is only fair if it answers here too.
+            let mut measure = |idx: usize, known_w: Option<Coord>, known_h: Option<Coord>| {
+                (
+                    known_w.unwrap_or_else(|| cells[idx].constraint.preferred_bounded()),
+                    known_h.unwrap_or(0 as Coord),
+                )
+            };
+            builder.compute_layout(Coord::MAX, Coord::MAX, Some(&mut measure));
+            builder.container_size().0
+        }
+
+        fn ours(cells: &[FlexboxLayoutItemInfo]) -> Coord {
+            flexbox_layout_unwrapped_main(Slice::from_slice(cells), 0 as Coord, &Padding::default())
+        }
+
+        #[track_caller]
+        fn assert_agrees(name: &str, cells: &[FlexboxLayoutItemInfo]) {
+            let (ours, theirs) = (ours(cells), taffy_max_content_main(cells));
+            assert!((ours - theirs).abs() <= 1 as Coord, "{name}: ours={ours} taffy={theirs}");
+        }
+
+        #[track_caller]
+        fn assert_diverges(name: &str, cells: &[FlexboxLayoutItemInfo], want: Coord, taffy: Coord) {
+            let (o, t) = (ours(cells), taffy_max_content_main(cells));
+            assert!((o - want).abs() <= 1 as Coord, "{name}: ours={o}, expected {want}");
+            assert!((t - taffy).abs() <= 1 as Coord, "{name}: taffy={t}, expected {taffy}");
+        }
+
+        /// The grow factor cancels out of taffy's max-content flex fraction, so an
+        /// item contributes `max(content, basis)` and we must land on the same number.
+        #[test]
+        fn agrees() {
+            assert_agrees(
+                "plain",
+                &[cell(50., AUTO, 0., 0., Coord::MAX), cell(250., AUTO, 0., 0., Coord::MAX)],
+            );
+            assert_agrees(
+                "equal grow",
+                &[cell(50., AUTO, 1., 0., Coord::MAX), cell(250., AUTO, 1., 0., Coord::MAX)],
+            );
+            assert_agrees(
+                "uneven grow",
+                &[cell(60., AUTO, 1., 0., Coord::MAX), cell(60., AUTO, 3., 0., Coord::MAX)],
+            );
+            assert_agrees(
+                "fractional grow",
+                &[cell(60., AUTO, 0.5, 0., Coord::MAX), cell(40., AUTO, 1.5, 0., Coord::MAX)],
+            );
+            assert_agrees(
+                "mixed grow and not",
+                &[cell(50., AUTO, 1., 0., Coord::MAX), cell(100., AUTO, 0., 0., Coord::MAX)],
+            );
+            // A basis below the content size loses to it either way.
+            assert_agrees(
+                "flex: 1 1 0",
+                &[cell(50., 0., 1., 0., Coord::MAX), cell(250., 0., 1., 0., Coord::MAX)],
+            );
+            assert_agrees("zero basis, no grow", &[cell(90., 0., 0., 0., Coord::MAX)]);
+        }
+
+        /// The same cells asked of a *column* container, where taffy does apply the
+        /// basis to the max-content size.
+        fn taffy_column_main(cells: &[FlexboxLayoutItemInfo]) -> Coord {
+            // For a column the main axis is vertical: main-axis sizes live in cells_v,
+            // while the flex properties are always read from cells_h.
+            let h: Vec<FlexboxLayoutItemInfo> = cells
+                .iter()
+                .map(|c| FlexboxLayoutItemInfo {
+                    constraint: LayoutInfo { max: Coord::MAX, ..Default::default() },
+                    flex_grow: c.flex_grow,
+                    flex_shrink: c.flex_shrink,
+                    flex_basis: c.flex_basis,
+                    ..Default::default()
+                })
+                .collect();
+            let cells_h = Slice::from_slice(&h);
+            let cells_v = Slice::from_slice(cells);
+            let pad = Padding::default();
+            let mut builder =
+                flexbox_taffy::FlexboxTaffyBuilder::new(flexbox_taffy::FlexboxLayoutParams {
+                    cells_h: &cells_h,
+                    cells_v: &cells_v,
+                    spacing_h: 0 as Coord,
+                    spacing_v: 0 as Coord,
+                    padding_h: &pad,
+                    padding_v: &pad,
+                    alignment: LayoutAlignment::Start,
+                    align_content: FlexboxLayoutAlignContent::Stretch,
+                    cross_axis_alignment: CrossAxisAlignment::Stretch,
+                    flex_wrap: FlexboxLayoutWrap::NoWrap,
+                    flex_direction: flexbox_taffy::TaffyFlexDirection::Column,
+                    container_width: None,
+                    container_height: None,
+                    use_measure_for_cross_axis: false,
+                });
+            let mut measure = |idx: usize, known_w: Option<Coord>, known_h: Option<Coord>| {
+                (
+                    known_w.unwrap_or(0 as Coord),
+                    known_h.unwrap_or_else(|| cells[idx].constraint.preferred_bounded()),
+                )
+            };
+            builder.compute_layout(Coord::MAX, Coord::MAX, Some(&mut measure));
+            builder.container_size().1
+        }
+
+        #[track_caller]
+        fn assert_agrees_column(name: &str, cells: &[FlexboxLayoutItemInfo]) {
+            let (o, t) = (ours(cells), taffy_column_main(cells));
+            assert!((o - t).abs() <= 1 as Coord, "{name}: ours={o} taffy={t}");
+        }
+
+        /// For a column taffy does apply flex-basis, and that is what
+        /// `flex_preferred_main()` implements on both axes. So the column case must
+        /// agree everywhere, including where the row case does not.
+        #[test]
+        fn agrees_for_a_column() {
+            assert_agrees_column(
+                "basis above content, no grow",
+                &[cell(50., 200., 0., 0., Coord::MAX), cell(50., 100., 0., 0., Coord::MAX)],
+            );
+            assert_agrees_column(
+                "basis above content, growable",
+                &[cell(50., 200., 1., 0., Coord::MAX)],
+            );
+            assert_agrees_column(
+                "flex: 1 1 0",
+                &[cell(50., 0., 1., 0., Coord::MAX), cell(250., 0., 1., 0., Coord::MAX)],
+            );
+            assert_agrees_column(
+                "plain",
+                &[cell(50., AUTO, 0., 0., Coord::MAX), cell(250., AUTO, 0., 0., Coord::MAX)],
+            );
+            assert_agrees_column("zero basis, no grow", &[cell(90., 0., 0., 0., Coord::MAX)]);
+        }
+
+        /// The row is where taffy leaves flex-basis out of the max-content size,
+        /// matching Webkit and Firefox. That asymmetry comes from CSS sizing the
+        /// inline axis shrink-to-fit and the block axis to max-content; Slint has no
+        /// writing mode, so it treats both axes alike and reports more than taffy
+        /// would here, which is what keeps the children inside.
+        #[test]
+        fn diverges_when_a_row_basis_exceeds_the_content() {
+            assert_diverges(
+                "basis replaces preferred",
+                &[cell(50., 200., 0., 0., Coord::MAX), cell(50., 100., 0., 0., Coord::MAX)],
+                300.,
+                100.,
+            );
+            assert_diverges(
+                "basis above content, growable",
+                &[cell(50., 200., 1., 0., Coord::MAX)],
+                200.,
+                50.,
+            );
+        }
+    }
+
+    /// A percentage constraint must not be resolved against the `Coord::MAX`
+    /// "unbounded" sentinel that the info path passes for a no-wrap main axis.
+    /// `min_percent * MAX / 100` overflows the i32 build (debug panic) and gives
+    /// infinity in the f32 build, which taffy then bakes into the item's size.
+    /// When the container axis is unbounded a percentage has no basis, so the
+    /// item keeps its natural (here zero) size instead.
+    ///
+    /// Checked at the builder because the containing info function reports only
+    /// the *cross* size, while the overflow lands on the item's *main*-axis size;
+    /// the f32 build hides it at the container level but not at the item.
+    #[test]
+    fn percentage_against_unbounded_container_leaves_item_finite() {
+        // A single row cell with `width: 50%` (min_percent == max_percent == 50).
+        let cells_h = [FlexboxLayoutItemInfo {
+            constraint: LayoutInfo {
+                min_percent: 50 as Coord,
+                max_percent: 50 as Coord,
+                max: Coord::MAX,
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let cells_v = [FlexboxLayoutItemInfo {
+            constraint: LayoutInfo {
+                preferred: 30 as Coord,
+                max: Coord::MAX,
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let pad = Padding::default();
+        let mut builder =
+            flexbox_taffy::FlexboxTaffyBuilder::new(flexbox_taffy::FlexboxLayoutParams {
+                cells_h: &Slice::from_slice(&cells_h),
+                cells_v: &Slice::from_slice(&cells_v),
+                spacing_h: 0 as Coord,
+                spacing_v: 0 as Coord,
+                padding_h: &pad,
+                padding_v: &pad,
+                alignment: LayoutAlignment::Start,
+                align_content: FlexboxLayoutAlignContent::Stretch,
+                cross_axis_alignment: CrossAxisAlignment::Stretch,
+                flex_wrap: FlexboxLayoutWrap::NoWrap,
+                flex_direction: flexbox_taffy::TaffyFlexDirection::Row,
+                // The unbounded main axis: the value the info path feeds here.
+                container_width: Some(Coord::MAX),
+                container_height: None,
+                use_measure_for_cross_axis: false,
+            });
+        builder.compute_layout(Coord::MAX, Coord::MAX, None);
+        let (_x, _y, w, _h) = builder.child_geometry(0);
+        // Without the fix the dropped `50% * MAX` makes this the f32 sentinel
+        // (or panics under i32); with it the item just takes its natural size.
+        assert!(w.is_finite() && w < Coord::MAX, "item main-axis size was {w}");
     }
 }

@@ -348,8 +348,9 @@ impl Snapshotter {
                     .collect(),
             );
 
-            let child_insertion_point =
-                RefCell::new(component.child_insertion_point.borrow().clone());
+            let child_insertion_points =
+                RefCell::new(component.child_insertion_points.borrow().clone());
+            let declared_slots = component.declared_slots.clone();
 
             let popup_windows = RefCell::new(
                 component
@@ -375,7 +376,8 @@ impl Snapshotter {
             object_tree::Component {
                 node: component.node.clone(),
                 id: component.id.clone(),
-                child_insertion_point,
+                child_insertion_points,
+                declared_slots,
                 exported_global_names: RefCell::new(
                     component.exported_global_names.borrow().clone(),
                 ),
@@ -516,12 +518,9 @@ impl Snapshotter {
                 index_id: r.index_id.clone(),
                 is_conditional_element: r.is_conditional_element,
                 is_listview: r.is_listview.as_ref().map(|lv| object_tree::ListViewInfo {
-                    viewport_y: lv.viewport_y.snapshot(self),
-                    viewport_height: lv
-                        .viewport_height
-                        .as_ref()
-                        .map(|height| height.snapshot(self)),
-                    viewport_width: lv.viewport_width.as_ref().map(|width| width.snapshot(self)),
+                    content_y: lv.content_y.snapshot(self),
+                    content_height: lv.content_height.as_ref().map(|height| height.snapshot(self)),
+                    content_width: lv.content_width.as_ref().map(|width| width.snapshot(self)),
                     listview_height: lv.listview_height.snapshot(self),
                     listview_width: lv.listview_width.snapshot(self),
                 }),
@@ -565,7 +564,7 @@ impl Snapshotter {
         target_element.has_popup_child = elem.has_popup_child;
         target_element.inline_depth = elem.inline_depth;
         target_element.is_component_placeholder = elem.is_component_placeholder;
-        target_element.is_flickable_viewport = elem.is_flickable_viewport;
+        target_element.is_flickable_content = elem.is_flickable_content;
         target_element.is_legacy_syntax = elem.is_legacy_syntax;
         target_element.item_index = elem.item_index.clone();
         target_element.item_index_of_first_children = elem.item_index_of_first_children.clone();
@@ -728,6 +727,7 @@ impl Snapshotter {
                 .map(|lc| lc.snapshot(self)),
             fixed_width: layout_constraints.fixed_width,
             fixed_height: layout_constraints.fixed_height,
+            local: layout_constraints.local.clone(),
         }
     }
 
