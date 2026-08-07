@@ -73,6 +73,7 @@ pub enum Type {
 
     StyledText,
     MouseCursor,
+    Closure,
 }
 
 impl core::cmp::PartialEq for Type {
@@ -118,6 +119,7 @@ impl core::cmp::PartialEq for Type {
             Type::ArrayOfU16 => matches!(other, Type::ArrayOfU16),
             Type::StyledText => matches!(other, Type::StyledText),
             Type::DataTransfer => matches!(other, Type::DataTransfer),
+            Type::Closure => matches!(other, Type::Closure),
         }
     }
 }
@@ -155,7 +157,7 @@ impl Display for Type {
             Type::Easing => write!(f, "easing"),
             Type::MouseCursor => write!(f, "MouseCursor"),
             Type::Brush => write!(f, "brush"),
-            Type::Enumeration(enumeration) => write!(f, "enum {}", enumeration.name),
+            Type::Enumeration(enumeration) => write!(f, "{}", enumeration.name),
             Type::Keys => write!(f, "keys"),
             Type::DataTransfer => write!(f, "data-transfer"),
             Type::UnitProduct(vec) => {
@@ -178,6 +180,7 @@ impl Display for Type {
             Type::LayoutCache => write!(f, "layout cache"),
             Type::ArrayOfU16 => write!(f, "[u16]"),
             Type::StyledText => write!(f, "styled-text"),
+            Type::Closure => write!(f, "closure"),
         }
     }
 }
@@ -192,7 +195,7 @@ impl Type {
     /// Whether the type is part of the Slint SC subset
     #[cfg(feature = "slint-sc")]
     pub fn is_slint_sc(&self) -> bool {
-        matches!(self, Self::LogicalLength | Self::Color)
+        matches!(self, Self::Int32 | Self::LogicalLength | Self::Color | Self::Bool)
     }
 
     /// valid type for properties
@@ -329,6 +332,7 @@ impl Type {
             Type::LayoutCache => None,
             Type::ArrayOfU16 => None,
             Type::StyledText => None,
+            Type::Closure => None,
         }
     }
 
@@ -741,6 +745,7 @@ macro_rules! define_builtin_struct_enum {
             FlexboxLayoutData,
             LayoutItemInfo,
             FlexboxLayoutItemInfo,
+            FlexItemProps,
             Padding,
             LayoutInfo,
         }

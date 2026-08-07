@@ -23,6 +23,20 @@ mod metal;
 #[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
 mod vulkan;
 
+/// See [`crate::attachment_color_space`].
+pub(crate) fn attachment_color_space(texture: &wgpu::Texture) -> skia_safe::ColorSpace {
+    crate::attachment_color_space(crate::TextureEncoding::from_format_is_srgb(
+        texture.format().is_srgb(),
+    ))
+}
+
+/// See [`crate::sampled_texture_color_space`].
+pub(crate) fn sampled_texture_color_space(texture: &wgpu::Texture) -> skia_safe::ColorSpace {
+    crate::sampled_texture_color_space(crate::TextureEncoding::from_format_is_srgb(
+        texture.format().is_srgb(),
+    ))
+}
+
 /// Skia rendering surface backed by WGPU. Supports both on-screen rendering (with a
 /// window surface) and offscreen rendering into caller-provided textures.
 pub struct WGPUSurface {
@@ -34,6 +48,7 @@ pub struct WGPUSurface {
     surface: Option<wgpu::Surface<'static>>,
     textures_to_transition_for_sampling: RefCell<Vec<wgpu::Texture>>,
     pub(crate) backend: Backend,
+    alpha_modes: Vec<wgpu::CompositeAlphaMode>,
 }
 
 impl WGPUSurface {
@@ -86,6 +101,7 @@ impl WGPUSurface {
             surface: Some(surface),
             textures_to_transition_for_sampling: RefCell::new(Vec::new()),
             backend,
+            alpha_modes: swapchain_capabilities.alpha_modes,
         })
     }
 
@@ -105,6 +121,7 @@ impl WGPUSurface {
             surface: None,
             textures_to_transition_for_sampling: RefCell::new(Vec::new()),
             backend,
+            alpha_modes: vec![],
         }
     }
 
@@ -223,6 +240,32 @@ impl crate::Surface for WGPUSurface {
             }
         };
 
+        // Skia renders through the raw backend queue, invisible to wgpu's usage
+        // tracking, so `Queue::present` would treat the frame as never written
+        // and clear it. Clear it through wgpu instead before Skia draws; the
+        // in-order queue keeps Skia's later-committed work on top.
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Slint frame init"),
+        });
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Slint frame init"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.queue.submit(Some(encoder.finish()));
+
         let skia_surface = self.backend.make_surface(gr_context, &frame.texture);
 
         let mut skia_surface = skia_surface
@@ -284,6 +327,27 @@ impl crate::Surface for WGPUSurface {
         self.textures_to_transition_for_sampling.borrow_mut().push(texture.clone());
 
         self.backend.import_texture(canvas, texture)
+    }
+
+    fn set_transparent(&self, transparent: bool) -> Result<(), PlatformError> {
+        if transparent {
+            // The default `Opaque` discards the scene's alpha; pick a translucent mode if offered.
+            // Metal (CAMetalLayer) only offers `PostMultiplied`, so it must be a fallback.
+            use wgpu::CompositeAlphaMode::{PostMultiplied, PreMultiplied};
+            if let Some(mode) =
+                [PreMultiplied, PostMultiplied].into_iter().find(|m| self.alpha_modes.contains(m))
+            {
+                let mut surface_config_opt = self.surface_config.borrow_mut();
+                let (Some(surface_config), Some(surface)) =
+                    (surface_config_opt.as_mut(), &self.surface)
+                else {
+                    return Ok(());
+                };
+                surface_config.alpha_mode = mode;
+                surface.configure(&self.device, surface_config);
+            }
+        }
+        Ok(())
     }
 }
 

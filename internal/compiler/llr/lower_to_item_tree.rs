@@ -692,7 +692,7 @@ fn lower_sub_component(
     if component.root_element.borrow().child_of_flexbox {
         let root_elem = &component.root_element;
         let has_flex_binding =
-            ["flex-grow", "flex-shrink", "flex-basis", "flex-align-self", "flex-order"]
+            ["flex-grow", "flex-shrink", "flex-basis", "cross-axis-self-alignment", "flex-order"]
                 .iter()
                 .any(|name| crate::layout::binding_reference(root_elem, name).is_some());
         let v_constrained =
@@ -1122,7 +1122,7 @@ fn lower_global_expressions(
     let inner = ExpressionLoweringCtxInner { mapping: &mapping, parent: None, component: global };
     let mut ctx = ExpressionLoweringCtx { inner, state };
 
-    for (prop, binding) in &global.root_element.borrow().bindings {
+    for (prop, binding) in global.root_element.borrow().bindings_including_synthetic() {
         assert!(binding.borrow().two_way_bindings.is_empty());
         assert!(binding.borrow().animation.is_none());
         let expression =

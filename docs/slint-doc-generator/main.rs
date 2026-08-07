@@ -8,6 +8,7 @@ mod element_docs;
 mod headless;
 mod mdx;
 mod screenshots;
+mod test_results;
 mod traceability;
 
 use clap::Parser;
@@ -36,6 +37,20 @@ struct Cli {
     /// and link its per-line pages from the Test Coverage chapter.
     #[arg(long, value_name = "DIR", requires = "coverage_json")]
     coverage_html: Option<PathBuf>,
+
+    /// Report the test outcomes collected in this directory by
+    /// scripts/slint_sc_test_suite.sh in the safety manual's Test Results
+    /// chapter. Without it the chapter is a placeholder.
+    #[arg(long, value_name = "DIR")]
+    test_results: Option<PathBuf>,
+
+    /// Exit with [`GAPS_EXIT_CODE`] when the safety manual shows a gap: a
+    /// runtime source file below 100% line, function, or region coverage, or a
+    /// requirement paragraph that no test declares. The pages are written and
+    /// the site is built either way. Requires a coverage export to check the
+    /// coverage half against.
+    #[arg(long, action, requires = "coverage_json")]
+    fail_on_gaps: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -81,6 +96,10 @@ pub struct Config {
     /// `cargo llvm-cov report --html` report to ship with the manual for
     /// per-line detail.
     pub coverage_html: Option<PathBuf>,
+    /// Test outcomes collected by scripts/slint_sc_test_suite.sh, for the
+    /// safety manual's Test Results chapter; without them the chapter is a
+    /// placeholder.
+    pub test_results: Option<PathBuf>,
 }
 
 /// Path of the generated content root, relative to the site's `src` directory.
@@ -99,6 +118,7 @@ impl Config {
             include_experimental,
             coverage_json: None,
             coverage_html: None,
+            test_results: None,
         }
     }
     pub fn safety_manual(include_experimental: bool) -> Self {
@@ -111,6 +131,7 @@ impl Config {
             include_experimental,
             coverage_json: None,
             coverage_html: None,
+            test_results: None,
         }
     }
 
@@ -122,6 +143,20 @@ impl Config {
     /// Generated pages of the qualification plan (safety manual only).
     pub fn qualification_plan_dir(&self) -> PathBuf {
         self.generated_dir.join("qualification-plan")
+    }
+
+    /// Create a page of the qualification plan, ready for writing.
+    pub fn qualification_page(
+        &self,
+        file_name: &str,
+    ) -> anyhow::Result<std::io::BufWriter<std::fs::File>> {
+        use anyhow::Context;
+        let dir = self.qualification_plan_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("error creating {dir:?}"))?;
+        let path = dir.join(file_name);
+        Ok(std::io::BufWriter::new(
+            std::fs::File::create(&path).with_context(|| format!("error creating {path:?}"))?,
+        ))
     }
 }
 
@@ -137,7 +172,12 @@ fn build_astro(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Exit code of a run that found gaps, distinct from the `1` of a run that
+/// failed. Everything is written and built by then, so a caller can publish
+/// the documentation it produced and still fail its build afterwards.
+pub const GAPS_EXIT_CODE: u8 = 2;
+
+fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
     let args = Cli::parse();
     let experimental = args.experimental;
     let mut cfg = if args.slint_sc {
@@ -147,10 +187,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     cfg.coverage_json = args.coverage_json;
     cfg.coverage_html = args.coverage_html;
+    cfg.test_results = args.test_results;
 
+    let mut gaps = Vec::new();
     match args.command {
         Some(Command::GenerateMdx) => {
-            mdx::generate(&cfg)?;
+            gaps = mdx::generate(&cfg)?;
         }
         Some(Command::Screenshots(args)) => {
             screenshots::run(args)?;
@@ -160,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             // Generate mdx first because screenshots reads them.
-            mdx::generate(&cfg)?;
+            gaps = mdx::generate(&cfg)?;
             if !cfg.skip_screenshots {
                 let docs_folder = cfg.astro_dir.join("src/content");
                 let reference_elements = cfg.astro_dir.join("src/content/docs/reference/elements");
@@ -177,5 +219,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    Ok(())
+    if args.fail_on_gaps && !gaps.is_empty() {
+        eprintln!("error: the safety manual has {} gap(s):", gaps.len());
+        for gap in &gaps {
+            eprintln!("  {gap}");
+        }
+        eprintln!(
+            "the runtime must stay completely covered and every requirement must be declared by a test"
+        );
+        return Ok(std::process::ExitCode::from(GAPS_EXIT_CODE));
+    }
+
+    Ok(std::process::ExitCode::SUCCESS)
 }

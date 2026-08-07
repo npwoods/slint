@@ -444,17 +444,20 @@ fn inline_element(
         };
     }
 
-    for (k, val) in inlined_component.root_element.borrow().bindings.iter() {
-        match elem_mut.bindings.entry(k.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                let priority = &mut entry.insert(val.clone()).get_mut().priority;
-                *priority = priority.saturating_add(priority_delta);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let entry = entry.get_mut().get_mut();
-                if entry.merge_with(&val.borrow()) {
-                    entry.priority = entry.priority.saturating_add(priority_delta);
+    for (property, root_binding) in
+        inlined_component.root_element.borrow().bindings_including_synthetic()
+    {
+        match elem_mut.binding_cell_including_synthetic(property) {
+            Some(elem_binding) => {
+                let mut binding = elem_binding.borrow_mut();
+                if binding.merge_with(&root_binding.borrow()) {
+                    binding.priority = binding.priority.saturating_add(priority_delta);
                 }
+            }
+            None => {
+                let mut elem_binding = root_binding.borrow().clone();
+                elem_binding.priority = elem_binding.priority.saturating_add(priority_delta);
+                elem_mut.set_binding(property.clone(), elem_binding);
             }
         }
     }
@@ -571,8 +574,7 @@ fn duplicate_element_with_mapping(
         property_declarations: elem.property_declarations.clone(),
         // We will do the fixup of the references in bindings later
         bindings: elem
-            .bindings
-            .iter()
+            .bindings_including_synthetic()
             .map(|b| duplicate_binding(b, mapping, root_component, priority_delta))
             .collect(),
         change_callbacks: elem.change_callbacks.clone(),
@@ -909,7 +911,7 @@ fn component_requires_inlining(component: &Rc<Component>) -> bool {
         return true;
     }
 
-    for (prop, binding) in &root_element.borrow().bindings {
+    for (prop, binding) in root_element.borrow().real_bindings() {
         let binding = binding.borrow();
         // The passes that dp the drop shadow or the opacity currently won't allow this property
         // on the top level of a component. This could be changed in the future.
@@ -961,7 +963,7 @@ fn element_require_inlining(elem: &ElementRc) -> bool {
         return true;
     }
 
-    for (prop, binding) in &elem.borrow().bindings {
+    for (prop, binding) in elem.borrow().real_bindings() {
         if prop == "clip" {
             // otherwise the children of the clipped items won't get moved as child of the Clip element
             return true;

@@ -228,6 +228,10 @@ pub fn lower_expression(
         tree_Expression::EmptyComponentFactory => llr_Expression::EmptyComponentFactory,
         tree_Expression::EmptyDataTransfer => llr_Expression::EmptyDataTransfer,
         tree_Expression::DebugHook { expression, .. } => lower_expression(expression, ctx),
+        tree_Expression::Closure { arg_name, expression } => llr_Expression::Closure {
+            arg_name: arg_name.clone(),
+            expression: Box::new(lower_expression(expression, ctx)),
+        },
     }
 }
 
@@ -727,7 +731,7 @@ pub fn lower_animation(a: &PropertyAnimation, ctx: &mut ExpressionLoweringCtx<'_
         llr_Expression::Struct {
             values: animation_fields()
                 .map(|(k, ty)| {
-                    let e = a.borrow().bindings.get(&k).map_or_else(
+                    let e = a.borrow().binding_cell_including_synthetic(&k).map_or_else(
                         || {
                             if k == "enabled" {
                                 llr_Expression::BoolLiteral(true)

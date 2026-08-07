@@ -72,11 +72,10 @@ pub(crate) fn as_skia_image(
                 SharedImageBuffer::RGBA8Premultiplied(pixels) => pixels,
             };
 
-            let image_info = skia_safe::ImageInfo::new(
+            let image_info = crate::image_info(
                 skia_safe::ISize::new(pixels.width() as i32, pixels.height() as i32),
                 skia_safe::ColorType::RGBA8888,
                 skia_safe::AlphaType::Premul,
-                None,
             );
 
             skia_safe::images::raster_from_data(
@@ -100,7 +99,7 @@ pub(crate) fn as_skia_image(
             canvas,
             surface,
         ),
-        #[cfg(feature = "unstable-wgpu-29")]
+        #[cfg(any(feature = "unstable-wgpu-29", feature = "unstable-wgpu-30"))]
         ImageInner::WGPUTexture(any_wgpu_texture) => {
             surface.and_then(|surface| surface.import_wgpu_texture(canvas, any_wgpu_texture))
         }
@@ -155,11 +154,10 @@ fn image_buffer_to_skia_image(buffer: &SharedImageBuffer) -> Option<skia_safe::I
             opaque_or(pixels.as_bytes(), skia_safe::AlphaType::Premul),
         ),
     };
-    let image_info = skia_safe::ImageInfo::new(
+    let image_info = crate::image_info(
         skia_safe::ISize::new(size.width as i32, size.height as i32),
         color_type,
         alpha_type,
-        None,
     );
     skia_safe::images::raster_from_data(&image_info, data, bpl)
 }

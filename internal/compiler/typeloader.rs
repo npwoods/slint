@@ -486,8 +486,7 @@ impl Snapshotter {
             .collect();
 
         target_element.bindings = elem
-            .bindings
-            .iter()
+            .bindings_including_synthetic()
             .map(|(k, v)| {
                 let bm = v.borrow();
                 let binding = self.snapshot_binding_expression(&bm);
@@ -1082,6 +1081,41 @@ impl TypeLoader {
         let mut imports = Vec::new();
         let mut dependencies_futures = Vec::new();
         for mut import in Self::collect_dependencies(state, doc) {
+            // The embedded files import each other by that path, so only a
+            // document outside them is rejected.
+            if import.file.starts_with("builtin:")
+                && !import.import_uri_token.source_file.path().starts_with("builtin:")
+            {
+                state.borrow_mut().diag.push_error(
+                    format!(
+                        "Cannot import \"{}\": the files built into the compiler are internal. Import the widgets from \"std-widgets.slint\"",
+                        import.file
+                    ),
+                    &import.import_uri_token,
+                );
+                continue;
+            }
+
+            // The path shapes that don't resolve relative to the importing
+            // file. Rejecting them here, before any search path is consulted,
+            // keeps the Slint SC error the only diagnostic and leaves the
+            // named file unread. No builtin file imports this way, so skipping
+            // the load can't leave a builtin document half-loaded.
+            #[cfg(feature = "slint-sc")]
+            if state.borrow().diag.slint_sc {
+                let rejected = if import.file.starts_with('@') {
+                    Some("Library imports are")
+                } else if crate::pathutils::is_absolute(Path::new(import.file.as_str())) {
+                    Some("Absolute import paths are")
+                } else {
+                    None
+                };
+                if let Some(feature) = rejected {
+                    state.borrow_mut().diag.slint_sc_error(feature, &import.import_uri_token);
+                    continue;
+                }
+            }
+
             if matches!(import.import_kind, ImportKind::FileImport) {
                 if let Some((path, _)) = state.borrow().tl.resolve_import_path(
                     Some(&import.import_uri_token.clone().into()),
@@ -1172,6 +1206,21 @@ impl TypeLoader {
                 let Some(doc) = state.tl.get_document(&doc_path) else {
                     panic!("Just loaded document not available")
                 };
+
+                // The widget library and the styles are built into the
+                // compiler and aren't part of the subset. This catches the
+                // "std-widgets.slint" spelling, which only becomes a builtin
+                // path here; naming the embedded path is rejected earlier, for
+                // every mode. Their own imports reach this too, but the error
+                // is suppressed for a builtin referencing file.
+                #[cfg(feature = "slint-sc")]
+                if doc_path.starts_with("builtin:") {
+                    state.diag.slint_sc_error(
+                        &format!("Importing the builtin file '{}' is", import.file),
+                        &import.import_uri_token,
+                    );
+                }
+
                 match &import.import_kind {
                     ImportKind::ImportList(imported_types) => {
                         let mut imported_types = ImportedName::extract_imported_names(imported_types).peekable();
@@ -1664,7 +1713,11 @@ impl TypeLoader {
                 }
             };
 
-            match imported_type {
+            #[cfg(feature = "slint-sc")]
+            let internal_name = import_name.internal_name.clone();
+
+            #[cfg_attr(not(feature = "slint-sc"), allow(unused_variables))]
+            let inserted = match imported_type {
                 itertools::Either::Left(c) => {
                     registry_to_populate.borrow_mut().add_with_name(import_name.internal_name, c)
                 }
@@ -1672,6 +1725,16 @@ impl TypeLoader {
                     .borrow_mut()
                     .insert_type_with_name(ty, import_name.internal_name),
             };
+
+            // Regular Slint lets a later import replace an earlier one of the
+            // same name; Slint SC requires each name to be introduced once.
+            #[cfg(feature = "slint-sc")]
+            if !inserted {
+                build_diagnostics.slint_sc_error(
+                    &format!("Importing the name '{internal_name}' more than once is"),
+                    &import.import_uri_token,
+                );
+            }
         }
     }
 

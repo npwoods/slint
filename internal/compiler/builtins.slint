@@ -27,6 +27,14 @@
    This only works for members that the compiler itself never accesses by name —
    no default binding, and no compiler pass that looks the name up on user elements —
    as such accesses would resolve to the shadowing declaration and generate wrong code.
+
+   Mark a property `//-constexpr` (value known at compile time)
+   or `//-fake` (exists only at compile time).
+
+   A function names its `BuiltinFunction` implementation as its body:
+   `function start() { BuiltinFunction.StartTimer }`.
+   The declaration provides the signature and the docs.
+   An empty body declares a signature handled by a compiler pass.
  */
 
  component Empty {
@@ -683,6 +691,7 @@ component ComplexText inherits SimpleText {
     /// }
     /// ```
     in property <TextStrokeStyle> stroke-style;
+    // Inserted in typeregister.rs: the default value is computed per element.
     //! ### font-metrics
     //! <SlintProperty propName="font-metrics" typeName="struct" structName="FontMetrics" propertyVisibility="out">
     //! The design metrics of the font scaled to the font pixel size used by the element.
@@ -1782,6 +1791,7 @@ export component TextInput {
     in property <bool> read-only: false;
     // Internal, undocumented property, only exposed for IME.
     out property <string> preedit-text;
+    // Inserted in typeregister.rs: the default value is computed per element.
     //! ### font-metrics
     //! <SlintProperty propName="font-metrics" typeName="struct" structName="FontMetrics" propertyVisibility="out">
     //! The design metrics of the font scaled to the font pixel size used by the element.
@@ -1790,6 +1800,7 @@ export component TextInput {
     //-accepts_focus
     /// Selects the text between two UTF-8 offsets.
     function set-selection-offsets(start: int, end: int) {
+        BuiltinFunction.SetSelectionOffsets
     }
     /// Selects all text.
     function select-all() {
@@ -2123,7 +2134,7 @@ export component HorizontalLayout {
 /// // This example demonstrates FlexboxLayout with row direction (default)
 /// export component Foo inherits Window {
 ///     width: 300px;
-///     height: 200px;
+///     height: 150px;
 ///     FlexboxLayout {
 ///         spacing: 8px;
 ///         padding: 8px;
@@ -2138,10 +2149,10 @@ export component HorizontalLayout {
 /// ```
 ///
 ///
-/// ```slint playground imageAlt="flexboxlayout example with column direction" width="150" height="250"
+/// ```slint playground imageAlt="flexboxlayout example with column direction" width="200" height="300"
 /// // This example demonstrates FlexboxLayout with column direction
 /// export component Foo inherits Window {
-///     width: 300px;
+///     width: 200px;
 ///     height: 300px;
 ///     FlexboxLayout {
 ///         spacing: 8px;
@@ -2161,39 +2172,13 @@ export component HorizontalLayout {
 /// In row direction, items are placed from left to right. When the available width is exceeded, items automatically wrap to the next row. In column direction, items are placed from top to bottom and wrap to the next column when the available height is exceeded.
 ///
 /// \footer
-/// ## Per-Item Properties
+/// ## Cell elements
+/// Cell elements inside a `FlexboxLayout` obtain the following new property:
 ///
-/// The following properties can be set on individual children of a `FlexboxLayout`:
-///
-/// ### flex-grow
-/// <SlintProperty propName="flex-grow" typeName="float">
-/// Controls how much an item grows relative to other flex items when there is extra space along the main axis.
-/// A value of `0` (default) means the item does not grow. Items with higher values receive proportionally more extra space.
-/// </SlintProperty>
-///
-/// ### flex-shrink
-/// <SlintProperty propName="flex-shrink" typeName="float">
-/// Controls how much an item shrinks relative to other flex items when items overflow the container along the main axis.
-/// Default is `1` (matching CSS behavior). A value of `0` means the item does not shrink. Items with higher values shrink proportionally more.
-/// </SlintProperty>
-///
-/// ### flex-basis
-/// <SlintProperty propName="flex-basis" typeName="length">
-/// Sets the initial main size of a flex item before growing or shrinking is applied.
-/// If not set, the item's `preferred-width` (row) or `preferred-height` (column) is used.
-/// </SlintProperty>
-///
-/// ### flex-align-self
-/// <SlintProperty propName="flex-align-self" typeName="enum" enumName="FlexboxLayoutAlignSelf">
-/// Overrides the container's `cross-axis-alignment` for this specific item.
-/// The default value is `auto`, which inherits the container's `cross-axis-alignment` setting.
-/// </SlintProperty>
-///
-/// ### flex-order
-/// <SlintProperty propName="flex-order" typeName="int">
-/// Controls the visual order of flex items. Items with lower values appear first.
-/// Items with the same order value preserve their declaration order.
-/// The default value is `0`.
+/// ### cross-axis-self-alignment
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// Overrides the container's `cross-axis-alignment` for this element. CSS Flexbox calls this "align-self".
+/// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
 ///
 /// ## Layout Behavior
@@ -2203,7 +2188,6 @@ export component HorizontalLayout {
 /// You can learn more about the CSS Flexbox specification from
 /// - <a href="https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Flexible_box_layout/Basic_concepts">the Mozilla developer website</a>
 /// - <a href="https://css-tricks.com/snippets/css/a-guide-to-flexbox/">A Complete Guide To Flexbox by CSS Tricks</a>. This is detailed guide with illustrations and comprehensive written explanation of the different Flexbox properties and how they work.
-/// \draft
 /// \group:layouts
 export component FlexboxLayout {
     //! ## Spacing Properties
@@ -2243,9 +2227,10 @@ export component FlexboxLayout {
     /// The primary direction in which items are placed. Set to `row` to place items horizontally left-to-right (default), or `column` to place items vertically top-to-bottom.
     /// It also supports `row-reverse` and `column-reverse` which invert the flow: `row-reverse` places items right-to-left (starting at the right edge), and `column-reverse` places items bottom-to-top (starting at the bottom edge).
     in property <FlexboxLayoutDirection> flex-direction;
-    /// Set the distribution of flex lines along the cross axis.
+    /// Set the distribution of flex lines along the cross axis. CSS Flexbox calls this "align-content";
+    /// the name here pairs with `cross-axis-alignment`, which aligns the items within one line.
     /// The default value is `stretch`.
-    in property <FlexboxLayoutAlignContent> align-content;
+    in property <CrossAxisLineAlignment> cross-axis-line-alignment;
     /// Set the alignment of individual items along the cross axis within each flex line.
     /// The default value is `stretch`.
     in property <CrossAxisAlignment> cross-axis-alignment;
@@ -2392,7 +2377,8 @@ export component Path {
     //! If non-zero, the path will be scaled to fit into the specified height.
     //! </SlintProperty>
     //!
-    in property <string> commands;  // 'fake' hardcoded in typeregister.rs
+    //-fake
+    in property <string> commands;
     /// Defines how the path's view box is scaled to fit the element's width and height.
     /// If no view box is defined, the implicit bounding rectangle is used.
     /// \default contain
@@ -2421,6 +2407,22 @@ export component Path {
     in property <float> viewbox-width;
     ///
     in property <float> viewbox-height;
+    /// Returns a point at the given percent along the path in the Path element's coordinate space.
+    /// Returns (0, 0) if the path is empty.
+    ///
+    /// If a `t` outside the bounds of 0 and 1 is passed, it will be converted to its decimal fraction.
+    /// Ex: 1.5 -> 0.5 and 2.0 -> 1.0. This allows for N iterations of a loop
+    /// by animating t from 0 to N. If `t` is animated from N to 0, it will loop N times backwards.
+    function point-at(t: float) -> Point {
+        BuiltinFunction.PathPointAt
+    }
+    /// Returns the angle (in degrees) between the x-axis and the path's tangent vector at the given `t`.
+    /// The tangent points in the direction the path was defined, so this reflects the path's shape and not
+    /// the object's current direction of travel. Returns 0 if the path is empty.
+    /// If a `t` outside the bounds of 0 and 1 is passed, the decimal fraction will be passed.
+    function angle-at(t: float) -> angle {
+        BuiltinFunction.PathAngleAt
+    }
     //!
     //! ## Path Using SVG Commands
     //!
@@ -2509,6 +2511,7 @@ component Tab {
 // Note: not a native class, handled in the lower_tabs pass
 export component TabWidget {
     in-out property <int> current-index;
+    //-constexpr
     in property <Orientation> orientation;
 
     //-disallow_global_types_as_child_elements
@@ -2570,22 +2573,25 @@ export component PopupWindow {
     in property <length> anchor_y;
     in property <length> anchor_height;
     in property <length> anchor_width;*/
+    //-constexpr
     in property <bool> close-on-click;
     /// By default, a PopupWindow closes when the user clicks. Set this to false to prevent that behavior and close it manually using the `close()` function.
     /// \default close-on-click
-    in property <PopupClosePolicy> close-policy; // constexpr hardcoded in typeregister.rs
+    //-constexpr
+    in property <PopupClosePolicy> close-policy;
     /// Use this read-only property to style the element that opened the popup, for example
     /// to rotate a ComboBox's arrow while the dropdown is open.
     /// `true` while the popup is shown on the screen, and `false` once it is closed, for example
     /// when dismissed by a click, by a selection, or by a programmatic `close()`.
     out property <bool> is-open;
-    //! ## Functions
-    //!
-    //! ### show()
-    //! Show the popup on the screen.
-    //!
-    //! ### close()
-    //! Closes the popup. Use this if you set the `close-policy` property to `no-auto-close`.
+    /// Show the popup on the screen.
+    function show() {
+        BuiltinFunction.ShowPopupWindow
+    }
+    /// Closes the popup. Use this if you set the `close-policy` property to `no-auto-close`.
+    function close() {
+        BuiltinFunction.ClosePopupWindow
+    }
 }
 
 // Internal hover tracker used with `Tooltip` lowering (the compiler inserts `TooltipArea` so `Tooltip` can react to hover and pointer position).
@@ -2801,12 +2807,15 @@ export component Timer {
     callback triggered;
     /// Start the timer (equivalent to setting `running` to true).
     function start() {
+        BuiltinFunction.StartTimer
     }
     /// Stop the timer (equivalent to setting `running` to false).
     function stop() {
+        BuiltinFunction.StopTimer
     }
     /// Restarts the timer if it was previously started.
     function restart() {
+        BuiltinFunction.RestartTimer
     }
     //-is_non_item_type
     //-disallow_global_types_as_child_elements

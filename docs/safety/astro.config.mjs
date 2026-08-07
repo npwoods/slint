@@ -176,6 +176,10 @@ export default defineConfig({
                             label: "Test Coverage",
                             slug: "qualification-plan/test-coverage",
                         },
+                        {
+                            label: "Test Results",
+                            slug: "qualification-plan/test-results",
+                        },
                     ],
                 },
                 {
@@ -194,8 +198,10 @@ export default defineConfig({
                             label: "File Structure",
                             slug: "language/file-structure",
                         },
-                        // The Imports chapter isn't in the SC subset yet (no
-                        // `SC: true`); list it here once it joins.
+                        {
+                            label: "Imports",
+                            slug: "language/imports",
+                        },
                         {
                             label: "Exports",
                             slug: "language/exports",

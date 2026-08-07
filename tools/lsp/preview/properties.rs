@@ -290,7 +290,7 @@ fn find_property_binding_offset(
 
     let element = element.element.borrow();
 
-    if let Some(v) = element.bindings.get(property_name)
+    if let Some(v) = element.binding_cell_including_synthetic(property_name)
         && let Some(span) = &v.borrow().span
     {
         let offset = span.span().offset as u32;
@@ -995,7 +995,7 @@ pub mod tests {
         // reserved properties:
         assert_eq!(
             &find_property(&result, "accessible-role").unwrap().ty.to_string(),
-            "enum AccessibleRole"
+            "AccessibleRole"
         );
         // Accessible property should not be present since the role is none
         assert!(find_property(&result, "accessible-label").is_none());

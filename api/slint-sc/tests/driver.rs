@@ -3,7 +3,8 @@
 
 //! Custom test driver for the Slint SC (safety-critical) subset.
 //!
-//! For each `.slint` file under `tests/cases/`, this driver:
+//! For each test case, a `.slint` file in a group directory of `tests/cases/`,
+//! this driver:
 //! 1. Runs `slint-compiler --slint-sc` to generate Rust code
 //! 2. Extracts test code from `` ```rust `` blocks in comments
 //! 3. Calls `rustc` directly to compile the generated + test code
@@ -78,9 +79,53 @@ fn main() {
     eprintln!();
     eprintln!("{passed} passed, {failed} failed");
 
+    if let Some(path) = std::env::var_os("SLINT_TEST_REPORT") {
+        let outcomes: Vec<(String, String, bool)> = results
+            .iter()
+            // The repository-relative source of each case, for linking.
+            .map(|(name, result)| {
+                (name.clone(), format!("api/slint-sc/tests/cases/{name}.slint"), result.is_ok())
+            })
+            .collect();
+        write_report(&outcomes, "slint-sc-driver", Path::new(&path))
+            .unwrap_or_else(|e| panic!("failed to write test report: {e}"));
+    }
+
     if failed > 0 {
         std::process::exit(1);
     }
+}
+
+/// Write the per-case `(name, source path, passed)` results as CTRF-style
+/// JSON, for the safety manual's Test Results page.
+fn write_report(
+    results: &[(String, String, bool)],
+    tool: &str,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let tests: Vec<_> = results
+        .iter()
+        .map(|(name, file_path, ok)| {
+            serde_json::json!({
+                "name": name,
+                "filePath": file_path,
+                "status": if *ok { "passed" } else { "failed" },
+            })
+        })
+        .collect();
+    let failed = results.iter().filter(|(_, _, ok)| !ok).count();
+    let report = serde_json::json!({
+        "results": {
+            "tool": { "name": tool },
+            "summary": {
+                "tests": results.len(),
+                "passed": results.len() - failed,
+                "failed": failed,
+            },
+            "tests": tests,
+        }
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&report).unwrap())
 }
 
 struct TestConfig<'a> {
@@ -404,23 +449,29 @@ fn compile(
     rustc_cmd.output().map_err(|e| format!("rustc spawn: {e}"))
 }
 
+/// The cases are the `.slint` files one level below `dir`, in a group
+/// directory. The walk stops there, like the compiler's syntax test driver, so
+/// a group can keep the files its cases import in a subdirectory of its own.
 fn collect_slint_files(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
-    collect_slint_files_recursive(dir, &mut results);
+    let Ok(groups) = std::fs::read_dir(dir) else {
+        return results;
+    };
+    for group in groups.flatten() {
+        let group = group.path();
+        if !group.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&group) else {
+            continue;
+        };
+        results.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|e| e == "slint")),
+        );
+    }
     results.sort();
     results
-}
-
-fn collect_slint_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_slint_files_recursive(&path, results);
-        } else if path.extension().is_some_and(|e| e == "slint") {
-            results.push(path);
-        }
-    }
 }

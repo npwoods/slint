@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::expression_tree::BuiltinFunction;
 use crate::langtype::{
-    BuiltinElement, BuiltinPropertyDefault, BuiltinPropertyInfo, BuiltinStruct, ElementType,
-    Enumeration, Function, PropertyLookupResult, Struct, Type,
+    BuiltinElement, BuiltinPropertyDefault, BuiltinStruct, ElementType, Enumeration, Function,
+    PropertyLookupResult, Struct, Type,
 };
 use crate::object_tree::{Component, PropertyVisibility};
 use crate::typeloader;
@@ -48,8 +48,8 @@ pub const RESERVED_GRIDLAYOUT_PROPERTIES: &[(&str, Type)] = &[
     ("rowspan", Type::Int32),
 ];
 
-// Note: flex-align-self is also a flexbox property but is added in reserved_properties()
-// because Type::Enumeration requires a runtime Arc allocation.
+// Note: cross-axis-self-alignment is also a flexbox property but is added in
+// reserved_properties() because Type::Enumeration requires a runtime Arc allocation.
 pub const RESERVED_FLEXBOXLAYOUT_PROPERTIES: &[(&str, Type)] = &[
     ("flex-grow", Type::Float32),
     ("flex-shrink", Type::Float32),
@@ -93,6 +93,7 @@ pub struct BuiltinTypes {
     pub enums: BuiltinEnums,
     pub noarg_callback_type: Type,
     pub strarg_callback_type: Type,
+    pub set_selection_callback_type: Type,
     pub logical_point_type: Arc<Struct>,
     pub logical_size_type: Arc<Struct>,
     pub font_metrics_type: Type,
@@ -102,6 +103,7 @@ pub struct BuiltinTypes {
     pub path_element_type: Type,
     pub layout_item_info_type: Type,
     pub flexbox_layout_item_info_type: Type,
+    pub flex_item_props_type: Type,
 }
 
 impl BuiltinTypes {
@@ -119,7 +121,20 @@ impl BuiltinTypes {
             BuiltinStruct::LayoutInfo,
         ));
         let enums = BuiltinEnums::new();
-        let flex_align_self_type = Type::Enumeration(enums.FlexboxLayoutAlignSelf.clone());
+        let align_self_type = Type::Enumeration(enums.CrossAxisSelfAlignment.clone());
+        // Shared by `flex_item_props_type` and nested as `props` in
+        // `flexbox_layout_item_info_type`, so the field list is defined once.
+        let flex_item_props_struct = Arc::new(Struct::new(
+            IntoIterator::into_iter([
+                ("flex-grow".into(), Type::Float32),
+                ("flex-shrink".into(), Type::Float32),
+                ("flex-basis".into(), Type::Float32),
+                ("cross-axis-self-alignment".into(), align_self_type),
+                ("flex-order".into(), Type::Int32),
+            ])
+            .collect(),
+            BuiltinStruct::FlexItemProps,
+        ));
         Self {
             enums,
             logical_point_type: Arc::new(Struct::new(
@@ -158,6 +173,11 @@ impl BuiltinTypes {
                 args: vec![Type::String],
                 arg_names: Vec::new(),
             })),
+            set_selection_callback_type: Type::Callback(Arc::new(Function {
+                return_type: Type::Void,
+                args: vec![Type::Int32, Type::Int32],
+                arg_names: vec![SmolStr::new_static("anchor"), SmolStr::new_static("focus")],
+            })),
             layout_info_type: layout_info_type.clone(),
             state_info_type: Arc::new(Struct::new(
                 IntoIterator::into_iter([
@@ -180,15 +200,12 @@ impl BuiltinTypes {
             flexbox_layout_item_info_type: Type::Struct(Arc::new(Struct::new(
                 IntoIterator::into_iter([
                     ("constraint".into(), layout_info_type.into()),
-                    ("flex-grow".into(), Type::Float32),
-                    ("flex-shrink".into(), Type::Float32),
-                    ("flex-basis".into(), Type::Float32),
-                    ("flex-align-self".into(), flex_align_self_type),
-                    ("flex-order".into(), Type::Int32),
+                    ("props".into(), Type::Struct(flex_item_props_struct.clone())),
                 ])
                 .collect(),
                 BuiltinStruct::FlexboxLayoutItemInfo,
             ))),
+            flex_item_props_type: Type::Struct(flex_item_props_struct),
             gridlayout_input_data_type: Type::Struct(Arc::new(Struct::new(
                 IntoIterator::into_iter([
                     ("row".into(), Type::Int32),
@@ -250,6 +267,10 @@ fn strarg_callback_type() -> Type {
     BUILTIN.strarg_callback_type.clone()
 }
 
+fn set_selection_callback_type() -> Type {
+    BUILTIN.set_selection_callback_type.clone()
+}
+
 pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str, Type)> {
     [
         //("accessible-role", ...)
@@ -271,6 +292,7 @@ pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str
         ("accessible-action-increment", noarg_callback_type()),
         ("accessible-action-decrement", noarg_callback_type()),
         ("accessible-action-set-value", strarg_callback_type()),
+        ("accessible-action-set-selection", set_selection_callback_type()),
         ("accessible-action-expand", noarg_callback_type()),
         ("accessible-item-selectable", Type::Bool),
         ("accessible-item-selected", Type::Bool),
@@ -307,11 +329,11 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
                 .iter()
                 .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Input)),
         )
-        // flex-align-self is a flexbox-layout property but can't be in the const array
-        // because Type::Enumeration requires a runtime Arc allocation.
+        // cross-axis-self-alignment is a flexbox-layout property but can't be in the const
+        // array because Type::Enumeration requires a runtime Arc allocation.
         .chain(std::iter::once((
-            "flex-align-self",
-            Type::Enumeration(BUILTIN.enums.FlexboxLayoutAlignSelf.clone()),
+            "cross-axis-self-alignment",
+            Type::Enumeration(BUILTIN.enums.CrossAxisSelfAlignment.clone()),
             PropertyVisibility::Input,
         )))
         .chain(IntoIterator::into_iter([
@@ -551,50 +573,6 @@ impl TypeRegister {
             }
         }
 
-        match &mut register.elements.get_mut("PopupWindow").unwrap() {
-            ElementType::Builtin(b) => {
-                let popup = Rc::get_mut(b).unwrap();
-                popup.properties.insert(
-                    "show".into(),
-                    BuiltinPropertyInfo::from(BuiltinFunction::ShowPopupWindow),
-                );
-
-                popup.properties.insert(
-                    "close".into(),
-                    BuiltinPropertyInfo::from(BuiltinFunction::ClosePopupWindow),
-                );
-
-                popup.properties.get_mut("close-on-click").unwrap().property_visibility =
-                    PropertyVisibility::Constexpr;
-
-                popup.properties.get_mut("close-policy").unwrap().property_visibility =
-                    PropertyVisibility::Constexpr;
-            }
-            _ => unreachable!(),
-        };
-
-        match &mut register.elements.get_mut("Timer").unwrap() {
-            ElementType::Builtin(b) => {
-                let timer = Rc::get_mut(b).unwrap();
-                // `start` / `stop` / `restart` are declared as stub
-                // functions in `builtins.slint` so their doc comments get
-                // picked up, then replaced here with the real builtin
-                // implementations. Carry the docs over onto the
-                // replacements.
-                for (name, func) in [
-                    ("start", BuiltinFunction::StartTimer),
-                    ("stop", BuiltinFunction::StopTimer),
-                    ("restart", BuiltinFunction::RestartTimer),
-                ] {
-                    let existing_docs = timer.properties.get(name).and_then(|p| p.docs.clone());
-                    let mut info = BuiltinPropertyInfo::from(func);
-                    info.docs = existing_docs;
-                    timer.properties.insert(name.into(), info);
-                }
-            }
-            _ => unreachable!(),
-        }
-
         let font_metrics_prop = crate::langtype::BuiltinPropertyInfo {
             property_visibility: PropertyVisibility::Output,
             default_value: BuiltinPropertyDefault::WithElement(|elem| {
@@ -612,26 +590,6 @@ impl TypeRegister {
         match &mut register.elements.get_mut("TextInput").unwrap() {
             ElementType::Builtin(b) => {
                 let text_input = Rc::get_mut(b).unwrap();
-                // Replace the stub function with the real builtin
-                // implementation, carrying over docs and arg names.
-                let existing = text_input.properties.get("set-selection-offsets");
-                let existing_docs = existing.and_then(|p| p.docs.clone());
-                let arg_names = existing.and_then(|p| {
-                    if let Type::Function(f) = &p.ty { Some(f.arg_names.clone()) } else { None }
-                });
-                let mut info = BuiltinPropertyInfo::from(BuiltinFunction::SetSelectionOffsets);
-                info.docs = existing_docs;
-                if let (Some(names), Type::Function(f)) = (arg_names, &info.ty) {
-                    let mut func = (**f).clone();
-                    // The BuiltinFunction type includes an implicit ElementReference
-                    // first arg; skip it to match the public-facing arg names.
-                    func.arg_names =
-                        std::iter::repeat_n(SmolStr::default(), func.args.len() - names.len())
-                            .chain(names)
-                            .collect();
-                    info.ty = Type::Function(Arc::new(func));
-                }
-                text_input.properties.insert("set-selection-offsets".into(), info);
                 text_input.properties.insert("font-metrics".into(), font_metrics_prop.clone());
             }
 
@@ -646,25 +604,6 @@ impl TypeRegister {
 
             _ => unreachable!(),
         };
-
-        match &mut register.elements.get_mut("Path").unwrap() {
-            ElementType::Builtin(b) => {
-                let path = Rc::get_mut(b).unwrap();
-                path.properties.get_mut("commands").unwrap().property_visibility =
-                    PropertyVisibility::Fake;
-            }
-
-            _ => unreachable!(),
-        };
-
-        match &mut register.elements.get_mut("TabWidget").unwrap() {
-            ElementType::Builtin(b) => {
-                let tabwidget = Rc::get_mut(b).unwrap();
-                tabwidget.properties.get_mut("orientation").unwrap().property_visibility =
-                    PropertyVisibility::Constexpr;
-            }
-            _ => unreachable!(),
-        }
 
         register
     }
@@ -685,12 +624,6 @@ impl TypeRegister {
 
         register.elements.remove("ComponentContainer").unwrap();
         register.types.remove("component-factory").unwrap();
-
-        register.elements.remove("FlexboxLayout").unwrap();
-        register.types.remove("FlexboxLayoutDirection").unwrap();
-        register.types.remove("FlexboxLayoutAlignContent").unwrap();
-        register.types.remove("FlexboxLayoutWrap").unwrap();
-        register.types.remove("FlexboxLayoutAlignSelf").unwrap();
 
         Rc::new(RefCell::new(register))
     }
@@ -959,4 +892,9 @@ pub fn layout_item_info_type() -> Type {
 /// The [`Type`] for a runtime FlexboxLayoutItemInfo structure
 pub fn flexbox_layout_item_info_type() -> Type {
     BUILTIN.flexbox_layout_item_info_type.clone()
+}
+
+/// The [`Type`] for a runtime FlexItemProps structure
+pub fn flex_item_props_type() -> Type {
+    BUILTIN.flex_item_props_type.clone()
 }

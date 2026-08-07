@@ -540,6 +540,7 @@ fn is_reserved_prop_valid(
     prop: &str,
     element_type: &ElementType,
     parent_element_type: Option<&ElementType>,
+    enable_experimental: bool,
 ) -> bool {
     let name_of = |t: &ElementType| -> Option<SmolStr> {
         match t {
@@ -556,10 +557,12 @@ fn is_reserved_prop_valid(
     if name_in(i_slint_compiler::typeregister::RESERVED_GRIDLAYOUT_PROPERTIES) {
         return matches!(parent_name, Some("GridLayout" | "Row"));
     }
-    if prop == "flex-align-self"
-        || name_in(i_slint_compiler::typeregister::RESERVED_FLEXBOXLAYOUT_PROPERTIES)
-    {
+    if prop == "cross-axis-self-alignment" {
         return parent_name == Some("FlexboxLayout");
+    }
+    if name_in(i_slint_compiler::typeregister::RESERVED_FLEXBOXLAYOUT_PROPERTIES) {
+        // Not stable API yet, the compiler only accepts them as an experimental feature.
+        return enable_experimental && parent_name == Some("FlexboxLayout");
     }
     if name_in(i_slint_compiler::typeregister::RESERVED_DROP_SHADOW_PROPERTIES) {
         return name_of(element_type).as_deref() == Some("Rectangle");
@@ -582,6 +585,7 @@ fn properties_for_changed_callbacks(
         }
         node = node.parent()?;
     };
+    let enable_experimental = document_cache.compiler_configuration().enable_experimental;
     let global_tr = document_cache.global_type_registry();
     let tr = element
         .source_file()
@@ -612,7 +616,12 @@ fn properties_for_changed_callbacks(
             if !ty.is_property_type() {
                 return None;
             }
-            if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
+            if !is_reserved_prop_valid(
+                k,
+                &element_type,
+                parent_element_type.as_ref(),
+                enable_experimental,
+            ) {
                 return None;
             }
             let mut c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -644,6 +653,7 @@ fn resolve_element_scope(
             }
         };
 
+    let enable_experimental = document_cache.compiler_configuration().enable_experimental;
     let global_tr = document_cache.global_type_registry();
     let tr = element
         .source_file()
@@ -750,7 +760,12 @@ fn resolve_element_scope(
                     if matches!(ty, Type::Function { .. }) {
                         return None;
                     }
-                    if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
+                    if !is_reserved_prop_valid(
+                        k,
+                        &element_type,
+                        parent_element_type.as_ref(),
+                        enable_experimental,
+                    ) {
                         return None;
                     }
                     let c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -1803,7 +1818,7 @@ mod tests {
         assert!(res.iter().any(|ci| ci.label == "spacing-vertical"));
         assert!(res.iter().any(|ci| ci.label == "padding"));
         assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
-        assert!(!res.iter().any(|ci| ci.label == "flex-align-self"));
+        assert!(!res.iter().any(|ci| ci.label == "cross-axis-self-alignment"));
     }
 
     #[test]
@@ -2910,6 +2925,37 @@ component Foo {
         // Nothing typed after `implement` at all, cut off at EOF.
         let results = get_completions_experimental("component Foo { implement 🔺").unwrap();
         assert!(results.iter().any(|completion| completion.label == "property"));
+    }
+
+    #[test]
+    fn flex_item_properties_require_experimental() {
+        let source = r#"
+export component Foo {
+    FlexboxLayout {
+        Rectangle {
+            🔺
+        }
+    }
+}
+"#;
+        let results = get_completions_experimental(source).unwrap();
+        for prop in ["flex-grow", "flex-shrink", "flex-basis", "flex-order"].iter() {
+            assert!(
+                results.iter().any(|completion| completion.label == *prop),
+                "no '{prop}' completion with experimental features"
+            );
+        }
+
+        let results = get_completions(source).unwrap();
+        assert!(
+            !results.iter().any(|completion| completion.label.starts_with("flex-")),
+            "flex-* completions offered without experimental features"
+        );
+        // cross-axis-self-alignment is stable, so it completes without experimental features.
+        assert!(
+            results.iter().any(|completion| completion.label == "cross-axis-self-alignment"),
+            "no 'cross-axis-self-alignment' completion"
+        );
     }
 
     #[test]

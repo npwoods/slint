@@ -22,8 +22,9 @@ use std::sync::Arc;
 pub use crate::namedreference::NamedReference;
 pub use crate::passes::resolving;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// A function built into the run-time
+#[derive(Debug, Clone, PartialEq, Eq, strum::EnumString)]
+/// A function built into the run-time.
+/// Member functions in `builtins.slint` bind to a variant by naming it as their body.
 pub enum BuiltinFunction {
     GetWindowScaleFactor,
     GetWindowDefaultFontSize,
@@ -92,6 +93,8 @@ pub enum BuiltinFunction {
     ArrayPush,
     ArrayRemove,
     ArrayInsert,
+    ArrayAny,
+    ArrayAll,
     Rgb,
     Hsv,
     Oklch,
@@ -119,6 +122,7 @@ pub enum BuiltinFunction {
     ParseDate,
     TextInputFocused,
     SetTextInputFocused,
+    #[strum(disabled)]
     ImplicitLayoutInfo(Orientation),
     ItemAbsolutePosition,
     RegisterCustomFontByPath,
@@ -139,6 +143,8 @@ pub enum BuiltinFunction {
     /// because `parse_interpolated` takes `StyledText` arguments.
     ColorToStyledText,
     DecimalSeparator,
+    PathPointAt,
+    PathAngleAt,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +286,8 @@ declare_builtin_function_types!(
     ArrayPush: (Type::Model, Type::InferredProperty) -> Type::Void,
     ArrayRemove: (Type::Model, Type::Int32) -> Type::Void,
     ArrayInsert: (Type::Model, Type::Int32, Type::InferredProperty) -> Type::Void,
+    ArrayAny: (Type::Model, Type::Closure) -> Type::Bool,
+    ArrayAll: (Type::Model, Type::Closure) -> Type::Bool,
     Rgb: (Type::Int32, Type::Int32, Type::Int32, Type::Float32) -> Type::Color,
     Hsv: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
     Oklch: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
@@ -319,6 +327,8 @@ declare_builtin_function_types!(
     ColorToStyledText: (Type::Color) -> Type::StyledText
     OpenUrl: (Type::String) -> Type::Bool,
     MacosBringAllWindowsToFront: () -> Type::Void,
+    PathPointAt: (Type::ElementReference, Type::Float32) -> typeregister::logical_point_type().into(),
+    PathAngleAt: (Type::ElementReference, Type::Float32) -> Type::Angle,
 );
 
 impl Default for BuiltinFunctionTypes {
@@ -435,6 +445,9 @@ impl BuiltinFunction {
             BuiltinFunction::ColorToStyledText => true,
             BuiltinFunction::OpenUrl => false,
             BuiltinFunction::MacosBringAllWindowsToFront => false,
+            BuiltinFunction::PathPointAt => true,
+            BuiltinFunction::PathAngleAt => true,
+            BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll => true,
         }
     }
 
@@ -529,6 +542,9 @@ impl BuiltinFunction {
             BuiltinFunction::ColorToStyledText => true,
             BuiltinFunction::OpenUrl => false,
             BuiltinFunction::MacosBringAllWindowsToFront => false,
+            BuiltinFunction::PathPointAt => true,
+            BuiltinFunction::PathAngleAt => true,
+            BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll => true,
         }
     }
 }
@@ -980,6 +996,11 @@ pub enum Expression {
     },
 
     EmptyComponentFactory,
+
+    Closure {
+        arg_name: SmolStr,
+        expression: Box<Expression>,
+    },
 }
 
 impl Expression {
@@ -1107,6 +1128,7 @@ impl Expression {
             Expression::MinMax { ty, .. } => ty.clone(),
             Expression::EmptyComponentFactory => Type::ComponentFactory,
             Expression::DebugHook { expression, .. } => expression.ty(),
+            Expression::Closure { .. } => Type::Closure,
         }
     }
 
@@ -1249,6 +1271,7 @@ impl Expression {
             }
             Expression::EmptyComponentFactory => {}
             Expression::DebugHook { expression, .. } => visitor(expression),
+            Expression::Closure { expression, .. } => visitor(expression),
         }
     }
 
@@ -1393,6 +1416,7 @@ impl Expression {
             }
             Expression::EmptyComponentFactory => {}
             Expression::DebugHook { expression, .. } => visitor(expression),
+            Expression::Closure { expression, .. } => visitor(expression),
         }
     }
 
@@ -1516,6 +1540,7 @@ impl Expression {
             Expression::MinMax { lhs, rhs, .. } => lhs.is_constant(ga) && rhs.is_constant(ga),
             Expression::EmptyComponentFactory => true,
             Expression::DebugHook { .. } => false,
+            Expression::Closure { expression, .. } => expression.is_constant(ga),
         }
     }
 
@@ -1782,6 +1807,7 @@ impl Expression {
                 arguments: vec![Self::default_value_for_type(&Type::String)],
                 source_location: None,
             },
+            Type::Closure => Expression::Invalid,
         }
     }
 
@@ -1830,12 +1856,17 @@ impl Expression {
                 } else if ctx.is_legacy_component()
                     && lookup.property_visibility == PropertyVisibility::Output
                 {
-                    ctx.diag
-                        .push_warning(format!("{what} on an output property is deprecated"), node);
+                    ctx.diag.push_warning(
+                        format!(
+                            "{what} on an '{}' property is deprecated",
+                            PropertyVisibility::Output
+                        ),
+                        node,
+                    );
                     true
                 } else {
                     ctx.diag.push_error(
-                        format!("{what} on an {} property", lookup.property_visibility),
+                        format!("{what} on an '{}' property", lookup.property_visibility),
                         node,
                     );
                     false
@@ -2074,6 +2105,27 @@ impl BindingExpression {
         (!matches!(self.expression, Expression::Invalid)
             && !self.expression.is_synthetic_debug_hook())
             || !self.two_way_bindings.is_empty()
+    }
+
+    /// The bound expression with any debug-hook wrapper removed.
+    /// Use before matching on the expression variant.
+    pub fn value_expression(&self) -> &Expression {
+        self.expression.ignore_debug_hooks()
+    }
+
+    /// Replace the bound value, leaving priority, animation and two-way bindings untouched.
+    ///
+    /// A synthetic debug hook is upgraded in place — its wrapper and id are kept and it becomes
+    /// real — so the property stays live-editable. Any other expression (including a real,
+    /// non-synthetic hook) is replaced wholesale.
+    pub fn set_value_expression(&mut self, expr: Expression) {
+        match &mut self.expression {
+            Expression::DebugHook { expression, synthetic, .. } if *synthetic => {
+                **expression = expr;
+                *synthetic = false;
+            }
+            expression => *expression = expr,
+        }
     }
 }
 
@@ -2427,6 +2479,11 @@ pub fn pretty_print(f: &mut dyn std::fmt::Write, expression: &Expression) -> std
                 write!(f, " SYNTHETIC")?;
             }
             write!(f, "\"{id}\")")
+        }
+        Expression::Closure { arg_name, expression } => {
+            let display_name = arg_name.strip_prefix("local_").unwrap_or(arg_name);
+            write!(f, "({display_name}) => ")?;
+            pretty_print(f, expression)
         }
     }
 }

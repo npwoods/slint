@@ -244,10 +244,6 @@ export default defineConfig({
                                                   slug: "guide/experimental/overview",
                                               },
                                               {
-                                                  label: "FlexboxLayout",
-                                                  slug: "guide/experimental/flexboxlayout",
-                                              },
-                                              {
                                                   label: "Interface",
                                                   slug: "guide/experimental/interface",
                                               },
@@ -264,12 +260,20 @@ export default defineConfig({
                                                   slug: "guide/experimental/match-elements",
                                               },
                                               {
+                                                  label: "Array Predicates",
+                                                  slug: "guide/experimental/array-predicates",
+                                              },
+                                              {
                                                   label: "Named Slots",
                                                   slug: "guide/experimental/named-slots",
                                               },
                                               {
                                                   label: "Deprecated Properties",
                                                   slug: "guide/experimental/deprecated",
+                                              },
+                                              {
+                                                  label: "Flexbox Item Properties",
+                                                  slug: "guide/experimental/flexbox-item-properties",
                                               },
                                           ],
                                       },
@@ -511,12 +515,10 @@ export default defineConfig({
                                                 label: "VerticalLayout",
                                                 slug: "reference/layouts/verticallayout",
                                             },
-                                            // FlexboxLayout is experimental. When it ships, drop
-                                            // `draft: true` from flexbox-layout.mdx and uncomment:
-                                            // {
-                                            //     label: "FlexboxLayout",
-                                            //     slug: "reference/layouts/flexboxlayout",
-                                            // },
+                                            {
+                                                label: "FlexboxLayout",
+                                                slug: "reference/layouts/flexboxlayout",
+                                            },
                                         ],
                                     },
                                     {

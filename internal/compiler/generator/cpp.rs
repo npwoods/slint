@@ -2729,13 +2729,18 @@ fn generate_sub_component(
         if what == "Role" {
             accessible_role_cases.push(format!("    case {index}: return {e};"));
         } else if let Some(what) = what.strip_prefix("Action") {
-            let has_args = matches!(&*expr.borrow(), llr::Expression::CallBackCall { arguments, .. } if !arguments.is_empty());
-
-            accessibility_action_cases.push(if has_args {
-                let member = ident(&crate::generator::to_kebab_case(what));
-                format!("    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}): {{ auto arg_0 = action.{member}._0; return {e}; }}")
+            let label = format!(
+                "    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}):"
+            );
+            let arg_count = crate::generator::accessibility_action_argument_count(what);
+            accessibility_action_cases.push(if arg_count == 0 {
+                format!("{label} return {e};")
             } else {
-                format!("    case ({index} << 8) | uintptr_t(slint::cbindgen_private::AccessibilityAction::Tag::{what}): return {e};")
+                let member = ident(&crate::generator::to_kebab_case(what));
+                let args = (0..arg_count)
+                    .map(|i| format!("[[maybe_unused]] auto arg_{i} = action.{member}._{i}; "))
+                    .join("");
+                format!("{label} {{ {args}return {e}; }}")
             });
             supported_accessibility_actions
                 .entry(*index)
@@ -2995,8 +3000,10 @@ fn generate_flexbox_layout_item_info_decl(
              return info;"
         )
     } else {
+        // Equivalent of the Rust trait default `layout_item_info(o).into()`, whose
+        // props are FlexItemProps::default() (note flex_shrink defaults to 1, not 0).
         "auto base = layout_item_info(o, child_index); \
-         return { base.constraint, 0.0f, 0.0f, -1.0f, slint::cbindgen_private::FlexboxLayoutAlignSelf::Auto, 0 };"
+         return { base.constraint, { 0.0f, 1.0f, -1.0f, slint::cbindgen_private::CrossAxisSelfAlignment::Auto, 0 } };"
             .to_owned()
     };
 
@@ -4623,6 +4630,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name,
             elements,
             repeated_cross_width,
@@ -4630,6 +4638,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         } => generate_with_flexbox_layout_item_info(
             cells_h_variable,
             cells_v_variable,
+            flex_props_variable,
             repeater_indices_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             repeated_cross_width.as_deref(),
@@ -4825,6 +4834,12 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
                     "slint::private_api::translate_from_bundle(slint_translation_bundle_{string_index}, {args})"
                 ),
             }
+        }
+        Expression::Closure { arg_name, expression } => {
+            let arg = ident(arg_name);
+            let expr = compile_expression(expression, ctx);
+
+            format!("[&](auto const &{arg}) -> bool {{ return {expr}; }}")
         }
     }
 }
@@ -5522,6 +5537,34 @@ fn compile_builtin_function_call(
             let color = a.next().unwrap();
             format!("slint::private_api::color_to_styled_text({})", color)
         }
+        BuiltinFunction::PathPointAt => {
+            if let [llr::Expression::PropertyReference(pr), t] = arguments {
+                let item_rc = access_item_rc(pr, ctx);
+                let t = compile_expression(t, ctx);
+                format!(
+                    "slint::LogicalPosition(slint::cbindgen_private::slint_path_point_at(&{item_rc}, static_cast<float>({t})))"
+                )
+            } else {
+                panic!("internal error: invalid args to PathPointAt {arguments:?}")
+            }
+        }
+        BuiltinFunction::PathAngleAt => {
+            if let [llr::Expression::PropertyReference(pr), t] = arguments {
+                let item_rc = access_item_rc(pr, ctx);
+                let t = compile_expression(t, ctx);
+                format!(
+                    "slint::cbindgen_private::slint_path_angle_at(&{item_rc}, static_cast<float>({t}))"
+                )
+            } else {
+                panic!("internal error: invalid args to PathAngleAt {arguments:?}")
+            }
+        }
+        BuiltinFunction::ArrayAny => {
+            format!("slint::private_api::model_any({}, {})", a.next().unwrap(), a.next().unwrap())
+        },
+        BuiltinFunction::ArrayAll => {
+            format!("slint::private_api::model_all({}, {})", a.next().unwrap(), a.next().unwrap())
+        },
     }
 }
 
@@ -5703,8 +5746,12 @@ fn generate_with_layout_item_info(
 fn generate_with_flexbox_layout_item_info(
     cells_h_variable: &str,
     cells_v_variable: &str,
+    flex_props_variable: &str,
     repeated_indices_var_name: Option<&str>,
-    elements: &[Either<(llr::Expression, llr::Expression), llr::LayoutRepeatedElement>],
+    elements: &[Either<
+        (llr::Expression, llr::Expression, llr::Expression),
+        llr::LayoutRepeatedElement,
+    >],
     repeated_cross_width: Option<&llr::Expression>,
     sub_expression: &llr::Expression,
     ctx: &llr_EvaluationContext<CppGeneratorContext>,
@@ -5714,17 +5761,18 @@ fn generate_with_flexbox_layout_item_info(
     // so a height-for-width instance wraps to the real width like a static cell.
     let cross_width = repeated_cross_width.map(|w| compile_expression(w, ctx));
     let mut push_code =
-        "std::vector<slint::cbindgen_private::FlexboxLayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::FlexboxLayoutItemInfo> cells_vector_v;".to_owned();
+        "std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_h; std::vector<slint::cbindgen_private::LayoutItemInfo> cells_vector_v; std::vector<slint::cbindgen_private::FlexItemProps> flex_props_vector;".to_owned();
     let mut repeater_idx = 0usize;
 
     for item in elements {
         match item {
-            Either::Left((value_h, value_v)) => {
+            Either::Left((value_h, value_v, value_flex)) => {
                 write!(
                     push_code,
-                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }});",
+                    "cells_vector_h.push_back({{ {} }}); cells_vector_v.push_back({{ {} }}); flex_props_vector.push_back({{ {} }});",
                     compile_expression(value_h, ctx),
-                    compile_expression(value_v, ctx)
+                    compile_expression(value_v, ctx),
+                    compile_expression(value_flex, ctx)
                 )
                 .unwrap();
             }
@@ -5753,22 +5801,28 @@ fn generate_with_flexbox_layout_item_info(
                 // (not-yet-instantiated rows get placeholders).
                 // For a column flex, measure each instance's vertical info at the
                 // container width; otherwise use its preferred-width default.
-                let v_push = match &cross_width {
+                let v_query = match &cross_width {
                     Some(w) => format!(
                         "sub_comp->flexbox_layout_item_info_at_cross_width(static_cast<float>({w}))"
                     ),
                     None => "sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Vertical, std::nullopt)".to_owned(),
                 };
+                // The instance vtable returns the bundled FlexboxLayoutItemInfo; split
+                // it into the constraint cell and the (axis-independent) flex props.
                 write!(
                     push_code,
                     "{{ \
                      auto start_offset = cells_vector_h.size(); \
                      self->repeater_{repeater_index}.for_each([&](const auto &sub_comp){{ \
-                     cells_vector_h.push_back(sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt)); \
-                     cells_vector_v.push_back({v_push}); }}); \
+                     auto info_h = sub_comp->flexbox_layout_item_info(slint::cbindgen_private::Orientation::Horizontal, std::nullopt); \
+                     auto info_v = {v_query}; \
+                     flex_props_vector.push_back(info_h.props); \
+                     cells_vector_h.push_back({{ info_h.constraint }}); \
+                     cells_vector_v.push_back({{ info_v.constraint }}); }}); \
                      auto repeater_len = self->repeater_{repeater_index}.len(); \
                      cells_vector_h.resize(start_offset + repeater_len); \
-                     cells_vector_v.resize(start_offset + repeater_len); }}"
+                     cells_vector_v.resize(start_offset + repeater_len); \
+                     flex_props_vector.resize(start_offset + repeater_len); }}"
                 )
                 .unwrap();
             }
@@ -5784,10 +5838,11 @@ fn generate_with_flexbox_layout_item_info(
         format!("std::array<int, {}> {ri}_array;", 2 * repeater_idx)
     });
     format!(
-        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexboxLayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexboxLayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); return {}; }}()",
+        "[&]{{ {ri} {push_code} [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_h} = slint::private_api::make_slice(std::span(cells_vector_h)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::LayoutItemInfo>{cells_v} = slint::private_api::make_slice(std::span(cells_vector_v)); [[maybe_unused]] slint::cbindgen_private::Slice<slint::cbindgen_private::FlexItemProps>{flex_props} = slint::private_api::make_slice(std::span(flex_props_vector)); return {}; }}()",
         compile_expression(sub_expression, ctx),
         cells_h = ident(cells_h_variable),
         cells_v = ident(cells_v_variable),
+        flex_props = ident(flex_props_variable),
     )
 }
 
