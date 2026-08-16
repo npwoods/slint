@@ -571,6 +571,7 @@ fn duplicate_element_with_mapping(
     let new = Rc::new(RefCell::new(Element {
         base_type: elem.base_type.clone(),
         id: elem.id.clone(),
+        is_injected_wrapper_element: elem.is_injected_wrapper_element,
         property_declarations: elem.property_declarations.clone(),
         // We will do the fixup of the references in bindings later
         bindings: elem
@@ -596,6 +597,7 @@ fn duplicate_element_with_mapping(
             .collect(),
         child_of_layout: elem.child_of_layout,
         child_of_flexbox: elem.child_of_flexbox,
+        parent_box_layout_orientation: elem.parent_box_layout_orientation,
         layout_info_prop: elem.layout_info_prop.clone(),
         layout_info_v_with_constraint: elem.layout_info_v_with_constraint.clone(),
         layout_info_h_with_constraint: elem.layout_info_h_with_constraint.clone(),

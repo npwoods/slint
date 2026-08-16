@@ -16,6 +16,7 @@ use i_slint_core::graphics::RequestedGraphicsAPI;
 use i_slint_core::platform::{EventLoopProxy, PlatformError};
 use i_slint_core::window::WindowAdapter;
 use renderer::WinitCompatibleRenderer;
+use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -398,6 +399,7 @@ impl BackendBuilder {
 }
 
 pub(crate) struct SharedBackendData {
+    context: OnceCell<i_slint_core::SlintContextWeak>,
     /// Allow fallback if the desired renderer is not found
     allow_fallback: bool,
     renderer_name: Option<String>,
@@ -425,6 +427,14 @@ pub(crate) struct SharedBackendData {
 }
 
 impl SharedBackendData {
+    /// Panics if the backend is not bound: an event loop only runs inside a live context.
+    pub(crate) fn context(&self) -> i_slint_core::SlintContext {
+        self.context
+            .get()
+            .and_then(|ctx| ctx.upgrade())
+            .expect("the winit event loop runs inside the context that owns this backend")
+    }
+
     fn new(
         mut builder: EventLoopBuilder,
         renderer_name: Option<String>,
@@ -493,6 +503,7 @@ impl SharedBackendData {
                 .map_err(|display_err| PlatformError::OtherError(display_err.into()))?,
         );
         Ok(Self {
+            context: Default::default(),
             allow_fallback,
             renderer_name,
             requested_graphics_api,
@@ -753,6 +764,7 @@ impl Drop for Backend {
 
 impl i_slint_core::platform::Platform for Backend {
     fn bind_context(&self, _ctx: i_slint_core::SlintContextWeak, _: i_slint_core::InternalToken) {
+        let _ = self.shared_data.context.set(_ctx.clone());
         #[cfg(xdg_desktop_settings)]
         {
             *self.xdg_watcher.borrow_mut() =

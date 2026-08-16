@@ -494,9 +494,11 @@ impl Expression {
                         return Self::from_function_call_node(node.into(), ctx);
                     }
                     SyntaxKind::MemberAccess => {
+                        let expr = Self::from_member_access_node(node.clone().into(), ctx);
+                        // A field access on an SC struct is a valid SC reference.
                         #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Member access expressions are", &node);
-                        return Self::from_member_access_node(node.into(), ctx);
+                        check_slint_sc_reference(&expr, &node, ctx);
+                        return expr;
                     }
                     SyntaxKind::IndexExpression => {
                         #[cfg(feature = "slint-sc")]
@@ -522,8 +524,6 @@ impl Expression {
                         return Self::from_conditional_expression_node(node.into(), ctx);
                     }
                     SyntaxKind::ObjectLiteral => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Object literal expressions are", &node);
                         return Self::from_object_literal_node(node.into(), ctx);
                     }
                     SyntaxKind::Array => {
@@ -1575,9 +1575,10 @@ impl Expression {
             }
             return Self::Invalid;
         };
-        // For `.any(predicate)` / `.all(predicate)` the closure's argument type is
-        // structurally derived from the base array's element type. Compute it here
-        // so we can hand it to the closure when resolving that specific argument.
+        // For `.any(predicate)` / `.all(predicate)` / `.find-index(predicate)` the
+        // closure's argument type is structurally derived from the base array's
+        // element type. Compute it here so we can hand it to the closure when
+        // resolving that specific argument.
         let expected_closure_arg_type = match &function {
             Some(LookupResult::Callable(LookupResultCallable::MemberFunction {
                 base,
@@ -1586,7 +1587,9 @@ impl Expression {
             })) if matches!(
                 **member,
                 LookupResultCallable::Callable(Callable::Builtin(
-                    BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll
+                    BuiltinFunction::ArrayAny
+                        | BuiltinFunction::ArrayAll
+                        | BuiltinFunction::ArrayFindIndex
                 ))
             ) =>
             {
@@ -2122,7 +2125,8 @@ impl Expression {
             && !matches!(expression, Expression::Closure { .. })
         {
             ctx.diag.push_error(
-                "Closures must be written inline as the argument of 'any' or 'all'".into(),
+                "Closures must be written inline as the argument of 'any', 'all' or 'find-index'"
+                    .into(),
                 &node,
             );
             return Expression::Invalid;
@@ -3063,9 +3067,10 @@ fn check_callback_alias_validity(
 
 /// Validate an identifier reference against the Slint SC subset.
 ///
-/// The accepted reference is a read of a property of an SC type, on any element
-/// reached by `self`, `parent`, `root`, or an element `id`. A reference to a
-/// non-SC type, or to something other than a property, is rejected. A property
+/// The accepted references are a read of a property of an SC type, on any
+/// element reached by `self`, `parent`, `root`, or an element `id`, a boolean
+/// literal, a value of a user-declared enum, and a field access on an SC struct.
+/// A reference to a non-SC type, or to something else, is rejected. A property
 /// declaration's binding follows the same rules.
 #[cfg(feature = "slint-sc")]
 fn check_slint_sc_reference(expr: &Expression, node: &SyntaxNode, ctx: &mut LookupCtx) {
@@ -3076,6 +3081,11 @@ fn check_slint_sc_reference(expr: &Expression, node: &SyntaxNode, ctx: &mut Look
         // The predefined names `true` and `false` resolve to a boolean value
         // (a property of the same name would shadow them and resolve above).
         Expression::BoolLiteral(_) => {}
+        // A value of a user-declared enum, written `EnumName.value`.
+        Expression::EnumerationValue(ev) if ev.enumeration.node.is_some() => {}
+        // A field access on an SC struct, written `some-struct.field`. The base
+        // being an SC struct is enough: its fields are always SC types.
+        Expression::StructFieldAccess { base, .. } if base.ty().is_slint_sc() => {}
         _ => ctx.diag.slint_sc_error("Identifier references are", node),
     }
 }

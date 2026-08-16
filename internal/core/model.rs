@@ -23,7 +23,7 @@ mod adapters;
 mod model_peer;
 mod repeater;
 
-pub use repeater::{Conditional, RepeatedItemTree, Repeater, RepeaterTracker};
+pub use repeater::{Conditional, ListViewProperties, RepeatedItemTree, Repeater, RepeaterTracker};
 
 /// This trait defines the interface that users of a model can use to track changes
 /// to a model. It is supplied via [`Model::model_tracker`] and implementation usually
@@ -362,6 +362,21 @@ pub fn model_all<T: Default>(
         model.model_tracker().track_row_data_changes(index);
         predicate(model.row_data(index).unwrap_or_default())
     })
+}
+
+/// Returns the index of the first row for which `predicate` returns `true`, or `-1`
+/// if no row matches.
+pub fn model_find_index<T>(
+    model: &dyn Model<Data = T>,
+    mut predicate: impl FnMut(T) -> bool,
+) -> i32 {
+    model.model_tracker().track_row_count_changes();
+    (0..model.row_count())
+        .find(|index| {
+            model.model_tracker().track_row_data_changes(*index);
+            model.row_data(*index).is_some_and(&mut predicate)
+        })
+        .map_or(-1, |index| index as i32)
 }
 
 /// An iterator over the elements of a model.

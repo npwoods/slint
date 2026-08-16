@@ -36,9 +36,9 @@ export default defineConfig({
     site: `${BASE_URL}${BASE_PATH}`,
     base: BASE_PATH,
     trailingSlash: SLINT_STARLIGHT_TRAILING_SLASH,
-    // Pages that moved into the language reference. Astro serves the source
-    // routes under the base path but uses the destinations verbatim, so they
-    // need the prefix.
+    // Pages that moved elsewhere in the tree. Astro serves the source routes
+    // under the base path but uses the destinations verbatim, so they need the
+    // prefix.
     redirects: {
         "/reference/primitive-types/": `${BASE_PATH}reference/property-types/numeric-types/`,
         "/reference/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
@@ -48,6 +48,10 @@ export default defineConfig({
         "/reference/language/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
         "/reference/language/arrays-and-models/": `${BASE_PATH}reference/property-types/arrays-and-models/`,
         "/reference/global-structs-enums/": `${BASE_PATH}reference/property-types/builtin-structs/`,
+        "/guide/platforms/desktop/": `${BASE_PATH}guide/platforms/desktop/general/`,
+        "/guide/platforms/other/": `${BASE_PATH}guide/platforms/desktop/general/`,
+        "/guide/platforms/packaging/windows-packaging/": `${BASE_PATH}guide/platforms/desktop/windows/packaging/`,
+        "/guide/platforms/desktop/linux/": `${BASE_PATH}guide/platforms/desktop/linux/general/`,
     },
     markdown: {
         gfm: true,
@@ -205,7 +209,46 @@ export default defineConfig({
                                 label: "Platforms",
                                 collapsed: true,
                                 items: [
-                                    "guide/platforms/desktop",
+                                    {
+                                        label: "Desktop",
+                                        collapsed: true,
+                                        items: [
+                                            "guide/platforms/desktop/general",
+                                            {
+                                                label: "Windows",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/windows/general",
+                                                    },
+                                                    "guide/platforms/desktop/windows/packaging",
+                                                ],
+                                            },
+                                            {
+                                                label: "macOS",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/macos/general",
+                                                    },
+                                                    "guide/platforms/desktop/macos/packaging",
+                                                ],
+                                            },
+                                            {
+                                                label: "Linux",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/linux/general",
+                                                    },
+                                                    "guide/platforms/desktop/linux/packaging",
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     "guide/platforms/embedded",
                                     {
                                         label: "Mobile",
@@ -217,7 +260,6 @@ export default defineConfig({
                                         ],
                                     },
                                     "guide/platforms/web",
-                                    "guide/platforms/other",
                                 ],
                             },
                             {
