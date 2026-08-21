@@ -229,6 +229,10 @@ export default defineConfig({
                                 slug: "language/operators",
                             },
                             {
+                                label: "Callbacks",
+                                slug: "language/callbacks",
+                            },
+                            {
                                 label: "Structs and Enums",
                                 slug: "language/structs-and-enums",
                             },
@@ -249,11 +253,23 @@ export default defineConfig({
                             },
                             { label: "Rendering", slug: "reference/rendering" },
                             {
+                                label: "Touch Input",
+                                slug: "reference/input",
+                            },
+                            {
                                 label: "Elements",
                                 items: [
                                     {
+                                        label: "Image",
+                                        slug: "reference/image",
+                                    },
+                                    {
                                         label: "Rectangle",
                                         slug: "reference/rectangle",
+                                    },
+                                    {
+                                        label: "TouchArea",
+                                        slug: "reference/toucharea",
                                     },
                                     {
                                         label: "Window",
@@ -267,6 +283,10 @@ export default defineConfig({
                                     {
                                         label: "Colors & Brushes",
                                         slug: "reference/property-types/colors-and-brushes",
+                                    },
+                                    {
+                                        label: "Images",
+                                        slug: "reference/property-types/images",
                                     },
                                     {
                                         label: "Numeric Types",

@@ -64,7 +64,10 @@ fn resolve_expression(
                 if let Some(property_name) = property_name {
                     check_callback_alias_validity(&node, elem, property_name, lookup_ctx.diag);
                 }
-                Expression::from_callback_connection(node, &mut lookup_ctx)
+                let expr = Expression::from_callback_connection(node.clone(), &mut lookup_ctx);
+                #[cfg(feature = "slint-sc")]
+                check_slint_sc_handler_body(&expr, &node, &mut lookup_ctx);
+                expr
             }
             SyntaxKind::Function => Expression::from_function(node.clone().into(), &mut lookup_ctx),
             SyntaxKind::Expression => {
@@ -458,8 +461,6 @@ impl Expression {
                 NodeOrToken::Node(node) => match node.kind() {
                     SyntaxKind::Expression => return Self::from_expression_node(node.into(), ctx),
                     SyntaxKind::AtImageUrl => {
-                        #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("@image-url() expressions are", &node);
                         return Self::from_at_image_url_node(node.into(), ctx);
                     }
                     SyntaxKind::AtGradient => {
@@ -483,22 +484,30 @@ impl Expression {
                         return Self::from_at_keys_node(node.into(), ctx);
                     }
                     SyntaxKind::QualifiedName => {
-                        let expr = Self::from_qualified_name_node(node.clone().into(), ctx);
-                        #[cfg(feature = "slint-sc")]
-                        check_slint_sc_reference(&expr, &node, ctx);
-                        return expr;
+                        return Self::from_qualified_name_node(node.into(), ctx);
                     }
                     SyntaxKind::FunctionCallExpression => {
+                        let expr = Self::from_function_call_node(node.clone().into(), ctx);
+                        // Invoking a callback from a handler is the one call the
+                        // Slint SC subset has.
                         #[cfg(feature = "slint-sc")]
-                        ctx.diag.slint_sc_error("Function calls are", &node);
-                        return Self::from_function_call_node(node.into(), ctx);
+                        if !matches!(
+                            (&expr, &ctx.property_type),
+                            (Expression::Invalid, _)
+                                | (
+                                    Expression::FunctionCall {
+                                        function: Callable::Callback(..),
+                                        ..
+                                    },
+                                    Type::Callback(..)
+                                )
+                        ) {
+                            ctx.diag.slint_sc_error("Function calls are", &node);
+                        }
+                        return expr;
                     }
                     SyntaxKind::MemberAccess => {
-                        let expr = Self::from_member_access_node(node.clone().into(), ctx);
-                        // A field access on an SC struct is a valid SC reference.
-                        #[cfg(feature = "slint-sc")]
-                        check_slint_sc_reference(&expr, &node, ctx);
-                        return expr;
+                        return Self::from_member_access_node(node.into(), ctx);
                     }
                     SyntaxKind::IndexExpression => {
                         #[cfg(feature = "slint-sc")]
@@ -652,6 +661,17 @@ impl Expression {
             ImageReference::from_resolved(absolute_source_path)
         };
 
+        // Slint SC decodes the image at compile time, so only a file on disk
+        // can be referenced.
+        #[cfg(feature = "slint-sc")]
+        match &resource_ref {
+            ImageReference::DataUri(_) => {
+                ctx.diag.slint_sc_error("Data URIs in @image-url() are", &node)
+            }
+            ImageReference::Url(_) => ctx.diag.slint_sc_error("URLs in @image-url() are", &node),
+            _ => {}
+        }
+
         let nine_slice = node
             .children_with_tokens()
             .filter_map(|n| n.into_token())
@@ -683,6 +703,11 @@ impl Expression {
                 None
             }
         };
+
+        #[cfg(feature = "slint-sc")]
+        if nine_slice.is_some() {
+            ctx.diag.slint_sc_error("Nine-slice borders in @image-url() are", &node);
+        }
 
         Expression::ImageReference {
             resource_ref,
@@ -2355,8 +2380,17 @@ fn lookup_qualified_name_node(
             if it.next().is_some() {
                 ctx.diag.push_error(format!("Cannot access id '{}'", first.text()), &node);
             } else {
+                let mut parts = crate::lookup::enum_or_color_suggestions(ctx, &first_str)
+                    .iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>();
+                let hint = match parts.pop() {
+                    None => String::new(),
+                    Some(last) if parts.is_empty() => format!(". Did you mean {last}?"),
+                    Some(last) => format!(". Did you mean {} or {last}?", parts.join(", ")),
+                };
                 ctx.diag.push_error(
-                    format!("Unknown unqualified identifier '{}'", first.text()),
+                    format!("Unknown unqualified identifier '{}'{hint}", first.text()),
                     &node,
                 );
             }
@@ -2498,8 +2532,11 @@ fn continue_lookup_within_element(
 
     let lookup_result = elem.borrow().lookup_property(&prop_name);
     let local_to_component = lookup_result.is_local_to_component && ctx.is_local_element(elem);
+    // A property or function whose type is outside the Slint SC subset
+    // doesn't resolve; callbacks do, so a handler can invoke them.
+    let sc_resolves = !ctx.diag.is_slint_sc() || lookup_result.property_type.is_slint_sc();
 
-    if lookup_result.property_type.is_property_type() {
+    if sc_resolves && lookup_result.property_type.is_property_type() {
         if !local_to_component && lookup_result.property_visibility == PropertyVisibility::Private {
             ctx.diag.push_error(format!("The property '{}' is private. Annotate it with 'in', 'out' or 'in-out' to make it accessible from other components", second.text()), &second);
             return None;
@@ -2542,7 +2579,7 @@ fn continue_lookup_within_element(
         Some(LookupResult::Callable(LookupResultCallable::Callable(Callable::Callback(
             NamedReference::new(elem, lookup_result.resolved_name.to_smolstr()),
         ))))
-    } else if let Type::Function(fun) = lookup_result.property_type {
+    } else if sc_resolves && let Type::Function(fun) = lookup_result.property_type {
         if lookup_result.property_visibility == PropertyVisibility::Private && !local_to_component {
             let message = format!(
                 "The function '{}' is private. Annotate it with 'public' to make it accessible from other components",
@@ -3065,27 +3102,35 @@ fn check_callback_alias_validity(
     }
 }
 
-/// Validate an identifier reference against the Slint SC subset.
+/// Validate a callback handler body against the Slint SC subset: a sequence of
+/// callback invocations, and nothing else.
 ///
-/// The accepted references are a read of a property of an SC type, on any
-/// element reached by `self`, `parent`, `root`, or an element `id`, a boolean
-/// literal, a value of a user-declared enum, and a field access on an SC struct.
-/// A reference to a non-SC type, or to something else, is rejected. A property
-/// declaration's binding follows the same rules.
+/// The expressions a handler body may be made of are each rejected where they
+/// are resolved; what's left to reject here is an expression that's in the
+/// subset on its own but has no effect as a statement, such as a property read.
 #[cfg(feature = "slint-sc")]
-fn check_slint_sc_reference(expr: &Expression, node: &SyntaxNode, ctx: &mut LookupCtx) {
-    match expr {
-        // A parse or name-resolution error was already reported for this node.
-        Expression::Invalid => {}
-        Expression::PropertyReference(nr) if nr.ty().is_slint_sc() => {}
-        // The predefined names `true` and `false` resolve to a boolean value
-        // (a property of the same name would shadow them and resolve above).
-        Expression::BoolLiteral(_) => {}
-        // A value of a user-declared enum, written `EnumName.value`.
-        Expression::EnumerationValue(ev) if ev.enumeration.node.is_some() => {}
-        // A field access on an SC struct, written `some-struct.field`. The base
-        // being an SC struct is enough: its fields are always SC types.
-        Expression::StructFieldAccess { base, .. } if base.ty().is_slint_sc() => {}
-        _ => ctx.diag.slint_sc_error("Identifier references are", node),
+fn check_slint_sc_handler_body(
+    expr: &Expression,
+    node: &syntax_nodes::CallbackConnection,
+    ctx: &mut LookupCtx,
+) {
+    let statements = match expr {
+        Expression::CodeBlock(statements) => statements.as_slice(),
+        single => core::slice::from_ref(single),
+    };
+    if !statements.iter().all(|statement| {
+        matches!(
+            statement,
+            // An error was already reported for this statement.
+            Expression::Invalid | Expression::FunctionCall { function: Callable::Callback(..), .. }
+        )
+    }) {
+        // Report on the name of the callback: the handler itself spans as many
+        // lines as its body.
+        let name = node.child_token(SyntaxKind::Identifier);
+        ctx.diag.slint_sc_error(
+            "A callback handler body that isn't a callback invocation is",
+            name.as_ref().map_or(&**node as &dyn Spanned, |name| name),
+        );
     }
 }

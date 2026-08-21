@@ -294,46 +294,23 @@ component ImageItem inherits Empty {
     /// }
     /// ```
     in property <brush> colorize;
-    /// The `image` type is a reference to an image. It's defined using the `@image-url("...")` construct.
-    /// The address within the `@image-url` function must be known at compile time.
+    /// The [image](/reference/property-types/images/) to draw, created with
+    /// [`@image-url()`](/reference/language/expressions/#sls.expr.image.form)
+    /// or set by the application: by default no image, drawing
+    /// nothing. \{#sls.ref.image.source}
     ///
-    /// Slint looks for images in the following places:
-    ///
-    /// 1. The absolute path or the path relative to the current `.slint` file.
-    /// 2. The include path used by the compiler to look up `.slint` files.
-    ///
-    /// Images can also be loaded from [`data:` URIs](https://developer.mozilla.org/en-US/docs/Web/URI/Reference/Schemes/data), with either base64 or URL-encoded content.
-    /// For example: `@image-url("data:image/png;base64,iVBORw0KGgo...")`.
-    ///
-    /// Access an `image`'s source dimension using its `source.width` and `source.height` properties.
+    /// Access an `image`'s source dimension using its `source.width` and
+    /// `source.height` properties. \{#sls.ref.image.source.dimensions}
     ///
     /// ```slint
     /// export component Example inherits Window {
-    ///     preferred-width: 150px;
-    ///     preferred-height: 50px;
+    ///     in property <image> some_image: @image-url("images/logo.png");
     ///
-    ///     in property <image> some_image: @image-url("https://slint.dev/logo/slint-logo-full-light.svg");
-    ///
-    ///     Text {
-    ///         text: "The image is " + some_image.width + "x" + some_image.height;
-    ///     }
+    ///     out property <int> image-width: some_image.width;
+    ///     out property <int> image-height: some_image.height;
     /// }
     /// ```
-    ///
-    /// ```slint
-    /// // nine-slice scaling
-    /// export component Example inherits Window {
-    ///     width: 100px;
-    ///     height: 150px;
-    ///     VerticalLayout {
-    ///         Image {
-    ///             source: @image-url("https://interactive-examples.mdn.mozilla.net/media/examples/border-diamonds.png", nine-slice(30 30 30 30));
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// Use the <Link type="ImageType" label="`@image-url` macro" /> to specify the image's path.
+    /// \sc
     in property <image> source;
     /// ```slint imageAlt="image fill example" width="300" height="200"
     /// Image {
@@ -395,9 +372,21 @@ component ImageItem inherits Empty {
 /// }
 /// ```
 ///
-/// Use the `Image` element to display an <Link type="ImageType" label="image" />.
+/// Use the `Image` element to display an
+/// [image](/reference/property-types/images/). \{#sls.meta.image.purpose}
+///
+/// <OnlyInSC>
+/// The element draws the image of its `source` property pixel for pixel:
+/// the image's top-left pixel is at the element's position, and one image
+/// pixel covers one frame-buffer pixel, without scaling. \{#sls.ref.image.draw}
+///
+/// The element is always the size of its source image: `width` and `height`
+/// hold the dimensions of that image, and setting them is an
+/// error. \{#sls.ref.image.size}
+/// </OnlyInSC>
 ///
 /// \footer
+/// <NotInSC>
 /// ## Accessibility
 ///
 /// ### Alternative text
@@ -425,6 +414,8 @@ component ImageItem inherits Empty {
 ///     accessible-role: none;
 /// }
 /// ```
+/// </NotInSC>
+/// \sc
 /// \group:elements
 export component ClippedImage inherits ImageItem {
     /// The horizontal alignment of the image within the element.
@@ -668,6 +659,23 @@ component ComplexText inherits SimpleText {
     /// }
     /// ```
     in property <length> letter-spacing;
+    /// The line height as a unitless factor (or a percentage: `150%` equals `1.5`) applied to
+    /// the font's natural line height (ascent + descent + line gap). The default of `1` keeps
+    /// the natural line height; larger values spread the lines apart, smaller values pull them
+    /// together, and `0` collapses them onto each other. Negative or non-numeric values behave
+    /// like `1`. Unlike CSS `line-height`, the factor is relative to the natural line height,
+    /// not the font size, and keyword or length values aren't supported.
+    ///
+    /// ```slint "line-height-factor: 1.5;" imageAlt="text with increased line height" width="200" height="200" needsBackground
+    /// Text {
+    ///     text: "Two lines\nof text";
+    ///     color: black;
+    ///     font-size: 30pt;
+    ///     line-height-factor: 1.5;
+    /// }
+    /// ```
+    /// \default 1
+    in property <float> line-height-factor: 1;
     /// The brush used for the text outline.
     /// ```slint "stroke: darkblue;" imageAlt="text stroke" width="300" height="200" needsBackground
     /// Text {
@@ -779,10 +787,15 @@ component StyledTextItem inherits Empty {
 export { StyledTextItem as StyledText }
 
 /// Use `TouchArea` to control what happens when the region it covers is touched or interacted with
-/// using the mouse.
+/// using the mouse. \{#sls.meta.toucharea.purpose}
 ///
-/// When not part of a layout, its width or height default to 100% of the parent element.
+/// When not part of a layout, its width or height default to 100% of the parent element. \{#sls.ref.toucharea.size}
 ///
+/// <OnlyInSC>
+/// Of the members of `TouchArea`, only `clicked` and the geometry properties are part of Slint SC. \{#sls.ref.toucharea.members}
+/// </OnlyInSC>
+///
+/// <NotInSC>
 /// ```slint playground
 /// export component Example inherits Window {
 ///     width: 200px;
@@ -807,7 +820,9 @@ export { StyledTextItem as StyledText }
 ///     }
 /// }
 /// ```
+/// </NotInSC>
 /// \group:gestures
+/// \sc
 export component TouchArea {
     /// When disabled, the `TouchArea` doesn't recognize any touch or mouse events and they are
     /// passed through to elements underneath.
@@ -854,7 +869,12 @@ export component TouchArea {
     out property <length> pressed_y;
     /// Set to `true` by the `TouchArea` when the mouse is pressed over it.
     out property <bool> pressed;
-    /// Invoked when clicked: A finger or the left mouse button is pressed, then released on this element.
+    /// Invoked when clicked: A finger or the left mouse button is pressed, then released on this element. \{#sls.ref.toucharea.clicked}
+    ///
+    /// <OnlyInSC>
+    /// The Touch Input chapter specifies when a press and a release count as a click. \{#sls.ref.toucharea.clicked.input}
+    /// </OnlyInSC>
+    /// \sc
     callback clicked;
     /// Invoked when double-clicked. The left mouse button is pressed and released twice on this element in a short
     /// period of time, or the same is done with a finger. The `clicked()` callbacks will be triggered before the `double-clicked()` callback is triggered.
@@ -1541,7 +1561,21 @@ export component ContextMenuArea inherits Empty {
 }
 
 component WindowItem {
+    /// The width of the window. \{#sls.ref.window.width}
+    ///
+    /// <OnlyInSC>
+    /// The application gives the window its size when it creates the component, so this is a value the file reads,
+    /// and binding it is an error. \{#sls.ref.window.width-out}
+    /// </OnlyInSC>
+    /// \sc
     in-out property <length> width;
+    /// The height of the window. \{#sls.ref.window.height}
+    ///
+    /// <OnlyInSC>
+    /// The application gives the window its size when it creates the component, so this is a value the file reads,
+    /// and binding it is an error. \{#sls.ref.window.height-out}
+    /// </OnlyInSC>
+    /// \sc
     in-out property <length> height;
     /// Whether the window should be placed above all other windows on window managers supporting it.
     /// \default false
@@ -1759,6 +1793,14 @@ export component TextInput {
     /// The letter spacing allows changing the spacing between the glyphs. A positive value increases the spacing and a negative value decreases the distance.
     /// \default 0
     in property <length> letter-spacing;
+    /// The line height as a unitless factor (or a percentage: `150%` equals `1.5`) applied to
+    /// the font's natural line height (ascent + descent + line gap). The default of `1` keeps
+    /// the natural line height; larger values spread the lines apart, smaller values pull them
+    /// together, and `0` collapses them onto each other. Negative or non-numeric values behave
+    /// like `1`. Unlike CSS `line-height`, the factor is relative to the natural line height,
+    /// not the font size, and keyword or length values aren't supported.
+    /// \default 1
+    in property <float> line-height-factor: 1;
     in property <length> width;
     in property <length> height;
     /// The height of the page used to compute how much to scroll when the user presses page up or page down.
@@ -2943,6 +2985,53 @@ export global Platform {
     /// When Slint is ported to new operating systems in the future, new enum values will be added.
     /// :::
     out property <OperatingSystemType> os;
+    /// `true` when the user interface is driven by a host application — your business logic written
+    /// in Rust, C++, JavaScript or Python — and `false` when the `.slint` file is being interpreted on
+    /// its own, with nothing behind it, such as when previewed with `slint-viewer` or the editor's preview.
+    ///
+    /// Use it to provide placeholder data and preview-only decorations that are removed from your
+    /// compiled application. This property is a compile-time constant, so branches that depend on it
+    /// are optimized away when the value is known to be `false` or `true`.
+    //
+    // ```slint playground
+    // import { ListView, VerticalBox } from "std-widgets.slint";
+    //
+    // export struct Data {
+    //     text: string,
+    //     color: color,
+    //     bg: color,
+    // }
+    // export component Example inherits Window {
+    //     width: 150px;
+    //     height: 150px;
+    //     in property<[Data]> data: Platform.is-app ? [] : [
+    //                 { text: "Blue", color: #0000ff, bg: #eeeeee},
+    //                 { text: "Red", color: #ff0000, bg: #eeeeee},
+    //                 { text: "Green", color: #00ff00, bg: #eeeeee},
+    //                 { text: "Yellow", color: #ffff00, bg: #222222 },
+    //                 { text: "Black", color: #000000, bg: #eeeeee },
+    //                 { text: "White", color: #ffffff, bg: #222222 },
+    //                 { text: "Magenta", color: #ff00ff, bg: #eeeeee },
+    //                 { text: "Cyan", color: #00ffff, bg: #222222 },
+    //             ];
+    //
+    //     VerticalBox {
+    //         ListView {
+    //             for data in root.data : Rectangle {
+    //                 height: 30px;
+    //                 background: data.bg;
+    //                 width: parent.width;
+    //                 Text {
+    //                     x: 0;
+    //                     text: data.text;
+    //                     color: data.color;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    // ```
+    out property <bool> is-app;
     /// The name of the currently selected <Link type="StyleWidgets" label="widget style"/>. Some widget
     /// styles have dark and light variant suffixes, such as `fluent-light`. This property contains the
     /// style name without the suffix. Use <Link type="Palette" label="Palette"/>'s `color-scheme` to

@@ -4266,9 +4266,10 @@ fn compile_grid_repeater_cache_access(expr: &Expression, ctx: &EvaluationContext
 
         quote!({
             let cache = #cache.get();
-            let base = cache[#index] as usize;
-            let data_idx = base + #offset as usize * (#stride_val as usize) + #child_offset #inner_offset;
-            *cache.get(data_idx).unwrap_or(&(0 as _))
+            cache.get(#index)
+                .and_then(|base| cache.get(*base as usize + #offset as usize * (#stride_val as usize) + #child_offset #inner_offset))
+                .copied()
+                .unwrap_or(0 as _)
         })
     })
 }
@@ -5960,6 +5961,11 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
             match &er.kind {
                 &crate::embedded_resources::EmbeddedResourcesKind::ListOnly => {
                     quote!()
+                },
+                // Only the slint-sc generator produces these resources.
+                #[cfg(feature = "slint-sc")]
+                crate::embedded_resources::EmbeddedResourcesKind::StaticPixels { .. } => {
+                    unreachable!("slint-sc resources in the Rust generator")
                 },
                 crate::embedded_resources::EmbeddedResourcesKind::FileData => {
                     let data = embedded_file_tokens(er.path.as_deref().unwrap());

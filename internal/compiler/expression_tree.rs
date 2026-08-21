@@ -1566,7 +1566,14 @@ impl Expression {
         symbol_counters: &SymbolCounters,
     ) -> Expression {
         let ty = self.ty();
-        if ty == target_type
+
+        if let Expression::Condition { .. } = self
+            && ty == Type::Void
+        {
+            // The true and false expressions do not return the same type. So at least one does not match
+            // with expected and an error was already added so we don't have to add an additional error here
+            self
+        } else if ty == target_type
             || target_type == Type::Void
             || target_type == Type::Invalid
             || ty == Type::Invalid
@@ -1724,28 +1731,69 @@ impl Expression {
                 },
                 _ => unreachable!(),
             }
-        } else if let (Type::Struct(struct_type), Expression::Struct { values, .. }) =
+        } else if let (Type::Struct(target_struct_type), Expression::Struct { values, .. }) =
             (&target_type, &self)
         {
             // Also special case struct literal in case they contain array literal
-            let mut fields = struct_type.fields.clone();
+            let mut target_fields = target_struct_type.fields.clone();
             let mut new_values = BTreeMap::new();
             for (f, v) in values {
-                if let Some(t) = fields.remove(f) {
+                if let Some(t) = target_fields.remove(f) {
                     new_values.insert(
                         f.clone(),
                         v.clone().maybe_convert_to(t, node, diag, symbol_counters),
                     );
                 } else {
-                    diag.push_error(format!("Cannot convert {ty} to {target_type}"), node);
+                    let available_fields_message = if target_struct_type.name.slint_name().is_some()
+                    {
+                        let available_fields = target_struct_type
+                            .fields
+                            .keys()
+                            .map(SmolStr::as_str)
+                            .collect::<Vec<_>>()
+                            .join("', '");
+                        format!(". Available fields: '{available_fields}'")
+                    } else {
+                        String::new()
+                    };
+                    diag.push_error(
+                        format!("Cannot convert {ty} to {target_type}: Field '{f}' not found{available_fields_message}"),
+                        node,
+                    );
                     return self;
                 }
             }
-            for f in fields.into_keys() {
-                let default_value = struct_type.default_value_for_field(&f);
+            for f in target_fields.into_keys() {
+                let default_value = target_struct_type.default_value_for_field(&f);
                 new_values.insert(f, default_value);
             }
-            Expression::Struct { ty: struct_type.clone(), values: new_values }
+            Expression::Struct { ty: target_struct_type.clone(), values: new_values }
+        } else if let Expression::Condition { condition, true_expr, false_expr } = self {
+            // Recursive try to convert the conditional expressions to the target_type
+            // true_expr and false_expr are equal this is handled with the condition at the beginning
+            // of this function so if one fails to convert, we should not try to convert the false case
+            // as well
+            let true_expr_converted = true_expr.clone().maybe_convert_to(
+                target_type.clone(),
+                node,
+                diag,
+                symbol_counters,
+            );
+            if true_expr_converted.ty() != target_type.clone() {
+                // Failed to convert so we don't have to try to convert the false expr as well
+                Expression::Condition { condition, true_expr, false_expr }
+            } else {
+                Expression::Condition {
+                    condition,
+                    true_expr: Box::new(true_expr_converted),
+                    false_expr: Box::new(false_expr.maybe_convert_to(
+                        target_type,
+                        node,
+                        diag,
+                        symbol_counters,
+                    )),
+                }
+            }
         } else {
             let mut message = format!("Cannot convert {ty} to {target_type}");
             // Explicit error message for unit conversion

@@ -13,6 +13,7 @@ use smol_str::SmolStr;
 
 use crate::expression_tree::{BuiltinFunction, Expression, Unit};
 use crate::object_tree::{Component, DEFAULT_SLOT_NAME, PropertyVisibility};
+use crate::parser::SyntaxNode;
 use crate::typeregister::TypeRegister;
 
 #[derive(Debug, Clone, Default)]
@@ -192,18 +193,21 @@ impl From<Arc<Struct>> for Type {
 }
 
 impl Type {
-    /// Whether the type is part of the Slint SC subset
-    #[cfg(feature = "slint-sc")]
+    /// Whether the type is part of the Slint SC subset.
+    /// Callable without the `slint-sc` feature, so shared call sites need no `cfg`.
     pub fn is_slint_sc(&self) -> bool {
-        match self {
-            Self::Int32 | Self::LogicalLength | Self::Color | Self::Bool => true,
+        #[cfg(feature = "slint-sc")]
+        return match self {
+            Self::Int32 | Self::LogicalLength | Self::Color | Self::Bool | Self::Image => true,
             // A user-declared enum.
             Self::Enumeration(en) => en.node.is_some(),
             // A user-declared struct. Its field types were validated where the
             // struct was declared, so they need no re-check here.
             Self::Struct(s) => matches!(&s.name, StructName::User { .. }),
             _ => false,
-        }
+        };
+        #[cfg(not(feature = "slint-sc"))]
+        false
     }
 
     /// valid type for properties
@@ -535,6 +539,14 @@ impl ElementType {
                 }
             }
             _ => PropertyLookupResult::invalid(Cow::Borrowed(name)),
+        }
+    }
+
+    /// Return the node declaring `name` in this type or one of its bases, if there is one.
+    pub fn property_declaration_node(&self, name: &str) -> Option<SyntaxNode> {
+        match self {
+            Self::Component(c) => c.root_element.borrow().property_declaration_node(name),
+            _ => None,
         }
     }
 
@@ -985,7 +997,12 @@ impl Display for Function {
             }
             write!(formatter, "{arg}")?;
         }
-        write!(formatter, ") -> {}", self.return_type)
+        let return_type = if self.return_type == Type::Void {
+            String::new()
+        } else {
+            format!(" -> {}", self.return_type)
+        };
+        write!(formatter, "){return_type}")
     }
 }
 
@@ -1030,6 +1047,7 @@ impl DeclNode {
 
 #[derive(Debug, Clone)]
 pub enum StructName {
+    /// Anonymous structs
     None,
     /// When declared in .slint as  `struct Foo { }`, then the name is "Foo"
     User {

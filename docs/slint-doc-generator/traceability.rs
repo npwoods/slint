@@ -23,11 +23,15 @@ const SPEC_PAGE_ORDER: &[&str] = &[
     "source-files",
     "lexical-structure",
     "file-structure",
+    "name-resolution",
     "imports",
     "exports",
     "properties",
     "bindings",
     "expressions",
+    "operators",
+    "callbacks",
+    "structs-and-enums",
     "geometry",
 ];
 
