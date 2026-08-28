@@ -4626,6 +4626,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "material-gallery"
+version = "1.18.0"
+dependencies = [
+ "chrono",
+ "console_error_panic_hook",
+ "css-color-parser2",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "matrixmultiply"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7614,7 +7628,7 @@ dependencies = [
 
 [[package]]
 name = "slint-material-components"
-version = "1.17.0"
+version = "1.18.0"
 
 [[package]]
 name = "slint-node"
