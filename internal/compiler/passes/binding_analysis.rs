@@ -169,7 +169,7 @@ impl From<NamedReference> for PropertyPath {
 struct AnalysisContext<'a> {
     visited: HashSet<PropertyPath>,
     /// The stack of properties that depends on each other
-    currently_analyzing: linked_hash_set::LinkedHashSet<PropertyPath>,
+    currently_analyzing: indexmap::IndexSet<PropertyPath>,
     /// When set, one of the property in the `currently_analyzing` stack is the window layout property
     /// And we should issue a warning if that's part of a loop instead of an error
     window_layout_property: Option<PropertyPath>,
@@ -316,7 +316,7 @@ fn analyze_binding(
     let mut depends_on_external = DependsOnExternal(false);
     let element = current.prop.element();
     let name = current.prop.name();
-    if (context.currently_analyzing.back() == Some(current))
+    if (context.currently_analyzing.last() == Some(current))
         && !element
             .borrow()
             .binding_cell_including_synthetic(name)
@@ -345,12 +345,13 @@ fn analyze_binding(
             if !out.is_empty() {
                 out.push_str(" -> ");
             }
+            let name = prop.prop.declared_name();
             match prop.prop.element().borrow().id.as_str() {
-                "" => out.push_str(prop.prop.name()),
+                "" => out.push_str(&name),
                 id => {
                     out.push_str(id);
                     out.push('.');
-                    out.push_str(prop.prop.name());
+                    out.push_str(&name);
                 }
             }
         }
@@ -382,9 +383,9 @@ fn analyze_binding(
             // they have no location in the source. The rest of the loop is still reported.
             if span.source_file.is_some() {
                 if !context.error_on_binding_loop_with_window_layout && has_window_layout {
-                    diag.push_warning(format!("The binding for the property '{}' is part of a binding loop ({loop_description}).\nThis was allowed in previous version of Slint, but is deprecated and may cause panic at runtime", p.name()), &span);
+                    diag.push_warning(format!("The binding for the property '{}' is part of a binding loop ({loop_description}).\nThis was allowed in previous version of Slint, but is deprecated and may cause panic at runtime", p.declared_name()), &span);
                 } else {
-                    diag.push_error(format!("The binding for the property '{}' is part of a binding loop ({loop_description})", p.name()), &span);
+                    diag.push_error(format!("The binding for the property '{}' is part of a binding loop ({loop_description})", p.declared_name()), &span);
                 }
             }
             if it == current {
@@ -495,7 +496,7 @@ fn analyze_binding(
         None => (),
     }
 
-    let o = context.currently_analyzing.pop_back();
+    let o = context.currently_analyzing.pop();
     assert_eq!(&o.unwrap(), current);
 
     depends_on_external
@@ -677,7 +678,7 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -687,7 +688,7 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
@@ -701,12 +702,12 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -718,11 +719,7 @@ fn recurse_expression(
                 match layout.axis_relation(orientation) {
                     FlexboxAxisRelation::MainAxis => {
                         // Main axis: only visit same-axis item dependencies
-                        visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
-                            orientation,
-                            vis,
-                        );
+                        visit_layout_items_dependencies(layout.elems.iter(), orientation, vis);
                     }
                     FlexboxAxisRelation::CrossAxis => {
                         // Cross axis: depends on the perpendicular (main-axis)
@@ -744,12 +741,12 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -759,12 +756,12 @@ fn recurse_expression(
                         // dependencies but NOT perpendicular dimensions (adding
                         // those leads to binding loops for runtime direction).
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );

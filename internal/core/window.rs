@@ -1093,7 +1093,7 @@ impl WindowInner {
     ///
     /// Drag and drop is the one kind of input that backends don't deliver through
     /// [`crate::api::Window::dispatch_event_with_result()`]:
-    /// they need the negotiated action back, which [`crate::api::WindowEventDispatchResult`] can't express,
+    /// they need the negotiated action back, which [`crate::platform::WindowEventDispatchResult`] can't express,
     /// and a drag leaving the window isn't the pointer leaving the window.
     /// These events have no [`crate::platform::WindowEvent`] representation either,
     /// so nothing is lost for the window event hook.
@@ -1466,7 +1466,6 @@ impl WindowInner {
         match item {
             Some(item) => {
                 *self.focus_item.borrow_mut() = item.downgrade();
-                self.track_focus_item_visibility(item);
                 let result = item.borrow().as_ref().focus_event(
                     &FocusEvent::FocusIn(reason),
                     &self.window_adapter(),
@@ -1474,6 +1473,7 @@ impl WindowInner {
                 );
                 // Reveal offscreen item when it gains focus
                 if result == crate::input::FocusEventResult::FocusAccepted {
+                    self.track_focus_item_visibility(item);
                     item.try_scroll_into_visible();
                 }
 
@@ -1517,8 +1517,13 @@ impl WindowInner {
         forward: impl Fn(ItemRc) -> ItemRc,
         reason: FocusReason,
     ) -> Option<ItemRc> {
-        let mut current_item = start_item;
-        let mut visited = Vec::new();
+        let mut current_item = start_item.clone();
+        // The walk normally comes back to `start_item`, but ends in a cycle that misses it
+        // when the tree changed under it, e.g. when the focus was on a removed item.
+        // Comparing against a checkpoint (Brent's cycle detection) still terminates then.
+        let mut checkpoint = start_item.clone();
+        let mut steps = 0usize;
+        let mut next_checkpoint = 1usize;
 
         loop {
             let can_receive_focus = match reason {
@@ -1532,11 +1537,16 @@ impl WindowInner {
             {
                 return Some(current_item); // Item was just published.
             }
-            visited.push(current_item.clone());
             current_item = forward(current_item);
 
-            if visited.contains(&current_item) {
+            if current_item == start_item || current_item == checkpoint {
                 return None; // Nothing to do: We took the focus_item already
+            }
+            steps += 1;
+            if steps == next_checkpoint {
+                checkpoint = current_item.clone();
+                steps = 0;
+                next_checkpoint *= 2;
             }
         }
     }
@@ -1757,6 +1767,10 @@ impl WindowInner {
         ) -> T,
     ) -> Option<T> {
         crate::properties::evaluate_no_tracking(|| self.ensure_tree_instantiated());
+        #[cfg(feature = "shared-parley")]
+        if let Some(cache) = self.window_adapter().renderer().text_layout_cache() {
+            cache.begin_frame();
+        }
         let component_weak = ItemTreeRc::downgrade(&self.try_component()?);
         let post_render = |renderer: &mut dyn crate::item_rendering::ItemRenderer| {
             self.render_drag_image_overlay(renderer);

@@ -13,12 +13,14 @@
         "codemap",
         "concat",
         "Consts",
+        "desugars",
         "evenodd",
         "FBOs", // plural of FBO (frame buffer object)
         "fontdb",
         "fullscreen",
         "glutin",
         "glutin's",
+        "hookable",
         "maxx",
         "maxy",
         "minx",
@@ -98,7 +100,9 @@
         "TSCHÜSS",
         "ὈΔΥΣΣΕΎΣ",
         "ὀδυσσεύς",
+        "animatable",
         "commonmark",
+        "newtype",
         "strikethroughs",
         "unlocalized",
         "binstall"
@@ -205,6 +209,7 @@
     "scrollview",
     "SDK",
     "seti",
+    "sharedparley",
     "sixtyfps",
     "skia",
     "slint",
@@ -375,6 +380,17 @@
     "**/node_modules/**"
   ],
   "overrides": [
+    {
+      "filename": "tools/editor/ui-tests/**",
+      "words": [
+        "backslashreplace",
+        "lineterm",
+        "testpaths",
+        "tofile",
+        "worksteal",
+        "xdist"
+      ]
+    },
     {
       "filename": "demos/printerdemo/lang/fr/**",
       "language": "en,fr",

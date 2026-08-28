@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
 use crate::langtype::Type;
+use crate::langtype::{ElementType, PropertyLookupMode};
 use crate::layout::*;
 use crate::object_tree::*;
 use crate::typeloader::TypeLoader;
@@ -198,13 +198,17 @@ pub(crate) fn synthesize_layoutinfo_h_with_constraint_on(
 }
 
 /// Same as `rewrite_layoutinfo_v_for_constraint`, but for the horizontal
-/// axis. Only `ComputeFlexboxLayoutInfo` and `PropertyReference` are
-/// rewritten — there's no width-for-height equivalent in box/grid
-/// layouts, and `ImplicitLayoutInfo(Horizontal)` on a non-component
-/// element doesn't depend on `self.height`.
+/// axis. Grids are not rewritten (no width-for-height path there), and
+/// `ImplicitLayoutInfo(Horizontal)` on a non-component element doesn't
+/// depend on `self.height` (there is no builtin width-for-height item).
 fn rewrite_layoutinfo_h_for_constraint(expr: &mut Expression, height_param: &Expression) {
     expr.visit_recursive_mut(&mut |sub| match sub {
-        Expression::ComputeFlexboxLayoutInfo {
+        Expression::ComputeBoxLayoutInfo {
+            orientation: Orientation::Horizontal,
+            cross_axis_size,
+            ..
+        }
+        | Expression::ComputeFlexboxLayoutInfo {
             orientation: Orientation::Horizontal,
             cross_axis_size,
             ..
@@ -238,6 +242,67 @@ fn rewrite_layoutinfo_h_for_constraint(expr: &mut Expression, height_param: &Exp
             }
         }
         _ => {}
+    });
+}
+
+/// Record on every cell of a GridLayout whether solving that grid's horizontal
+/// axis can read back into its vertical cache — see
+/// [`crate::layout::GridLayoutCell::h_solve_reads_v_cache`].
+///
+/// Only a *repeated* width-for-height cell does that: the grid measures it
+/// through its plain `layout_info_h`, which pulls the instance's own height,
+/// and that height comes from the grid's vertical cache. A static cell is
+/// measured at an unbounded height instead (see `cell_layout_info`), and any
+/// other way for a cell's horizontal info to reach its own height is a binding
+/// loop `binding_analysis` already rejects.
+///
+/// Must run after `synthesize_layoutinfo_h_with_constraint` (the marker it
+/// tests is created there) and after the wrapper-injecting passes (an injected
+/// `Opacity`/`Transform` takes over the cell role).
+pub fn mark_grid_h_solve_reads_v_cache(component: &Rc<Component>) {
+    /// The element carrying the layout-info: a repeated cell moved its body
+    /// into a sub-component.
+    fn measured_element(elem: &ElementRc) -> ElementRc {
+        let elem_b = elem.borrow();
+        match (&elem_b.repeated, &elem_b.base_type) {
+            (Some(_), ElementType::Component(base)) => base.root_element.clone(),
+            _ => elem.clone(),
+        }
+    }
+    fn reads_v_cache(grid: &GridLayout) -> bool {
+        grid.elems.iter().any(|e| {
+            if e.item.element.borrow().repeated.is_none() {
+                return false;
+            }
+            if measured_element(&e.item.element)
+                .borrow()
+                .has_inherited_layout_info_h_with_constraint()
+            {
+                return true;
+            }
+            // A repeated Row measures its children the same unconstrained way.
+            e.cell.borrow().child_items.iter().flatten().any(|c| {
+                measured_element(&c.layout_item().element)
+                    .borrow()
+                    .has_inherited_layout_info_h_with_constraint()
+            })
+        })
+    }
+    // Every binding holds its own clone of the `GridLayout`, so stamp them all
+    // rather than relying on the cells still being shared through their `Rc`.
+    crate::object_tree::visit_all_expressions(component, |expr, _| {
+        expr.visit_recursive_mut(&mut |sub| {
+            let grid = match sub {
+                Expression::OrganizeGridLayout(grid) => grid,
+                Expression::SolveGridLayout { layout, .. } => layout,
+                Expression::ComputeGridLayoutInfo { layout, .. } => layout,
+                _ => return,
+            };
+            let unsafe_h = reads_v_cache(grid);
+            for e in &grid.elems {
+                e.cell.borrow_mut().h_solve_reads_v_cache = unsafe_h;
+            }
+        });
     });
 }
 
@@ -498,7 +563,7 @@ fn lower_element_layout(
         None
     };
 
-    check_no_layout_properties(elem, &layout_type, parent_layout_type, type_register, diag);
+    check_no_layout_properties(elem, &layout_type, parent_layout_type, diag);
 
     match layout_type.as_ref()?.as_str() {
         "Row" => return layout_type,
@@ -521,7 +586,7 @@ fn lower_element_layout(
     // Create fake properties for the layout properties
     // like alignment, spacing, spacing-horizontal, spacing-vertical
     for (p, ty) in prev_base.property_list() {
-        if !elem.base_type.lookup_property(&p).is_valid()
+        if !elem.base_type.lookup_property(&p, PropertyLookupMode::ComponentLocal).is_valid()
             && !elem.property_declarations.contains_key(&p)
         {
             elem.property_declarations.insert(p, ty.into());
@@ -1067,6 +1132,7 @@ impl GridLayout {
                     colspan_expr: colspan_expr.unwrap_or(RowColExpr::Literal(1)),
                     rowspan_expr: rowspan_expr.unwrap_or(RowColExpr::Literal(1)),
                     child_items: None,
+                    h_solve_reads_v_cache: false,
                 }));
                 // Attach to the element the solver reads: the sub-component root for an inner
                 // repeater (so it reports its own colspan/rowspan), or `child` for a static child.
@@ -1186,6 +1252,7 @@ impl GridLayout {
                 colspan_expr: RowColExpr::Literal(1),
                 rowspan_expr: RowColExpr::Literal(1),
                 child_items: Some(children_layout_items),
+                h_solve_reads_v_cache: false,
             }));
             let grid_layout_element = GridLayoutElement {
                 cell: grid_layout_cell.clone(),
@@ -1257,6 +1324,7 @@ impl GridLayout {
             colspan_expr: expr_or_default(colspan_expr, RowColExpr::Literal(1)),
             rowspan_expr: expr_or_default(rowspan_expr, RowColExpr::Literal(1)),
             child_items: None,
+            h_solve_reads_v_cache: false,
         }));
         let grid_layout_element =
             GridLayoutElement { cell: grid_layout_cell.clone(), item: layout_item.item.clone() };
@@ -1691,11 +1759,13 @@ fn lower_box_layout(
     // needs to know whether any cell sets `cross-axis-self-alignment`.
     let items: Vec<_> =
         layout_children.iter().map(|child| create_layout_item(child, diag)).collect();
-    // A repeated cell with `cross-axis-self-alignment` returns that value through
-    // the generated `layout_item_info`, which needs the layout's orientation to
-    // restrict it to the cross axis.
+    // A repeated cell needs the layout's orientation: `lower_to_item_tree` uses
+    // it to restrict a `cross-axis-self-alignment` to the cross axis and a
+    // `layout-order` to the main axis, and to generate
+    // `layout_item_info_at_cross_width` / `_at_cross_height` for a
+    // height-for-width (resp. width-for-height) instance.
     for item in &items {
-        if item.repeater_index.is_some() && item.item.cross_axis_self_alignment.is_some() {
+        if item.repeater_index.is_some() {
             item.elem.borrow_mut().parent_box_layout_orientation = Some(orientation);
         }
     }
@@ -1829,16 +1899,6 @@ fn lower_box_layout(
 }
 
 fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics) {
-    // Warn if alignment is set to stretch, which behaves like start in flexbox
-    // (CSS spec: justify-content:stretch acts as flex-start for flex items)
-    if let Some(binding) = layout_element.borrow().binding("alignment")
-        && matches!(binding.value_expression(),
-            Expression::EnumerationValue(v) if v.enumeration.name == "LayoutAlignment"
-                && v.enumeration.values[v.value] == "stretch")
-    {
-        diag.push_warning("alignment: stretch has no effect on FlexboxLayout".into(), &*binding);
-    }
-
     let direction = crate::layout::binding_reference(layout_element, "flex-direction");
     let cross_axis_line_alignment =
         crate::layout::binding_reference(layout_element, "cross-axis-line-alignment");
@@ -1906,8 +1966,7 @@ fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics)
                 diag,
             );
         }
-        let order = crate::layout::binding_reference(actual_elem, "layout-order");
-        layout.elems.push(crate::layout::FlexboxLayoutItem { item: item.item, order });
+        layout.elems.push(item.item);
     }
     layout_element.borrow_mut().children = layout_children;
     let span = layout_element.borrow().to_source_location();
@@ -2013,8 +2072,7 @@ fn lower_dialog_layout(
         let dialog_button_role_binding =
             layout_child.borrow_mut().take_binding("dialog-button-role");
         let is_button = if let Some(role_binding) = dialog_button_role_binding {
-            if let Expression::EnumerationValue(val) =
-                super::ignore_debug_hooks(&role_binding.expression)
+            if let Expression::EnumerationValue(val) = role_binding.expression.ignore_debug_hooks()
             {
                 let en = &val.enumeration;
                 debug_assert_eq!(en.name, "DialogButtonRole");
@@ -2032,7 +2090,7 @@ fn lower_dialog_layout(
                 );
             }
             true
-        } else if matches!(&layout_child.borrow().lookup_property("kind").property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
+        } else if matches!(&layout_child.borrow().lookup_property("kind", PropertyLookupMode::ComponentLocal).property_type, Type::Enumeration(e) if e.name == "StandardButtonKind")
         {
             // layout_child is a StandardButton
             match layout_child.borrow().binding("kind") {
@@ -2042,7 +2100,7 @@ fn lower_dialog_layout(
                 ),
                 Some(binding) => {
                     if let Expression::EnumerationValue(val) =
-                        super::ignore_debug_hooks(&binding.expression)
+                        binding.expression.ignore_debug_hooks()
                     {
                         let en = &val.enumeration;
                         debug_assert_eq!(en.name, "StandardButtonKind");
@@ -2073,8 +2131,10 @@ fn lower_dialog_layout(
                                 .unwrap()
                                 .root_element,
                         ) {
-                            let clicked_ty =
-                                layout_child.borrow().lookup_property("clicked").property_type;
+                            let clicked_ty = layout_child
+                                .borrow()
+                                .lookup_property("clicked", PropertyLookupMode::ComponentLocal)
+                                .property_type;
                             if matches!(&clicked_ty, Type::Callback { .. })
                                 && layout_child.borrow().binding("clicked").is_none_or(|c| {
                                     matches!(c.value_expression(), Expression::Invalid)
@@ -2094,7 +2154,8 @@ fn lower_dialog_layout(
                                         )),
                                         visibility: PropertyVisibility::InOut,
                                         pure: None,
-                                        shadows_builtin: false,
+                                        shadowed_name: None,
+                                        shadowable: false,
                                         moved_to_root: false,
                                         deprecated: None,
                                     });
@@ -2279,8 +2340,14 @@ fn create_layout_item(
     let constraints = LayoutConstraints::new(&actual_elem, Some((diag, DiagnosticLevel::Error)));
     let cross_axis_self_alignment =
         crate::layout::binding_reference(&actual_elem, "cross-axis-self-alignment");
+    let layout_order = crate::layout::binding_reference(&actual_elem, "layout-order");
     CreateLayoutItemResult {
-        item: LayoutItem { element: item_element.clone(), constraints, cross_axis_self_alignment },
+        item: LayoutItem {
+            element: item_element.clone(),
+            constraints,
+            cross_axis_self_alignment,
+            layout_order,
+        },
         elem: actual_elem,
         repeater_index,
     }
@@ -2513,7 +2580,7 @@ fn check_number_literal_is_positive_integer(
     span: &dyn crate::diagnostics::Spanned,
     diag: &mut BuildDiagnostics,
 ) -> bool {
-    match super::ignore_debug_hooks(expression) {
+    match expression.ignore_debug_hooks() {
         Expression::NumberLiteral(v, Unit::None) => {
             if *v > u16::MAX as f64 || !v.trunc().approx_eq(v) {
                 diag.push_error(format!("'{name}' must be a positive integer"), span);
@@ -2521,7 +2588,7 @@ fn check_number_literal_is_positive_integer(
             true
         }
         Expression::UnaryOp { op: '-', sub } => {
-            if let Expression::NumberLiteral(_, Unit::None) = super::ignore_debug_hooks(sub) {
+            if let Expression::NumberLiteral(_, Unit::None) = sub.ignore_debug_hooks() {
                 diag.push_error(format!("'{name}' must be a positive integer"), span);
             }
             true
@@ -2542,7 +2609,6 @@ fn check_no_layout_properties(
     item: &ElementRc,
     layout_type: &Option<SmolStr>,
     parent_layout_type: &Option<SmolStr>,
-    type_register: &TypeRegister,
     diag: &mut BuildDiagnostics,
 ) {
     let elem = item.borrow();
@@ -2552,15 +2618,7 @@ fn check_no_layout_properties(
         {
             diag.push_error(format!("{prop} used outside of a GridLayout's cell"), &*expr.borrow());
         }
-        if prop == "layout-order" {
-            if parent_layout_type.as_deref() != Some("FlexboxLayout") {
-                diag.push_error(format!("{prop} used outside of a FlexboxLayout"), &*expr.borrow());
-            } else {
-                // Not stable API yet: extending it to the box layouts is still open.
-                crate::reject_experimental_feature(diag, type_register, prop, &*expr.borrow());
-            }
-        }
-        if prop == "cross-axis-self-alignment"
+        if matches!(prop.as_ref(), "layout-order" | "cross-axis-self-alignment")
             && !matches!(
                 parent_layout_type.as_deref(),
                 Some("FlexboxLayout" | "HorizontalLayout" | "VerticalLayout")

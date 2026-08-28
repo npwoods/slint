@@ -48,9 +48,10 @@ pub const RESERVED_GRIDLAYOUT_PROPERTIES: &[(&str, Type)] = &[
     ("rowspan", Type::Int32),
 ];
 
-// Note: the per-item cross-axis-self-alignment (flexbox and box layouts) is added
-// in reserved_properties() because Type::Enumeration requires a runtime Arc allocation.
-pub const RESERVED_FLEXBOXLAYOUT_PROPERTIES: &[(&str, Type)] = &[("layout-order", Type::Int32)];
+// Per-item properties of a FlexboxLayout, HorizontalLayout or VerticalLayout cell.
+// Note: cross-axis-self-alignment is added in reserved_properties() instead,
+// because Type::Enumeration requires a runtime Arc allocation.
+pub const RESERVED_LAYOUT_CELL_PROPERTIES: &[(&str, Type)] = &[("layout-order", Type::Int32)];
 
 macro_rules! declare_enums {
     ($( $(#[$enum_doc:meta])* $vis:vis enum $Name:ident { $( $(#[$value_doc:meta])* $Value:ident,)* })*) => {
@@ -88,7 +89,7 @@ pub struct BuiltinTypes {
     pub enums: BuiltinEnums,
     pub noarg_callback_type: Type,
     pub strarg_callback_type: Type,
-    pub set_selection_callback_type: Type,
+    pub set_selection_offsets_callback_type: Type,
     pub logical_point_type: Arc<Struct>,
     pub logical_size_type: Arc<Struct>,
     pub font_metrics_type: Type,
@@ -164,7 +165,7 @@ impl BuiltinTypes {
                 args: vec![Type::String],
                 arg_names: Vec::new(),
             })),
-            set_selection_callback_type: Type::Callback(Arc::new(Function {
+            set_selection_offsets_callback_type: Type::Callback(Arc::new(Function {
                 return_type: Type::Void,
                 args: vec![Type::Int32, Type::Int32],
                 arg_names: vec![SmolStr::new_static("anchor"), SmolStr::new_static("focus")],
@@ -190,6 +191,7 @@ impl BuiltinTypes {
                         "cross-axis-self-alignment".into(),
                         Type::Enumeration(enums.CrossAxisSelfAlignment.clone()),
                     ),
+                    ("layout-order".into(), Type::Int32),
                 ])
                 .collect(),
                 BuiltinStruct::LayoutItemInfo,
@@ -266,8 +268,8 @@ fn strarg_callback_type() -> Type {
     BUILTIN.strarg_callback_type.clone()
 }
 
-fn set_selection_callback_type() -> Type {
-    BUILTIN.set_selection_callback_type.clone()
+fn set_selection_offsets_callback_type() -> Type {
+    BUILTIN.set_selection_offsets_callback_type.clone()
 }
 
 pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str, Type)> {
@@ -291,7 +293,7 @@ pub fn reserved_accessibility_properties() -> impl Iterator<Item = (&'static str
         ("accessible-action-increment", noarg_callback_type()),
         ("accessible-action-decrement", noarg_callback_type()),
         ("accessible-action-set-value", strarg_callback_type()),
-        ("accessible-action-set-selection", set_selection_callback_type()),
+        ("accessible-action-set-selection-offsets", set_selection_offsets_callback_type()),
         ("accessible-action-expand", noarg_callback_type()),
         ("accessible-item-selectable", Type::Bool),
         ("accessible-item-selected", Type::Bool),
@@ -324,7 +326,7 @@ pub fn reserved_properties() -> impl Iterator<Item = (&'static str, Type, Proper
                 .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Input)),
         )
         .chain(
-            RESERVED_FLEXBOXLAYOUT_PROPERTIES
+            RESERVED_LAYOUT_CELL_PROPERTIES
                 .iter()
                 .map(|(k, v)| (*k, v.clone(), PropertyVisibility::Input)),
         )
@@ -395,6 +397,7 @@ pub fn reserved_property(name: std::borrow::Cow<'_, str>) -> PropertyLookupResul
             property_visibility: visibility,
             declared_pure: None,
             builtin_function,
+            internal_name: None,
             deprecated: None,
         };
     }
@@ -417,6 +420,7 @@ pub fn reserved_property(name: std::borrow::Cow<'_, str>) -> PropertyLookupResul
                         builtin_function: None,
                         #[cfg(feature = "slint-sc")]
                         is_slint_sc: false,
+                        internal_name: None,
                         deprecated: None,
                     };
                 }

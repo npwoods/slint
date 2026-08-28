@@ -163,22 +163,41 @@ pub trait RendererSealed {
             .unwrap_or_default()
     }
 
+    /// The height of one line of text: what a shaped single-line layout reports, without
+    /// shaping. `None` means the caller must measure through [`Self::text_size`].
+    fn text_line_height(
+        &self,
+        font_request: crate::graphics::FontRequest,
+    ) -> Option<LogicalLength> {
+        #[cfg(feature = "shared-parley")]
+        {
+            let ctx = self.slint_context()?;
+            let mut font_ctx = ctx.font_context().borrow_mut();
+            crate::textlayout::sharedparley::text_line_height(&mut font_ctx, &font_request)
+        }
+        #[cfg(not(feature = "shared-parley"))]
+        {
+            let _ = font_request;
+            None
+        }
+    }
+
     /// Returns the (UTF-8) byte offset in the text property that refers to the character that contributed to
     /// the glyph cluster that's visually nearest to the given coordinate. This is used for hit-testing,
     /// for example when receiving a mouse click into a text field. Then this function returns the "cursor"
-    /// position.
+    /// position. The affinity says which visual position was hit (differs only at a soft break).
     #[cfg(not(feature = "shared-parley"))]
     fn text_input_byte_offset_for_position(
         &self,
         text_input: Pin<&crate::items::TextInput>,
         item_rc: &ItemRc,
         pos: LogicalPoint,
-    ) -> usize;
+    ) -> (usize, crate::items::TextCursorAffinity);
 
     /// Returns the (UTF-8) byte offset in the text property that refers to the character that contributed to
     /// the glyph cluster that's visually nearest to the given coordinate. This is used for hit-testing,
     /// for example when receiving a mouse click into a text field. Then this function returns the "cursor"
-    /// position.
+    /// position. The affinity says which visual position was hit (differs only at a soft break).
     ///
     /// The default implementation uses the shared parley text layout with [`Self::text_layout_cache`].
     #[cfg(feature = "shared-parley")]
@@ -187,7 +206,7 @@ pub trait RendererSealed {
         text_input: Pin<&crate::items::TextInput>,
         item_rc: &ItemRc,
         pos: LogicalPoint,
-    ) -> usize {
+    ) -> (usize, crate::items::TextCursorAffinity) {
         crate::textlayout::sharedparley::text_input_byte_offset_for_position(
             self,
             text_input,
@@ -200,17 +219,20 @@ pub trait RendererSealed {
     /// That's the opposite of [`Self::text_input_byte_offset_for_position`]
     /// It takes a (UTF-8) byte offset in the text property, and returns a Rectangle
     /// left to the char. It is one logical pixel wide and ends at the baseline.
+    /// An offset at a soft line break has one rectangle per line; `affinity` picks between them.
     #[cfg(not(feature = "shared-parley"))]
     fn text_input_cursor_rect_for_byte_offset(
         &self,
         text_input: Pin<&crate::items::TextInput>,
         item_rc: &ItemRc,
         byte_offset: usize,
+        affinity: crate::items::TextCursorAffinity,
     ) -> LogicalRect;
 
     /// That's the opposite of [`Self::text_input_byte_offset_for_position`]
     /// It takes a (UTF-8) byte offset in the text property, and returns a Rectangle
     /// left to the char. It is one logical pixel wide and ends at the baseline.
+    /// An offset at a soft line break has one rectangle per line; `affinity` picks between them.
     ///
     /// The default implementation uses the shared parley text layout with [`Self::text_layout_cache`].
     #[cfg(feature = "shared-parley")]
@@ -219,12 +241,14 @@ pub trait RendererSealed {
         text_input: Pin<&crate::items::TextInput>,
         item_rc: &ItemRc,
         byte_offset: usize,
+        affinity: crate::items::TextCursorAffinity,
     ) -> LogicalRect {
         crate::textlayout::sharedparley::text_input_cursor_rect_for_byte_offset(
             self,
             text_input,
             item_rc,
             byte_offset,
+            affinity,
             self.text_layout_cache(),
         )
     }

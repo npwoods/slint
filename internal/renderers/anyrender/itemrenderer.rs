@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyrender::PaintScene;
 use i_slint_core::graphics::ResolvedBrush;
 use i_slint_core::graphics::euclid;
-use i_slint_core::graphics::{Image, ImageCacheKey, IntRect, SharedImageBuffer, SharedPixelBuffer};
+use i_slint_core::graphics::{Image, ImageCacheKey, SharedImageBuffer, SharedPixelBuffer};
 use i_slint_core::item_rendering::{
     BorderRectLayout, CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle,
     RenderImage, RenderRectangle, RenderText,
@@ -39,6 +39,7 @@ struct RenderState {
     clip_rect: LogicalRect,
     transform: kurbo::Affine,
     layer_count: usize,
+    alpha: f32,
 }
 
 pub struct AnyrenderItemRenderer<'a, S: PaintScene> {
@@ -102,12 +103,17 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                 ),
                 transform: initial_transform,
                 layer_count: 0,
+                alpha: 1.,
             },
         }
     }
 }
 
 impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
+    fn global_alpha_transparent(&self) -> bool {
+        self.current_state.alpha == 0.0
+    }
+
     fn draw_rectangle(
         &mut self,
         rect: Pin<&dyn RenderRectangle>,
@@ -693,6 +699,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
     }
 
     fn apply_opacity(&mut self, opacity: f32) {
+        self.current_state.alpha *= opacity;
         if opacity < 1.0 {
             // The layer is popped again by restore_state().
             self.push_unclipped_layer(peniko::BlendMode::default(), opacity);
@@ -1180,21 +1187,13 @@ fn load_image(
         ),
         ImageInner::Svg(svg) => {
             // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
-            let svg_size = svg.size();
-            let fit = i_slint_core::graphics::fit(
+            let render_size = i_slint_core::graphics::scalable_render_size(
+                svg.size(),
                 image_fit,
                 target_size_fn() * scale_factor,
-                IntRect::from_size(svg_size.cast()),
                 scale_factor,
-                Default::default(), // We only care about the size, so alignments don't matter
                 Default::default(),
-            );
-            let target_size = PhysicalSize::new(
-                svg_size.cast::<f32>().width * fit.source_to_target_x,
-                svg_size.cast::<f32>().height * fit.source_to_target_y,
-            );
-            let render_size: euclid::Size2D<u32, i_slint_core::lengths::PhysicalPx> =
-                target_size.cast();
+            )?;
             image_cache.borrow_mut().get_or_insert(
                 ImageCacheKey::new(image_inner),
                 ImageVariant::Sized { width: render_size.width, height: render_size.height },

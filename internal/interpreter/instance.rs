@@ -43,6 +43,15 @@ impl RepeaterOrConditional {
         }
     }
 
+    /// Call `cb` with the index and z value of every instance, for a repeated or
+    /// conditional element whose z value is dynamic.
+    pub fn for_each_instance_z(&self, cb: &mut dyn FnMut(u32, f32)) {
+        match self {
+            Self::Repeater(r) => Pin::as_ref(r).for_each_instance_z(cb),
+            Self::Conditional(c) => Pin::as_ref(c).for_each_instance_z(cb),
+        }
+    }
+
     pub fn range(&self) -> core::ops::Range<usize> {
         match self {
             Self::Repeater(r) => r.range(),
@@ -203,6 +212,9 @@ pub struct Instance {
     /// `(sub_component_path, ItemInstanceIdx)` that owns it. `None`
     /// entries correspond to dynamic-tree nodes.
     pub item_table: Box<[Option<(Box<[SubComponentInstanceIdx]>, ItemInstanceIdx)>]>,
+    /// Parallel table mapping each flat tree index whose children are dynamically
+    /// z-ordered to the per-child z sources. `None` for every other node.
+    pub z_sort_table: Box<[Option<Vec<llr::ZSource>>]>,
     pub globals: Rc<GlobalStorage>,
     pub self_weak: OnceCell<VWeak<ItemTreeVTable, Instance>>,
     /// When this `Instance` is a repeated entry, points back to the parent
@@ -581,6 +593,43 @@ impl Instance {
         repeater.visit(order, visitor)
     }
 
+    /// Push one `(child_offset, instance, z)` entry per child of the node at `index`
+    /// (whose children must be z-ordered, see `z_sort_table`), expanding repeated
+    /// children with per-instance z to one entry per instance. This is the `collect_z`
+    /// callback for [`i_slint_core::item_tree::visit_item_tree_z_sorted`].
+    pub fn collect_z_sorted_children(
+        self: Pin<&Self>,
+        index: isize,
+        push: &mut dyn FnMut(u32, Option<u32>, f32),
+    ) {
+        let Some(Some(sources)) = self.z_sort_table.get(index as usize) else { return };
+        let ItemTreeNode::Item { children_index, .. } = self.tree_nodes[index as usize] else {
+            return;
+        };
+        let mut ctx = crate::eval::EvalContext::new(self.root_sub_component.clone());
+        for (k, source) in sources.iter().enumerate() {
+            let child_offset = k as u32;
+            match source {
+                llr::ZSource::Expression(e) => {
+                    let z: f64 = crate::eval::eval_expression(&mut ctx, &e.borrow())
+                        .try_into()
+                        .unwrap_or(0.0);
+                    push(child_offset, None, z as f32);
+                }
+                llr::ZSource::RepeaterInstances => {
+                    // The child is a `DynamicTree` node; its `dynamic_table` entry holds the repeater.
+                    if let Some((sub, rep_idx)) =
+                        self.get_ref().dynamic_at(children_index + child_offset)
+                    {
+                        sub.repeaters[rep_idx].for_each_instance_z(&mut |instance, z| {
+                            push(child_offset, Some(instance), z)
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Build an instance for a public component.
     ///
     /// Properties are default-valued, then `bindings::install_bindings` wires
@@ -715,13 +764,14 @@ fn build_instance(
     let parent_for_root = parent.clone();
     let root_sub_component =
         build_sub_component_instance(compilation_unit, item_tree.root, parent_for_root);
-    let (tree_nodes, dynamic_table, item_table) = build_tree_nodes(&item_tree.tree);
+    let (tree_nodes, dynamic_table, item_table, z_sort_table) = build_tree_nodes(&item_tree.tree);
 
     let vrc = VRc::new(Instance {
         root_sub_component,
         tree_nodes: tree_nodes.into_boxed_slice(),
         dynamic_table: dynamic_table.into_boxed_slice(),
         item_table: item_table.into_boxed_slice(),
+        z_sort_table: z_sort_table.into_boxed_slice(),
         globals,
         self_weak: OnceCell::new(),
         parent_instance: parent,
@@ -955,22 +1005,26 @@ impl i_slint_core::model::ListViewProperties for ValueListViewProps {
 
 type DynamicEntry = Option<(Box<[SubComponentInstanceIdx]>, RepeatedElementIdx)>;
 type ItemEntry = Option<(Box<[SubComponentInstanceIdx]>, ItemInstanceIdx)>;
+type ZSortEntry = Option<Vec<llr::ZSource>>;
 
 /// Flatten an LLR [`llr::TreeNode`] into the `ItemTreeNode` slice expected by
-/// the `get_item_tree` vtable entry, plus two parallel tables: one mapping
-/// flat indices to the dynamic repeaters they represent, and one mapping
-/// static flat indices to the sub-component path + items slot that owns them.
+/// the `get_item_tree` vtable entry, plus three parallel tables: one mapping
+/// flat indices to the dynamic repeaters they represent, one mapping static
+/// flat indices to the sub-component path + items slot that owns them, and one
+/// mapping flat indices whose children are dynamically z-ordered to the per-child
+/// z sources.
 ///
 /// Walks in the same order as [`llr::TreeNode::visit_in_array`], so flat
 /// indices match what the rest of the runtime expects.
 fn build_tree_nodes(
     root: &llr::TreeNode,
-) -> (Vec<ItemTreeNode>, Vec<DynamicEntry>, Vec<ItemEntry>) {
+) -> (Vec<ItemTreeNode>, Vec<DynamicEntry>, Vec<ItemEntry>, Vec<ZSortEntry>) {
     use itertools::Either;
 
     let mut out = Vec::new();
     let mut dyn_table: Vec<DynamicEntry> = Vec::new();
     let mut item_table: Vec<ItemEntry> = Vec::new();
+    let mut z_sort_table: Vec<ZSortEntry> = Vec::new();
     root.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
         let (entry, dyn_entry, item_entry) = match node.item_index {
@@ -1006,8 +1060,42 @@ fn build_tree_nodes(
         out.push(entry);
         dyn_table.push(dyn_entry);
         item_table.push(item_entry);
+        z_sort_table.push(node.z_sort_order_property.clone());
     });
-    (out, dyn_table, item_table)
+    (out, dyn_table, item_table, z_sort_table)
+}
+
+/// The cell's `cross-axis-self-alignment` in a box layout, returned for the
+/// cross axis only, so the main-axis cache stays independent of it.
+fn repeated_align_self(
+    sc: &i_slint_compiler::llr::SubComponent,
+    ctx: &mut crate::eval::EvalContext,
+    orientation: i_slint_core::items::Orientation,
+) -> i_slint_core::items::CrossAxisSelfAlignment {
+    match &sc.cross_axis_self_alignment_for_repeated {
+        Some((cross_o, expr)) if crate::eval::llr_to_core_orientation(*cross_o) == orientation => {
+            crate::eval::eval_expression(ctx, &expr.borrow()).try_into().unwrap_or_default()
+        }
+        _ => Default::default(),
+    }
+}
+
+/// The cell's `layout-order` in a box layout, returned for the main axis
+/// only: only that solve reorders the cells.
+fn repeated_layout_order(
+    sc: &i_slint_compiler::llr::SubComponent,
+    ctx: &mut crate::eval::EvalContext,
+    orientation: i_slint_core::items::Orientation,
+) -> i32 {
+    match &sc.layout_order_for_repeated {
+        Some((main_o, expr)) if crate::eval::llr_to_core_orientation(*main_o) == orientation => {
+            match crate::eval::eval_expression(ctx, &expr.borrow()) {
+                crate::Value::Number(n) => n as i32,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// Lets [`Instance`] be used inside a `Repeater<C>`.
@@ -1046,6 +1134,19 @@ impl i_slint_core::model::RepeatedItemTree for Instance {
         {
             finalize_instance(&vrc);
         }
+    }
+
+    fn z_order(self: Pin<&Self>) -> Option<f32> {
+        // The z reference resolves in the repeated element's own context, so evaluate
+        // it against this instance.
+        let this = self.get_ref();
+        let (parent_weak, rep_idx) = this.root_sub_component.repeated_in.get()?;
+        let parent_sub = parent_weak.upgrade()?;
+        let parent_sc = &parent_sub.compilation_unit.sub_components[parent_sub.sub_component_idx];
+        let z_ref = parent_sc.repeated[*rep_idx].dynamic_z.as_ref()?;
+        let ctx = crate::eval::EvalContext::new(this.root_sub_component.clone());
+        let z: f64 = crate::eval::load_property(&ctx, z_ref).try_into().unwrap_or(0.0);
+        Some(z as f32)
     }
 
     fn listview_layout(
@@ -1113,19 +1214,28 @@ impl i_slint_core::model::RepeatedItemTree for Instance {
         let mut ctx = crate::eval::EvalContext::new(this.root_sub_component.clone());
         let constraint =
             crate::eval::eval_expression(&mut ctx, &expr).try_into().unwrap_or_default();
-        // The cell's `cross-axis-self-alignment` in a box layout, returned for
-        // the cross axis only, so the main-axis cache stays independent of it.
-        let cross_axis_self_alignment = match &sc.cross_axis_self_alignment_for_repeated {
-            Some((cross_o, align_expr))
-                if crate::eval::llr_to_core_orientation(*cross_o) == orientation =>
-            {
-                crate::eval::eval_expression(&mut ctx, &align_expr.borrow())
-                    .try_into()
-                    .unwrap_or_default()
-            }
-            _ => Default::default(),
-        };
-        i_slint_core::layout::LayoutItemInfo { constraint, cross_axis_self_alignment }
+        i_slint_core::layout::LayoutItemInfo {
+            constraint,
+            cross_axis_self_alignment: repeated_align_self(sc, &mut ctx, orientation),
+            layout_order: repeated_layout_order(sc, &mut ctx, orientation),
+        }
+    }
+
+    fn layout_item_info_at_cross_width(
+        self: Pin<&Self>,
+        cross_width: f32,
+    ) -> i_slint_core::layout::LayoutItemInfo {
+        self.box_layout_item_info_at_cross(i_slint_core::items::Orientation::Vertical, cross_width)
+    }
+
+    fn layout_item_info_at_cross_height(
+        self: Pin<&Self>,
+        cross_height: f32,
+    ) -> i_slint_core::layout::LayoutItemInfo {
+        self.box_layout_item_info_at_cross(
+            i_slint_core::items::Orientation::Horizontal,
+            cross_height,
+        )
     }
 
     fn flexbox_layout_item_info(
@@ -1183,12 +1293,59 @@ impl i_slint_core::model::RepeatedItemTree for Instance {
 }
 
 impl Instance {
+    /// Shared body of the box-layout `layout_item_info_at_cross_width` /
+    /// `_at_cross_height` accessors: measure the instance at the cross size a
+    /// box layout lays it out at. The `cross-axis-self-alignment` only
+    /// matters on the cross-axis pass, so it stays `Auto` here.
+    /// For a flexbox cell the stored expression was built without re-applying
+    /// inherited constraints (see
+    /// `get_layout_info_v_at_cross_width_for_repeated`), so fall back to the
+    /// plain info like the generated Rust and C++ code do.
+    fn box_layout_item_info_at_cross(
+        self: Pin<&Self>,
+        orientation: i_slint_core::items::Orientation,
+        cross_size: f32,
+    ) -> i_slint_core::layout::LayoutItemInfo {
+        use i_slint_compiler::llr::lower_layout_expression::{
+            CROSS_HEIGHT_LOCAL, CROSS_WIDTH_LOCAL,
+        };
+        let cu = self.root_sub_component.compilation_unit.clone();
+        let sc = &cu.sub_components[self.root_sub_component.sub_component_idx];
+        let (expr, local) = match orientation {
+            i_slint_core::items::Orientation::Vertical => {
+                (sc.layout_info_v_at_cross_width_for_repeated.as_ref(), CROSS_WIDTH_LOCAL)
+            }
+            i_slint_core::items::Orientation::Horizontal => {
+                (sc.layout_info_h_at_cross_height_for_repeated.as_ref(), CROSS_HEIGHT_LOCAL)
+            }
+        };
+        let Some(expr) = expr.filter(|_| sc.flexbox_layout_item_info_for_repeated.is_none()) else {
+            return i_slint_core::model::RepeatedItemTree::layout_item_info(
+                self,
+                orientation,
+                None,
+            );
+        };
+        let mut ctx = crate::eval::EvalContext::new(self.root_sub_component.clone());
+        ctx.locals.insert(local.into(), crate::Value::Number(cross_size as f64));
+        let constraint =
+            crate::eval::eval_expression(&mut ctx, &expr.borrow()).try_into().unwrap_or_default();
+        // The per-item fields are the same as in `layout_item_info`, which is
+        // not called here: it measures the constraint through `layout_info`,
+        // which is what this accessor exists to avoid.
+        i_slint_core::layout::LayoutItemInfo {
+            constraint,
+            cross_axis_self_alignment: repeated_align_self(sc, &mut ctx, orientation),
+            layout_order: repeated_layout_order(sc, &mut ctx, orientation),
+        }
+    }
+
     /// Vertical flexbox info for a repeated instance measured at the container
     /// cross width instead of its own preferred width, so a height-for-width
     /// cell wraps to the same height as an equivalent static cell.
     pub fn flexbox_layout_item_info_at_cross_width(
         self: Pin<&Self>,
-        flex_cross_width: f32,
+        cross_width: f32,
     ) -> i_slint_core::layout::FlexboxLayoutItemInfo {
         use i_slint_core::items::Orientation;
         use i_slint_core::model::RepeatedItemTree;
@@ -1199,8 +1356,8 @@ impl Instance {
         if let Some(v_expr) = &sc.layout_info_v_at_cross_width_for_repeated {
             let mut ctx = crate::eval::EvalContext::new(self.root_sub_component.clone());
             ctx.locals.insert(
-                i_slint_compiler::llr::lower_layout_expression::FLEX_CROSS_WIDTH_LOCAL.into(),
-                crate::Value::Number(flex_cross_width as f64),
+                i_slint_compiler::llr::lower_layout_expression::CROSS_WIDTH_LOCAL.into(),
+                crate::Value::Number(cross_width as f64),
             );
             info.constraint = crate::eval::eval_expression(&mut ctx, &v_expr.borrow())
                 .try_into()
@@ -1214,7 +1371,7 @@ impl Instance {
     /// an equivalent static cell.
     pub fn flexbox_layout_item_info_at_cross_height(
         self: Pin<&Self>,
-        flex_cross_height: f32,
+        cross_height: f32,
     ) -> i_slint_core::layout::FlexboxLayoutItemInfo {
         use i_slint_core::items::Orientation;
         use i_slint_core::model::RepeatedItemTree;
@@ -1225,8 +1382,8 @@ impl Instance {
         if let Some(h_expr) = &sc.layout_info_h_at_cross_height_for_repeated {
             let mut ctx = crate::eval::EvalContext::new(self.root_sub_component.clone());
             ctx.locals.insert(
-                i_slint_compiler::llr::lower_layout_expression::FLEX_CROSS_HEIGHT_LOCAL.into(),
-                crate::Value::Number(flex_cross_height as f64),
+                i_slint_compiler::llr::lower_layout_expression::CROSS_HEIGHT_LOCAL.into(),
+                crate::Value::Number(cross_height as f64),
             );
             info.constraint = crate::eval::eval_expression(&mut ctx, &h_expr.borrow())
                 .try_into()
@@ -1248,6 +1405,9 @@ fn row_child_layout_item_info(
 ) -> i_slint_core::layout::LayoutItemInfo {
     use i_slint_compiler::llr::RowChildTemplateInfo;
     use i_slint_core::model::RepeatedItemTree;
+    // `index` is consumed as the walk advances; the cache read below addresses
+    // the child by its flattened index.
+    let flat_index = index;
     for entry in templates {
         match entry {
             RowChildTemplateInfo::Static { child_index } => {
@@ -1270,12 +1430,24 @@ fn row_child_layout_item_info(
                 }
                 index -= 1;
             }
-            RowChildTemplateInfo::Repeated { repeater_index } => {
+            RowChildTemplateInfo::Repeated { repeater_index, measure_at_cross_width } => {
                 let repeater = &this.root_sub_component.repeaters[*repeater_index];
                 repeater.track_instance_changes();
                 let count = repeater.range().len();
                 if index < count {
                     if let Some(inner) = repeater.instance_at(index) {
+                        // A GridLayout measures an inner repeated child at the
+                        // column width it assigns it, like a static child
+                        // measures at its own (lazily pulled) width.
+                        if *measure_at_cross_width
+                            && orientation == i_slint_core::items::Orientation::Vertical
+                            && let Some(w) = row_child_cross_width(this, sc, flat_index)
+                        {
+                            return RepeatedItemTree::layout_item_info_at_cross_width(
+                                inner.as_pin_ref(),
+                                w,
+                            );
+                        }
                         return RepeatedItemTree::layout_item_info(
                             inner.as_pin_ref(),
                             orientation,
@@ -1289,6 +1461,23 @@ fn row_child_layout_item_info(
         }
     }
     i_slint_core::layout::LayoutItemInfo::default()
+}
+
+/// Evaluate a repeated Row's `grid_row_child_cross_width` for one child.
+/// `None` when the Row has no such expression, or on a non-numeric value —
+/// the caller then falls back to the plain layout info rather than measuring
+/// at 0.
+fn row_child_cross_width(
+    this: &Instance,
+    sc: &i_slint_compiler::llr::SubComponent,
+    flat_index: usize,
+) -> Option<f32> {
+    use i_slint_compiler::llr::lower_layout_expression::GRID_MEASURE_CHILD_INDEX_LOCAL;
+    let expr = sc.grid_row_child_cross_width.as_ref()?;
+    let mut ctx = crate::eval::EvalContext::new(this.root_sub_component.clone());
+    ctx.locals
+        .insert(GRID_MEASURE_CHILD_INDEX_LOCAL.into(), crate::Value::Number(flat_index as f64));
+    crate::eval::eval_expression(&mut ctx, &expr.borrow()).try_into().ok()
 }
 
 fn value_to_flexbox_layout_item_info(

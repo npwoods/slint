@@ -18,6 +18,10 @@ use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp, OperatorCla
 use crate::langtype::{DeclNode, Enumeration, EnumerationValue, Struct, StructName, Type};
 use crate::layout::Orientation;
 use crate::llr::lower_expression::lower_constant_expression;
+use crate::llr::lower_layout_expression::{
+    CROSS_HEIGHT_LOCAL, CROSS_WIDTH_LOCAL, GRID_MEASURE_CHILD_INDEX_LOCAL,
+    GRID_MEASURE_REPEATER_INDEX_LOCAL, MEASURE_KNOWN_H_LOCAL, MEASURE_KNOWN_W_LOCAL,
+};
 use crate::llr::{
     self, ArrayOutput, EvaluationContext as llr_EvaluationContext, EvaluationScope, Expression,
     ParentScope, TypeResolutionContext as _,
@@ -212,8 +216,7 @@ pub fn generate(
         return Ok(Default::default());
     }
 
-    let (structs_and_enums_ids, inner_module) =
-        generate_types(&doc.used_types.borrow().structs_and_enums, &llr);
+    let inner_module = generate_types(&doc.used_types.borrow().structs_and_enums, &llr);
 
     let sub_compos = llr
         .used_sub_components
@@ -248,13 +251,14 @@ pub fn generate(
     let compo_ids = llr.public_components.iter().map(|c| ident(&c.name));
 
     let resource_symbols = generate_resources(doc);
-    let named_exports = generate_named_exports(&doc.exports);
     // The inner module was meant to be internal private, but projects have been reaching into it
     // so we can't change the name of this module
     let generated_mod = doc
         .last_exported_component()
         .map(|c| format_ident!("slint_generated{}", ident(&c.id)))
         .unwrap_or_else(|| format_ident!("slint_generated"));
+
+    let (type_reexports, deprecated_type_exports) = type_exports(&llr, &generated_mod);
 
     #[cfg(not(feature = "bundle-translations"))]
     let translations = quote!();
@@ -276,7 +280,8 @@ pub fn generate(
             #translations
         }
         #[allow(unused_imports)]
-        pub use #generated_mod::{#(#compo_ids,)* #(#structs_and_enums_ids,)* #(#globals_ids,)* #(#named_exports,)* #(#global_exports,)*};
+        pub use #generated_mod::{#(#compo_ids,)* #(#type_reexports,)* #(#globals_ids,)* #(#global_exports,)*};
+        #(#deprecated_type_exports)*
         #[allow(unused_imports)]
         pub use slint::{ComponentHandle as _, Global as _, ModelExt as _};
     })
@@ -285,7 +290,7 @@ pub fn generate(
 pub(super) fn generate_module_header() -> TokenStream {
     quote! {
         #![allow(non_snake_case, non_camel_case_types)]
-        #![allow(unused_braces, unused_parens)]
+        #![allow(unused_braces, unused_parens, dead_code)]
         #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
         #![allow(unknown_lints, if_let_rescope, tail_expr_drop_order)] // We don't have fancy Drop
 
@@ -295,24 +300,18 @@ pub(super) fn generate_module_header() -> TokenStream {
     }
 }
 
-/// Generate the struct and enums. Return a vector of names to import and a token stream with the inner module
-pub fn generate_types(
-    used_types: &[Type],
-    unit: &llr::CompilationUnit,
-) -> (Vec<Ident>, TokenStream) {
-    let (structs_and_enums_ids, structs_and_enum_def): (Vec<_>, Vec<_>) = used_types
-        .iter()
-        .filter_map(|ty| match ty {
-            Type::Struct(s) => match s.as_ref() {
-                the_struct @ Struct { name: StructName::User { name, .. }, .. } => {
-                    Some((ident(name), generate_struct(the_struct, unit)))
-                }
-                _ => None,
-            },
-            Type::Enumeration(en) => Some((ident(&en.name), generate_enum(en))),
+/// Generate the definitions of the structs and enums, as the inner module's token stream.
+pub fn generate_types(used_types: &[Type], unit: &llr::CompilationUnit) -> TokenStream {
+    let structs_and_enum_def = used_types.iter().filter_map(|ty| match ty {
+        Type::Struct(s) => match s.as_ref() {
+            the_struct @ Struct { name: StructName::User { .. }, .. } => {
+                Some(generate_struct(the_struct, unit))
+            }
             _ => None,
-        })
-        .unzip();
+        },
+        Type::Enumeration(en) => Some(generate_enum(en)),
+        _ => None,
+    });
 
     let version_check = format_ident!(
         "VersionCheck_{}_{}_{}",
@@ -321,12 +320,39 @@ pub fn generate_types(
         env!("CARGO_PKG_VERSION_PATCH"),
     );
 
-    let inner_module = quote! {
+    quote! {
         #(#structs_and_enum_def)*
         const _THE_SAME_VERSION_MUST_BE_USED_FOR_THE_COMPILER_AND_THE_RUNTIME : slint::#version_check = slint::#version_check;
-    };
+    }
+}
 
-    (structs_and_enums_ids, inner_module)
+/// Render the re-exports of [`llr::CompilationUnit::type_exports`]: `pub use` for a type
+/// exposed under a name, and a deprecated `pub type` alias for one kept only for backward
+/// compatibility. Returns the `pub use` items (spliced into the module's use list) and the
+/// deprecated aliases (emitted as standalone items).
+pub(super) fn type_exports(
+    unit: &llr::CompilationUnit,
+    generated_mod: &Ident,
+) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let mut reexports = Vec::new();
+    let mut deprecated_type_exports = Vec::new();
+    for e in &unit.type_exports {
+        let exported = ident(&e.exported_name);
+        let internal = ident(&e.internal_name);
+        if let Some(note) = e.deprecation_note() {
+            // A `#[deprecated] pub use` does not warn on use, but a deprecated type alias does.
+            deprecated_type_exports.push(quote! {
+                #[deprecated(note = #note)]
+                #[allow(dead_code)]
+                pub type #exported = #generated_mod::#internal;
+            });
+        } else if e.is_alias() {
+            reexports.push(quote!(#internal as #exported));
+        } else {
+            reexports.push(quote!(#exported));
+        }
+    }
+    (reexports, deprecated_type_exports)
 }
 
 fn generate_public_component(
@@ -1756,6 +1782,18 @@ fn generate_sub_component(
             }
         });
 
+    let layout_order_for_repeated_fn =
+        component.layout_order_for_repeated.as_ref().map(|(_, expr)| {
+            let expr = compile_expression(&expr.borrow(), &ctx);
+            quote! {
+                fn layout_order_for_repeated(self: ::core::pin::Pin<&Self>) -> i32 {
+                    #![allow(unused)]
+                    let _self = self;
+                    #expr
+                }
+            }
+        });
+
     // FIXME! this is only public because of the ComponentHandle::WeakInner. we should find another way
     let visibility = parent_ctx.is_none().then(|| quote!(pub));
 
@@ -1918,6 +1956,8 @@ fn generate_sub_component(
             #flexbox_layout_item_info_for_repeated_fn
 
             #cross_axis_self_alignment_for_repeated_fn
+
+            #layout_order_for_repeated_fn
 
             fn subtree_range(self: ::core::pin::Pin<&Self>, dyn_index: u32) -> sp::IndexRange {
                 #![allow(unused)]
@@ -2344,12 +2384,18 @@ fn generate_item_tree(
             }
         }
     }));
-    let mut item_tree_array = Vec::new();
+    let mut item_tree_array: Vec<TokenStream> = Vec::new();
     let mut item_array = Vec::new();
+    let mut z_sorted_nodes: Vec<(usize, &llr::TreeNode)> = Vec::new();
     sub_tree.tree.visit_in_array(&mut |node, children_offset, parent_index| {
         let parent_index = parent_index as u32;
         let (_, component) =
             follow_sub_component_path(root, sub_tree.root, &node.sub_component_path);
+
+        if node.z_sort_order_property.is_some() {
+            z_sorted_nodes.push((item_tree_array.len(), node));
+        }
+
         match node.item_index {
             Either::Right(mut repeater_index) => {
                 assert_eq!(node.children.len(), 0);
@@ -2459,6 +2505,73 @@ fn generate_item_tree(
         )
     };
 
+    let default_call = quote!(sp::visit_item_tree(
+        &sp::VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap()),
+        self.get_item_tree().as_slice(),
+        index,
+        order,
+        visitor,
+        &mut |order, visitor, dyn_index| self.visit_dynamic_children(dyn_index, order, visitor),
+    ));
+    let z_sorted_visit_body = if z_sorted_nodes.is_empty() {
+        quote!(return #default_call;)
+    } else {
+        let ctx = EvaluationContext::new_sub_component(
+            root,
+            sub_tree.root,
+            RustGeneratorContext { global_access: quote!(_self.globals.get().unwrap()) },
+            parent_ctx,
+        );
+        let z_match_arms = z_sorted_nodes.iter().map(|(node_idx, node)| {
+            let idx_lit = *node_idx as isize;
+            let sources = node.z_sort_order_property.as_ref().unwrap();
+            // The closure pushes one (child_offset, instance, z) entry per child, or one
+            // per instance for repeated children with per-instance z; the runtime sorts
+            // the entries and visits them in z order.
+            let pushes = sources.iter().zip(&node.children).enumerate().map(|(k, (source, child))| {
+                let k = k as u32;
+                match source {
+                    llr::ZSource::Expression(e) => {
+                        let e = compile_expression(&e.borrow(), &ctx);
+                        quote!(push(#k, sp::None, #e as f32);)
+                    }
+                    llr::ZSource::RepeaterInstances => {
+                        let itertools::Either::Right(repeater_index) = child.item_index else {
+                            unreachable!("per-instance z is only set on repeated children")
+                        };
+                        let (compo_path, sub_component) =
+                            follow_sub_component_path(root, sub_tree.root, &child.sub_component_path);
+                        let rep_field = access_component_field_offset(
+                            &self::inner_component_id(sub_component),
+                            &format_ident!("repeater{}", repeater_index),
+                        );
+                        quote!((#compo_path #rep_field).apply_pin(_self).for_each_instance_z(&mut |instance, z| push(#k, sp::Some(instance), z));)
+                    }
+                }
+            });
+            quote! {
+                #idx_lit => {
+                    return sp::visit_item_tree_z_sorted(
+                        &sp::VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap()),
+                        self.get_item_tree().as_slice(),
+                        index,
+                        order,
+                        visitor,
+                        &mut |order, visitor, dyn_index| self.visit_dynamic_children(dyn_index, order, visitor),
+                        &mut |push| { #(#pushes)* },
+                    );
+                }
+            }
+        });
+        quote! {
+            let _self = self;
+            match index {
+                #(#z_match_arms)*
+                _ => return #default_call,
+            }
+        }
+    };
+
     quote!(
         #sub_comp
 
@@ -2499,15 +2612,7 @@ fn generate_item_tree(
             fn visit_children_item(self: ::core::pin::Pin<&Self>, index: isize, order: sp::TraversalOrder, visitor: sp::ItemVisitorRefMut<'_>)
                 -> sp::VisitChildrenResult
             {
-                let item_tree = sp::VRcMapped::origin(&self.as_ref().self_weak.get().unwrap().upgrade().unwrap());
-                sp::visit_item_tree(
-                    &item_tree,
-                    self.get_item_tree().as_slice(),
-                    index,
-                    order,
-                    visitor,
-                    &mut |order, visitor, dyn_index| self.visit_dynamic_children(dyn_index, order, visitor),
-                )
+                #z_sorted_visit_body
             }
 
             fn get_item_ref(self: ::core::pin::Pin<&Self>, index: u32) -> ::core::pin::Pin<sp::ItemRef<'_>> {
@@ -2650,7 +2755,7 @@ fn generate_repeated_component(
                         write_idx += 1;
                         static_idx += 1;
                     },
-                    llr::RowChildTemplateInfo::Repeated { repeater_index } => {
+                    llr::RowChildTemplateInfo::Repeated { repeater_index, .. } => {
                         let inner_rep_id =
                             format_ident!("repeater{}", usize::from(*repeater_index));
                         quote! {
@@ -2746,12 +2851,26 @@ fn generate_repeated_component(
                     ::core::default::Default::default()
                 },)
             });
+        // Likewise `layout-order`, for the main axis only: it just reorders that
+        // solve.
+        let order_field = root_sc.layout_order_for_repeated.as_ref().map(|(main_o, _)| {
+            let main_o = match main_o {
+                Orientation::Horizontal => quote!(sp::Orientation::Horizontal),
+                Orientation::Vertical => quote!(sp::Orientation::Vertical),
+            };
+            quote!(layout_order: if o == #main_o {
+                self.as_ref().layout_order_for_repeated()
+            } else {
+                0
+            },)
+        });
         let layout_item_info_fn = root_sc.child_of_layout.then(|| {
             // Generate layout_item_info (from the RepeatedItemTree trait) in terms of ItemTree::layout_info
             if root_sc.is_repeated_row {
-                // Repeated grid Rows cannot carry cross-axis-self-alignment; the
-                // row-scan literals below default the field.
+                // Repeated grid Rows cannot carry per-item box layout properties;
+                // the row-scan literals below default those fields.
                 debug_assert!(root_sc.cross_axis_self_alignment_for_repeated.is_none());
+                debug_assert!(root_sc.layout_order_for_repeated.is_none());
                 // Create a context with proper global_access for compiling layout info expressions
                 let layout_ctx = EvaluationContext {
                     compilation_unit: unit,
@@ -2765,6 +2884,25 @@ fn generate_repeated_component(
                     argument_types: &[],
                 };
 
+                // A GridLayout measures an inner repeated child at the column
+                // width it assigns it, like the static children measure at
+                // their own (lazily pulled) width.
+                let inner_constraint = |measure_at_cross_width: bool| {
+                    let Some(e) =
+                        root_sc.grid_row_child_cross_width.as_ref().filter(|_| measure_at_cross_width)
+                    else {
+                        return quote!(inner.as_pin_ref().layout_info(o));
+                    };
+                    let idx = ident(GRID_MEASURE_CHILD_INDEX_LOCAL);
+                    let w = compile_expression(&e.borrow(), &layout_ctx);
+                    quote!(match o {
+                        sp::Orientation::Vertical => inner
+                            .as_pin_ref()
+                            .layout_item_info_at_cross_width(({ let #idx = index; #w }) as f32)
+                            .constraint,
+                        sp::Orientation::Horizontal => inner.as_pin_ref().layout_info(o),
+                    })
+                };
                 let body = if let Some(templates) = &root_sc.row_child_templates {
                     // Generate a sequential scan through all templates in declaration order.
                     // For each Static: check if count == index and return the precomputed info.
@@ -2796,9 +2934,13 @@ fn generate_repeated_component(
                                     #advance
                                 }
                             }
-                            llr::RowChildTemplateInfo::Repeated { repeater_index } => {
+                            llr::RowChildTemplateInfo::Repeated {
+                                repeater_index,
+                                measure_at_cross_width,
+                            } => {
                                 let inner_rep_id =
                                     format_ident!("repeater{}", usize::from(*repeater_index));
+                                let inner_constraint = inner_constraint(*measure_at_cross_width);
                                 let advance = (!is_last).then(|| quote! { count += inner_len; });
                                 quote! {
                                     {
@@ -2807,7 +2949,7 @@ fn generate_repeated_component(
                                         if index >= count && index - count < inner_len {
                                             if let Some(inner) = _self.#inner_rep_id.instance_at(index - count) {
                                                 return sp::LayoutItemInfo {
-                                                    constraint: inner.as_pin_ref().layout_info(o),
+                                                    constraint: #inner_constraint,
                                                     ..::core::default::Default::default()
                                                 };
                                             }
@@ -2827,12 +2969,12 @@ fn generate_repeated_component(
                             #(#scan_steps)*
                             sp::LayoutItemInfo::default()
                         } else {
-                            sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field ..::core::default::Default::default() }
+                            sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field #order_field ..::core::default::Default::default() }
                         }
                     }
                 } else {
                     quote! {
-                        sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field ..::core::default::Default::default() }
+                        sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field #order_field ..::core::default::Default::default() }
                     }
                 };
 
@@ -2852,7 +2994,7 @@ fn generate_repeated_component(
                         o: sp::Orientation,
                         _child_index: sp::Option<usize>,
                     ) -> sp::LayoutItemInfo {
-                        sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field ..::core::default::Default::default() }
+                        sp::LayoutItemInfo { constraint: self.as_ref().layout_info(o), #align_self_field #order_field ..::core::default::Default::default() }
                     }
                 }
             }
@@ -2878,7 +3020,7 @@ fn generate_repeated_component(
                 // so a height-for-width instance wraps to the same height as an
                 // equivalent static cell (instead of the preferred-width single
                 // line that `flexbox_layout_item_info` returns). The expression
-                // reads the `flex_cross_width` local (matches FLEX_CROSS_WIDTH_LOCAL).
+                // reads the `cross_width` local (matches CROSS_WIDTH_LOCAL).
                 let at_cross_width_body = root_sc
                     .layout_info_v_at_cross_width_for_repeated
                     .as_ref()
@@ -2909,7 +3051,7 @@ fn generate_repeated_component(
                 // width-for-height instance resolves to the same width as an
                 // equivalent static cell (instead of the unbounded, unwrapped one
                 // that `flexbox_layout_item_info` returns). The expression reads
-                // the `flex_cross_height` local (matches FLEX_CROSS_HEIGHT_LOCAL).
+                // the `cross_height` local (matches CROSS_HEIGHT_LOCAL).
                 let at_cross_height_body = root_sc
                     .layout_info_h_at_cross_height_for_repeated
                     .as_ref()
@@ -2923,6 +3065,8 @@ fn generate_repeated_component(
                                 self.layout_item_info(sp::Orientation::Horizontal, sp::None).constraint;
                         }
                     });
+                let cross_width_param = ident(CROSS_WIDTH_LOCAL);
+                let cross_height_param = ident(CROSS_HEIGHT_LOCAL);
                 quote! {
                     fn flexbox_layout_item_info(
                         self: ::core::pin::Pin<&Self>,
@@ -2940,7 +3084,7 @@ fn generate_repeated_component(
                     #[allow(unused_variables)]
                     fn flexbox_layout_item_info_at_cross_width(
                         self: ::core::pin::Pin<&Self>,
-                        flex_cross_width: f32,
+                        #cross_width_param: f32,
                     ) -> sp::FlexboxLayoutItemInfo {
                         #[allow(unused)]
                         let _self = self.as_ref();
@@ -2951,7 +3095,7 @@ fn generate_repeated_component(
                     #[allow(unused_variables)]
                     fn flexbox_layout_item_info_at_cross_height(
                         self: ::core::pin::Pin<&Self>,
-                        flex_cross_height: f32,
+                        #cross_height_param: f32,
                     ) -> sp::FlexboxLayoutItemInfo {
                         #[allow(unused)]
                         let _self = self.as_ref();
@@ -2961,9 +3105,56 @@ fn generate_repeated_component(
                     }
                 }
             });
+        // A box layout calls these with the cross size it lays the instance
+        // out at, so a height-for-width (resp. width-for-height) instance
+        // measures like an equivalent static cell. Mirrors the flexbox
+        // `flexbox_layout_item_info_at_cross_*` pair; the trait default (the
+        // plain `layout_item_info`) covers the other repeated components.
+        // The per-item fields are the same as in `layout_item_info`; `o` is
+        // fixed per accessor, so bind it locally and reuse those guards. Don't
+        // delegate to `layout_item_info` for them: it measures the constraint
+        // through `layout_info`, which is what this accessor exists to avoid.
+        let layout_item_info_at_cross_fn =
+            |expr: Option<&llr::MutExpression>, fn_name: &str, param: &str, o: Orientation| {
+                expr.filter(|_| root_sc.flexbox_layout_item_info_for_repeated.is_none()).map(|e| {
+                let info = compile_expression(&e.borrow(), &ctx);
+                let fn_name = ident(fn_name);
+                let param = ident(param);
+                let o = match o {
+                    Orientation::Horizontal => quote!(sp::Orientation::Horizontal),
+                    Orientation::Vertical => quote!(sp::Orientation::Vertical),
+                };
+                quote! {
+                    fn #fn_name(
+                        self: ::core::pin::Pin<&Self>,
+                        #param: f32,
+                    ) -> sp::LayoutItemInfo {
+                        #[allow(unused)]
+                        let _self = self.as_ref();
+                        #[allow(unused)]
+                        let o = #o;
+                        sp::LayoutItemInfo { constraint: #info, #align_self_field #order_field ..::core::default::Default::default() }
+                    }
+                }
+            })
+            };
+        let layout_item_info_at_cross_width_fn = layout_item_info_at_cross_fn(
+            root_sc.layout_info_v_at_cross_width_for_repeated.as_ref(),
+            "layout_item_info_at_cross_width",
+            CROSS_WIDTH_LOCAL,
+            Orientation::Vertical,
+        );
+        let layout_item_info_at_cross_height_fn = layout_item_info_at_cross_fn(
+            root_sc.layout_info_h_at_cross_height_for_repeated.as_ref(),
+            "layout_item_info_at_cross_height",
+            CROSS_HEIGHT_LOCAL,
+            Orientation::Horizontal,
+        );
         quote! {
             #layout_item_info_fn
             #flexbox_layout_item_info_fn
+            #layout_item_info_at_cross_width_fn
+            #layout_item_info_at_cross_height_fn
             #grid_layout_input_data_fn
         }
     };
@@ -2983,6 +3174,21 @@ fn generate_repeated_component(
         let value_tokens = set_primitive_property_value(prop_type, quote!(_data));
         quote!(#data_prop.set(#value_tokens);)
     });
+    let z_order_fn = repeated.dynamic_z.as_ref().map(|z_ref| {
+        let ctx = EvaluationContext::new_sub_component(
+            unit,
+            repeated.sub_tree.root,
+            RustGeneratorContext { global_access: quote!(_self.globals.get().unwrap()) },
+            Some(parent_ctx),
+        );
+        let z_prop = access_member(z_ref, &ctx).get_property();
+        quote! {
+            fn z_order(self: ::core::pin::Pin<&Self>) -> sp::Option<f32> {
+                let _self = self;
+                sp::Some(#z_prop as f32)
+            }
+        }
+    });
 
     quote!(
         #component
@@ -3001,6 +3207,7 @@ fn generate_repeated_component(
                     sp::VRcMapped::map(self_rc, |x| x),
                 );
             }
+            #z_order_fn
             #extra_fn
         }
     )
@@ -3604,6 +3811,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             repeater_steps_var_name,
             elements,
             orientation,
+            repeated_cross_size,
             sub_expression,
         } => generate_with_layout_item_info(
             cells_variable,
@@ -3611,6 +3819,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             repeater_steps_var_name.as_ref().map(SmolStr::as_str),
             elements.as_ref(),
             *orientation,
+            repeated_cross_size.as_deref(),
             sub_expression,
             ctx,
         ),
@@ -3650,6 +3859,62 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             quote! { {
                 #closure
                 sp::flexbox_layout_info_cross_axis_with_measure(#(#a as _,)* Some(&mut measure))
+            } }
+        }
+
+        Expression::BoxLayoutInfoOrthoWithMeasure {
+            solve_data,
+            padding_ortho,
+            orientation,
+            measure_cells,
+        } => {
+            let data = compile_expression(solve_data, ctx);
+            let padding = compile_expression(padding_ortho, ctx);
+            let known_size_ident = match orientation {
+                Orientation::Vertical => ident(MEASURE_KNOWN_W_LOCAL),
+                Orientation::Horizontal => ident(MEASURE_KNOWN_H_LOCAL),
+            };
+            let at_cross_fn = match orientation {
+                Orientation::Vertical => quote!(layout_item_info_at_cross_width),
+                Orientation::Horizontal => quote!(layout_item_info_at_cross_height),
+            };
+            let steps = measure_cells.iter().map(|cell| match cell {
+                llr::BoxMeasureCell::Static { info } => {
+                    let info = compile_expression(info, ctx);
+                    quote!(
+                        {
+                            let #known_size_ident = box_ortho_solved.as_slice()[cursor * 2 + 1] as f32;
+                            let _ = #known_size_ident;
+                            cells_vec.push(sp::LayoutItemInfo { constraint: { #info }, ..::core::default::Default::default() });
+                            cursor += 1;
+                        }
+                    )
+                }
+                llr::BoxMeasureCell::Repeated(repeater) => {
+                    let repeater_id =
+                        format_ident!("repeater{}", usize::from(repeater.repeater_index));
+                    quote!(
+                        for i in 0.._self.#repeater_id.len() {
+                            if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
+                                cells_vec.push(sub_comp.as_pin_ref().#at_cross_fn(
+                                    box_ortho_solved.as_slice()[cursor * 2 + 1] as f32,
+                                ));
+                            } else {
+                                cells_vec.push(::core::default::Default::default());
+                            }
+                            cursor += 1;
+                        }
+                    )
+                }
+            });
+            let min_cell_count = measure_cells.len();
+            quote! { {
+                let box_ortho_solved = sp::solve_box_layout(&#data, sp::Slice::from_slice(&[]));
+                let mut cells_vec = sp::Vec::with_capacity(#min_cell_count);
+                let mut cursor = 0usize;
+                #(#steps)*
+                let _ = cursor;
+                sp::box_layout_info_ortho(sp::Slice::from_slice(&cells_vec), &#padding)
             } }
         }
 
@@ -4688,15 +4953,15 @@ fn compile_builtin_function_call(
             })
         }
         BuiltinFunction::SetSelectionOffsets => {
-            if let [llr::Expression::PropertyReference(pr), from, to] = arguments {
+            if let [llr::Expression::PropertyReference(pr), anchor_expr, focus_expr] = arguments {
                 let window_adapter_tokens = access_window_adapter_field(ctx);
-                let start = compile_expression(from, ctx);
-                let end = compile_expression(to, ctx);
+                let anchor = compile_expression(anchor_expr, ctx);
+                let focus = compile_expression(focus_expr, ctx);
 
                 item_owner(pr).then(|owner| {
                     let (item, item_rc) = native_item_from_owner(pr, ctx, &owner);
                     quote!(
-                        #item.set_selection_offsets(#window_adapter_tokens, &#item_rc, #start as i32, #end as i32)
+                        #item.set_selection_offsets(#window_adapter_tokens, &#item_rc, #anchor as i32, #focus as i32)
                     )
                 })
             } else {
@@ -4899,8 +5164,9 @@ fn compile_builtin_function_call(
             let index = a.next().unwrap();
             quote!({
                 let model = &#model;
-                let index = #index;
-                model.remove_row(index as isize);
+                if let Ok(index) = usize::try_from(#index) {
+                    model.remove_row(index);
+                }
             })
         }
         BuiltinFunction::ArrayInsert => {
@@ -4911,7 +5177,9 @@ fn compile_builtin_function_call(
                 let model = &#model;
                 let index = #index;
                 let value = #value;
-                model.insert_row(index as isize, value);
+                if let Ok(index) = usize::try_from(index) {
+                    model.insert_row(index, value);
+                }
             })
         }
         BuiltinFunction::Rgb => {
@@ -5016,7 +5284,7 @@ fn compile_builtin_function_call(
                         if sp::WindowInner::from_pub(#window_adapter_tokens.window()).supports_native_menu_bar() {
                             let menu_item_tree_dyn = sp::VRc::into_dyn(sp::VRc::clone(&menu_item_tree));
                             sp::WindowInner::from_pub(#window_adapter_tokens.window()).setup_menubar(menu_item_tree_dyn);
-                        } else
+                        }
                     }
                 }
             };
@@ -5024,7 +5292,9 @@ fn compile_builtin_function_call(
             quote!({
                 let menu_item_tree_instance = #item_tree_id::new(_self.self_weak.get().unwrap().clone()).unwrap();
                 #native_impl
-                /*else*/ {
+                // These handlers keep the menu item tree alive on the component; the native menu bar
+                // holds only a weak reference to it.
+                {
                     let menu_item_tree_ = sp::VRc::clone(&menu_item_tree);
                     #access_entries.set_binding(move || {
                         let mut entries = sp::SharedVector::default();
@@ -5346,7 +5616,7 @@ fn build_inner_track_and_len(
     templates
         .iter()
         .filter_map(|e| match e {
-            llr::RowChildTemplateInfo::Repeated { repeater_index } => {
+            llr::RowChildTemplateInfo::Repeated { repeater_index, .. } => {
                 let inner_rep_id = format_ident!("repeater{}", usize::from(*repeater_index));
                 Some(quote! {
                     #row_inner_component_id::FIELD_OFFSETS.#inner_rep_id().apply_pin(pin).track_instance_changes();
@@ -5536,11 +5806,20 @@ fn generate_with_layout_item_info(
     repeater_steps_var_name: Option<&str>,
     elements: &[Either<Expression, llr::LayoutRepeatedElement>],
     orientation: Orientation,
+    repeated_cross_size: Option<&Expression>,
     sub_expression: &Expression,
     ctx: &EvaluationContext,
 ) -> TokenStream {
     let repeated_indices_var_name = repeated_indices_var_name.map(ident);
     let repeater_steps_var_name = repeater_steps_var_name.map(ident);
+    // Cross-axis size forwarded to repeated cells on a box layout's main-axis
+    // pass, so a height-for-width (resp. width-for-height) instance measures
+    // at the size it is laid out at, like a static cell. Evaluated once, not
+    // per instance.
+    let cross_size_init = repeated_cross_size.map(|e| {
+        let cs = compile_expression(e, ctx);
+        quote!(let box_cross_size = (#cs) as f32;)
+    });
     let mut fixed_count = 0usize;
     let mut repeated_count_code = quote!();
     let mut push_code = Vec::new();
@@ -5553,6 +5832,14 @@ fn generate_with_layout_item_info(
                 push_code.push(quote!(items_vec.push(#value);))
             }
             Either::Right(repeater) => {
+                // A grid measures each instance at its own solved column width,
+                // read from the horizontal cache with the loop counter bound to
+                // `GRID_MEASURE_REPEATER_INDEX_LOCAL`.
+                let grid_cross_width = repeater.cross_width.as_ref().map(|e| {
+                    let idx = ident(GRID_MEASURE_REPEATER_INDEX_LOCAL);
+                    let w = compile_expression(e, ctx);
+                    quote!({ let #idx = i; #w })
+                });
                 let repeater_push_code = generate_repeater_push_code(
                     repeater.repeater_index,
                     &repeater.row_child_templates,
@@ -5562,6 +5849,9 @@ fn generate_with_layout_item_info(
                     &mut repeated_count_code,
                     ctx,
                     |repeater_id, static_count, inner_ensure_and_len, rs_init| {
+                        // Only box layouts set a cross size, and their repeaters
+                        // never have row templates.
+                        debug_assert!(cross_size_init.is_none());
                         quote!(
                             {
                                 let len = _self.#repeater_id.len();
@@ -5594,16 +5884,40 @@ fn generate_with_layout_item_info(
                             quote!()
                         } else if step == 1 && is_column_repeater {
                             // Column-repeater: each sub-component IS a cell; None returns its own layout_info
+                            let item_info = match (&cross_size_init, &grid_cross_width, orientation)
+                            {
+                                (Some(_), _, Orientation::Vertical) => quote!(
+                                    sub_comp
+                                        .as_pin_ref()
+                                        .layout_item_info_at_cross_width(box_cross_size)
+                                ),
+                                (Some(_), _, Orientation::Horizontal) => quote!(
+                                    sub_comp
+                                        .as_pin_ref()
+                                        .layout_item_info_at_cross_height(box_cross_size)
+                                ),
+                                (None, Some(w), _) => quote!(
+                                    sub_comp
+                                        .as_pin_ref()
+                                        .layout_item_info_at_cross_width((#w) as f32)
+                                ),
+                                (None, None, _) => quote!(
+                                    sub_comp.as_pin_ref().layout_item_info(#orientation, None)
+                                ),
+                            };
                             quote!(
                                 for i in 0.._self.#repeater_id.len() {
                                     if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
-                                       items_vec.push(sub_comp.as_pin_ref().layout_item_info(#orientation, None));
+                                       items_vec.push(#item_info);
                                     } else {
                                         items_vec.push(::core::default::Default::default());
                                     }
                                 }
                             )
                         } else {
+                            // Multi-step repeaters only exist in grids, which
+                            // never set a cross size.
+                            debug_assert!(cross_size_init.is_none());
                             quote!(
                                 for i in 0.._self.#repeater_id.len() {
                                     if let Some(sub_comp) = _self.#repeater_id.instance_at(i) {
@@ -5637,6 +5951,7 @@ fn generate_with_layout_item_info(
 
     quote! { {
         #ri_init_code
+        #cross_size_init
         let mut items_vec = sp::Vec::with_capacity(#fixed_count #repeated_count_code);
         #(#push_code)*
         let #cells_variable = sp::Slice::from_slice(&items_vec);
@@ -5787,8 +6102,8 @@ fn generate_flexbox_measure_closure(
     measure_cells: &[llr::FlexboxMeasureCell],
     ctx: &EvaluationContext,
 ) -> TokenStream {
-    let known_w_ident = ident("measure_known_w");
-    let known_h_ident = ident("measure_known_h");
+    let known_w_ident = ident(MEASURE_KNOWN_W_LOCAL);
+    let known_h_ident = ident(MEASURE_KNOWN_H_LOCAL);
     let has_repeater = measure_cells
         .iter()
         .any(|item| matches!(item.kind, llr::FlexboxMeasureCellKind::Repeated(_)));
@@ -6077,48 +6392,6 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
             }
         })
         .collect()
-}
-
-pub fn generate_named_exports(exports: &crate::object_tree::Exports) -> Vec<TokenStream> {
-    exports
-        .iter()
-        .filter_map(|export| match &export.1 {
-            Either::Left(component) if !component.is_global() => {
-                if export.0.name != component.id {
-                    Some((
-                        &export.0.name,
-                        proc_macro2::TokenTree::from(ident(&component.id)).into(),
-                    ))
-                } else {
-                    None
-                }
-            }
-            Either::Right(ty) => match &ty {
-                Type::Struct(s) if s.node().is_some() => {
-                    if let StructName::User { name, .. } = &s.name
-                        && *name == export.0.name
-                    {
-                        None
-                    } else {
-                        Some((&export.0.name, struct_name_to_tokens(&s.name).unwrap()))
-                    }
-                }
-                Type::Enumeration(en) => {
-                    if export.0.name != en.name {
-                        Some((&export.0.name, proc_macro2::TokenTree::from(ident(&en.name)).into()))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-        .map(|(export_name, type_id)| {
-            let export_id = ident(export_name);
-            quote!(#type_id as #export_id)
-        })
-        .collect::<Vec<_>>()
 }
 
 fn remove_parenthesis(

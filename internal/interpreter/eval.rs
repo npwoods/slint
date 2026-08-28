@@ -1031,9 +1031,17 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
             cells_variable,
             elements,
             orientation,
+            repeated_cross_size,
             sub_expression,
             ..
-        } => with_layout_item_info(ctx, cells_variable, elements, *orientation, sub_expression),
+        } => with_layout_item_info(
+            ctx,
+            cells_variable,
+            elements,
+            *orientation,
+            repeated_cross_size.as_deref(),
+            sub_expression,
+        ),
         Expression::WithFlexboxLayoutItemInfo {
             cells_h_variable,
             cells_v_variable,
@@ -1070,6 +1078,9 @@ pub fn eval_expression(ctx: &mut EvalContext, expression: &Expression) -> Value 
         Expression::FlexboxLayoutInfoCrossAxisWithMeasure { .. } => {
             crate::eval_layout::flexbox_layout_info_cross_axis_with_measure(ctx, expression)
         }
+        Expression::BoxLayoutInfoOrthoWithMeasure { .. } => {
+            crate::eval_layout::box_layout_info_ortho_with_measure(ctx, expression)
+        }
         Expression::TranslationReference { .. } => {
             // TranslationReference is only emitted when `bundle-translations`
             // is active, which the interpreter does not use. Runtime @tr()
@@ -1093,8 +1104,15 @@ fn with_layout_item_info(
     cells_variable: &str,
     elements: &[itertools::Either<Expression, i_slint_compiler::llr::LayoutRepeatedElement>],
     orientation: i_slint_compiler::layout::Orientation,
+    repeated_cross_size: Option<&Expression>,
     sub_expression: &Expression,
 ) -> Value {
+    // On a box layout's main-axis pass, re-measure each repeated cell at the
+    // layout's cross size so a height-for-width (resp. width-for-height)
+    // instance measures like an equivalent static cell. On a non-numeric
+    // value, fall back to the plain layout info rather than measuring at 0.
+    let cross_size: Option<f32> =
+        repeated_cross_size.and_then(|e| eval_expression(ctx, e).try_into().ok());
     let mut cells: Vec<Value> = Vec::with_capacity(elements.len());
     let mut repeated_indices: Vec<u32> = Vec::new();
     let mut repeater_steps: Vec<u32> = Vec::new();
@@ -1108,6 +1126,8 @@ fn with_layout_item_info(
                     repeater.repeater_index,
                     repeater.row_child_templates.as_deref(),
                     orientation,
+                    cross_size,
+                    repeater.cross_width.as_ref(),
                     &mut cells,
                 );
                 repeated_indices.push(offset);
@@ -1142,6 +1162,8 @@ fn push_repeater_layout_items(
     repeater_idx: i_slint_compiler::llr::RepeatedElementIdx,
     row_child_templates: Option<&[i_slint_compiler::llr::RowChildTemplateInfo]>,
     orientation: i_slint_compiler::layout::Orientation,
+    cross_size: Option<f32>,
+    grid_cross_width: Option<&Expression>,
     cells: &mut Vec<Value>,
 ) -> (u32, u32) {
     use i_slint_core::model::RepeatedItemTree;
@@ -1164,23 +1186,53 @@ fn push_repeater_layout_items(
                 ),
             );
         }
+        // Likewise `layout-order`, read back on the main-axis solve.
+        if info.layout_order != 0 {
+            struct_value
+                .set_field("layout-order".to_string(), Value::Number(info.layout_order as f64));
+        }
         cells.push(Value::Struct(struct_value));
     };
     let step = match row_child_templates {
         None => {
             // Column repeater: one cell per instance, asking the sub-component
-            // for its own layout info.
-            for instance in &instances {
-                let info = RepeatedItemTree::layout_item_info(
-                    instance.as_pin_ref(),
-                    core_orientation,
-                    None,
-                );
+            // for its own layout info — at the layout's cross size when the
+            // main-axis pass forwards one.
+            for (i, instance) in instances.iter().enumerate() {
+                let info = match (cross_size, core_orientation) {
+                    (Some(cs), i_slint_core::items::Orientation::Vertical) => {
+                        RepeatedItemTree::layout_item_info_at_cross_width(instance.as_pin_ref(), cs)
+                    }
+                    (Some(cs), i_slint_core::items::Orientation::Horizontal) => {
+                        RepeatedItemTree::layout_item_info_at_cross_height(
+                            instance.as_pin_ref(),
+                            cs,
+                        )
+                    }
+                    // A grid re-measures each instance at its own solved
+                    // column width instead of one size shared by all cells.
+                    (None, _) => {
+                        match grid_cross_width.and_then(|e| eval_grid_measure_width(ctx, e, i)) {
+                            Some(w) => RepeatedItemTree::layout_item_info_at_cross_width(
+                                instance.as_pin_ref(),
+                                w,
+                            ),
+                            None => RepeatedItemTree::layout_item_info(
+                                instance.as_pin_ref(),
+                                core_orientation,
+                                None,
+                            ),
+                        }
+                    }
+                };
                 push_cell(cells, info);
             }
             1
         }
         Some(templates) => {
+            // Only box layouts set a cross size, and their repeaters never
+            // have row templates.
+            debug_assert!(cross_size.is_none());
             // Row repeater: the step is the maximum total child count across
             // instances (static children plus each instance's inner repeaters
             // realized via RowChildTemplateInfo::Repeated).
@@ -1205,6 +1257,20 @@ fn push_repeater_layout_items(
     (instances.len() as u32, step)
 }
 
+/// Evaluate a [`i_slint_compiler::llr::LayoutRepeatedElement::cross_width`]
+/// cache read for one instance. `None` on a non-numeric value, so the caller
+/// falls back to the plain layout info rather than measuring at 0.
+fn eval_grid_measure_width(ctx: &mut EvalContext, expr: &Expression, index: usize) -> Option<f32> {
+    use i_slint_compiler::llr::lower_layout_expression::GRID_MEASURE_REPEATER_INDEX_LOCAL;
+    let prev = ctx.locals.insert(
+        SmolStr::new_static(GRID_MEASURE_REPEATER_INDEX_LOCAL),
+        Value::Number(index as f64),
+    );
+    let value = eval_expression(ctx, expr);
+    restore_local(ctx, GRID_MEASURE_REPEATER_INDEX_LOCAL, prev);
+    value.try_into().ok()
+}
+
 fn total_row_child_count(
     sub: &Pin<std::rc::Rc<crate::instance::SubComponentInstance>>,
     templates: &[i_slint_compiler::llr::RowChildTemplateInfo],
@@ -1212,7 +1278,7 @@ fn total_row_child_count(
     use i_slint_compiler::llr::{RowChildTemplateInfo, static_child_count};
     let mut total = static_child_count(templates);
     for entry in templates {
-        if let RowChildTemplateInfo::Repeated { repeater_index } = entry {
+        if let RowChildTemplateInfo::Repeated { repeater_index, .. } = entry {
             let repeater = &sub.repeaters[*repeater_index];
             repeater.track_instance_changes();
             total += repeater.range().len();
@@ -1524,7 +1590,7 @@ fn push_repeater_grid_input_data(
                         cells.push(v);
                         written += 1;
                     }
-                    RowChildTemplateInfo::Repeated { repeater_index } => {
+                    RowChildTemplateInfo::Repeated { repeater_index, .. } => {
                         let inner_rep = &inner_sub.repeaters[*repeater_index];
                         inner_rep.track_instance_changes();
                         // Let each inner cell report its own
@@ -2050,7 +2116,9 @@ fn call_builtin_function(
                 _ => panic!("Second argument not an integer: {:?}", arguments[1]),
             };
 
-            model.remove_row(index as isize);
+            if let Ok(index) = usize::try_from(index as i64) {
+                model.remove_row(index);
+            }
 
             Value::Void
         }
@@ -2070,7 +2138,9 @@ fn call_builtin_function(
             };
 
             let value = eval_expression(ctx, &arguments[2]);
-            model.insert_row(index as isize, value);
+            if let Ok(index) = usize::try_from(index as i64) {
+                model.insert_row(index, value);
+            }
 
             Value::Void
         }
@@ -2233,13 +2303,13 @@ fn call_builtin_function(
             }
         }
         BuiltinFunction::SetSelectionOffsets => {
-            // (item_ref, start, end) — applied to a TextInput.
+            // (item_ref, anchor, focus) -> applied to a TextInput.
             use i_slint_core::items::TextInput;
-            let [Expression::PropertyReference(mr), start_expr, end_expr] = arguments else {
+            let [Expression::PropertyReference(mr), anchor_expr, focus_expr] = arguments else {
                 return Value::Void;
             };
-            let start: i32 = eval_expression(ctx, start_expr).try_into().unwrap_or(0);
-            let end: i32 = eval_expression(ctx, end_expr).try_into().unwrap_or(0);
+            let anchor: i32 = eval_expression(ctx, anchor_expr).try_into().unwrap_or(0);
+            let focus: i32 = eval_expression(ctx, focus_expr).try_into().unwrap_or(0);
             let Some((parent_inst, flat_idx)) = resolve_item_rc_from_ref(ctx, mr) else {
                 return Value::Void;
             };
@@ -2249,7 +2319,7 @@ fn call_builtin_function(
             let parent_dyn = vtable::VRc::into_dyn(parent_inst);
             let item_rc = i_slint_core::items::ItemRc::new(parent_dyn, flat_idx as u32);
             if let Some(text_input) = vtable::VRef::downcast_pin::<TextInput>(item_rc.borrow()) {
-                text_input.set_selection_offsets(&adapter, &item_rc, start, end);
+                text_input.set_selection_offsets(&adapter, &item_rc, anchor, focus);
             }
             Value::Void
         }

@@ -19,8 +19,7 @@ wait_for = ["fix:toml:format"]
 run = "cargo build --locked -p xtask || (echo \"### Updating Main Lockfile! ###\" && cargo update)"
 
 # The examples, demos and tests workspaces each keep their own committed
-# Cargo.lock (bevy and servo folded into examples/Cargo.lock). Use cargo metadata
-# to test whether each lockfile needs updating.
+# Cargo.lock. Use cargo metadata to test whether each lockfile needs updating.
 # --format-version suppresses "warning: please specify `--format-version` flag explicitly to avoid compatibility problems"
 ["fix:rust:lockfile:examples"]
 description = "Update the examples workspace lockfile (if absolutely necessary)"
@@ -40,6 +39,20 @@ wait_for = ["fix:toml:format"]
 run = "cargo metadata --locked --format-version=1 > /dev/null || (echo \"### Updating Tests Lockfile! ###\" && cargo update)"
 dir = "tests"
 
+# The workspaces share one target/ directory, which cargo only reuses while
+# their [profile.*] settings match. What this cannot fix, lint:rust:profiles reports.
+["fix:rust:profiles"]
+description = "Sync the workspace [profile.*] settings with the root workspace"
+run = "cargo xtask check_profiles --fix-it"
+depends = ["fix:rust:lockfile:root"]
+# Edits the same manifests as the formatters and the copyright task, so don't
+# run concurrently with them.
+wait_for = ["fix:toml:format", "fix:legal:copyright"]
+
+["lint:rust:profiles"]
+description = "Check that every workspace's [profile.*] matches the root workspace"
+run = "cargo xtask check_profiles"
+
 ["fix:legal:copyright"]
 description = "Run the check_license_headers --fix xtask"
 run = "cargo xtask check_license_headers --fix-it"
@@ -55,12 +68,15 @@ wait_for = [
 ]
 
 ["fix:python:format"]
-description = "Run ruff format"
+description = "Run Ruff fixes and formatting"
 # Run via uv as the ruff installation via mise is unreliable in the CI.
 # It keeps failing to find ruff, despite saying that it was installed.
 # --project picks up the ruff pinned in api/python/slint's dev group so this
 # matches the version CI lints with, while still formatting from the repo root.
-run = "uv run --project api/python/slint --only-group dev ruff format"
+run = """
+uv run --project api/python/slint --only-group dev ruff check --fix tools/editor/ui-tests
+uv run --project api/python/slint --only-group dev ruff format
+"""
 
 ["fix:rust:format"]
 description = "Run cargo fmt --all"
@@ -99,7 +115,13 @@ run = "pnpm i --lockfile-only"
 
 ["fix:pnpm:dedupe"]
 description = "Run pnpm dedupe"
-run = "pnpm dedupe"
+run = '''
+if [ "${SLINT_SKIP_PNPM_DEDUPE:-false}" = "true" ]; then
+  echo "Skipping pnpm dedupe because no dependency manifest changed"
+else
+  pnpm dedupe
+fi
+'''
 depends = ["prepare:pnpm-install"]
 
 ["fix:ts:format"]
@@ -114,6 +136,11 @@ run = "pnpm run lint:fix"
 depends = ["prepare:pnpm-install"]
 
 ### Lints
+
+["lint:spell"]
+description = "Run cspell"
+run = "pnpm spellcheck"
+depends = ["prepare:pnpm-install"]
 
 ["lint:ts:typecheck"]
 description = "Run pnpm format:fix"
@@ -130,7 +157,13 @@ depends = ["prepare:pnpm-install"]
 ["build:lsp:wasm"]
 description = "Build the LSP (WASM)"
 dir = "editors/vscode"
-sources = ["tools/lsp/Cargo.toml", "tools/lsp/**/*.rs", "tools/lsp/ui/**/*.slint"]
+sources = [
+  "tools/lsp/Cargo.toml",
+  "tools/lsp/**/*.rs",
+  "tools/lsp/ui/**/*.slint",
+  "internal/editor-preview/Cargo.toml",
+  "internal/editor-preview/**/*.rs",
+]
 outputs = ["tools/lsp/pkg/*"]
 run = "pnpm run build:wasm_lsp"
 tools = { "ubi:wasm-bindgen/wasm-pack" = "0.13.1" }
@@ -163,6 +196,7 @@ depends = [
   "fix:legal:copyright",
   "fix:python:format",
   "fix:rust:format:all",
+  "fix:rust:profiles",
   "fix:text:trailing_spaces",
   "fix:toml:format",
   "fix:pnpm:lock",
@@ -177,4 +211,4 @@ depends = [
 
 ["ci:autofix:lint"]
 description = "CI autofix job -- lint steps"
-depends = ["lint:legal:reuse", "lint:ts:typecheck", "lint:ts:knip"]
+depends = ["lint:legal:reuse", "lint:rust:profiles", "lint:ts:typecheck", "lint:ts:knip"]

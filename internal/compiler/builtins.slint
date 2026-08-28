@@ -12,21 +12,12 @@
 
    comments starting by `//-` have some meanings
 
-   Properties with two way bindings (aliases) are deprecated in favor of the property they point to
+   Properties with two way bindings (aliases) are deprecated and must be marked `@deprecated`
 
    Properties can have default binding which must be an expression without any reference to
    another properties. These binding will be then set by the compiler.
    `output` property mean that the property can be modified by the native Item,
    otherwise it is assumed the native item don't write to that property.
-
-   A property, callback, or function can be preceded by a `//-shadowable` comment.
-   Components may declare a member with the same name as a shadowable member: this is
-   a warning instead of an error, and the declaration shadows the builtin member.
-   Members added to an already released element must be marked shadowable, so that
-   older code that already declares a member with that name keeps compiling.
-   This only works for members that the compiler itself never accesses by name —
-   no default binding, and no compiler pass that looks the name up on user elements —
-   as such accesses would resolve to the shadowing declaration and generate wrong code.
 
    Mark a property `//-constexpr` (value known at compile time)
    or `//-fake` (exists only at compile time).
@@ -71,7 +62,7 @@ component Rectangle inherits Empty {
     /// \sc
     /// \default transparent
     in property <brush> background;
-    in property <brush> color <=> background;
+    @deprecated in property <brush> color <=> background;
 }
 
 component BasicBorderRectangle inherits Rectangle {
@@ -363,7 +354,7 @@ component ImageItem inherits Empty {
     /// \default smooth
     in property <ImageRendering> image-rendering;
 
-    in property <angle> rotation-angle <=> transform-rotation;
+    @deprecated in property <angle> rotation-angle <=> transform-rotation;
 }
 
 /// ```slint imageAlt="image example" width="300" height="200"
@@ -568,7 +559,7 @@ component SimpleText inherits Empty {
     in property <TextVerticalAlignment> vertical-alignment;
     //-default_size_binding:implicit_size
 
-    in property <angle> rotation-angle <=> transform-rotation;
+    @deprecated in property <angle> rotation-angle <=> transform-rotation;
 }
 
 /// ```slint playground
@@ -1080,17 +1071,17 @@ export component Flickable inherits Empty {
     /// Panning with a touch screen is only affected by `interactive`.
     in property <bool> mouse-drag-pan-enabled: true;
     /// The total width of the scrollable content.
-    in property <length> content-width;
+    @shadowable in property <length> content-width;
     /// The total height of the scrollable content.
-    in property <length> content-height;
+    @shadowable in property <length> content-height;
     /// The position of the scrollable content relative to the `Flickable`. This is usually a negative value.
-    in-out property <length> content-x;
+    @shadowable in-out property <length> content-x;
     /// The position of the scrollable content relative to the `Flickable`. This is usually a negative value.
-    in-out property <length> content-y;
-    in property <length> viewport-width <=> content-width;
-    in property <length> viewport-height <=> content-height;
-    in-out property <length> viewport-x <=> content-x;
-    in-out property <length> viewport-y <=> content-y;
+    @shadowable in-out property <length> content-y;
+    @deprecated in property <length> viewport-width <=> content-width;
+    @deprecated in property <length> viewport-height <=> content-height;
+    @deprecated in-out property <length> viewport-x <=> content-x;
+    @deprecated in-out property <length> viewport-y <=> content-y;
     /// Invoked when `content-x` or `content-y` is changed by a user action (dragging, scrolling).
     callback flicked();
     //-default_size_binding:expands_to_parent_geometry
@@ -1584,11 +1575,9 @@ component WindowItem {
     /// \default true if 'SLINT_FULLSCREEN' environment variable is set, otherwise false
     in-out property <bool> full-screen;
     /// Whether the window is minimized. Setting this to true minimizes the window.
-    //-shadowable
-    in-out property <bool> minimized;
+    @shadowable in-out property <bool> minimized;
     /// Whether the window is maximized. Setting this to true maximizes the window.
-    //-shadowable
-    in-out property <bool> maximized;
+    @shadowable in-out property <bool> maximized;
     /// The background brush of the `Window`. It is painted first, covering the whole window. \{#sls.ref.window.background}
     ///
     /// <OnlyInSC>
@@ -1599,7 +1588,7 @@ component WindowItem {
     /// \sc
     /// \default depends on the style
     in property <brush> background; // StyleMetrics.background  set in apply_default_properties_from_style
-    in property <brush> color <=> background;
+    @deprecated in property <brush> color <=> background;
     /// The font family to use as default in text elements inside this window, that don't have their `font-family` property set.
     in property <string> default-font-family;
     /// The font size to use as default in text elements inside this window, that don't have their `font-size` property set. The value of this property also forms the basis for relative font sizes.
@@ -1630,13 +1619,11 @@ component WindowItem {
     /// This triggers the `close-requested` callback, giving the application a chance to cancel the close.
     /// Returns `true` if the application accepted the close request; false otherwise.
     /// Returns `false` if called on a child `Window` element, which can't be closed independently.
-    //-shadowable
-    function close() -> bool {
+    @shadowable function close() -> bool {
     }
     /// Hide this window. This also drops the strong reference on the window, so if this was
     /// the last reference, the event loop will quit.
-    //-shadowable
-    function hide() {
+    @shadowable function hide() {
     }
 }
 
@@ -1849,7 +1836,9 @@ export component TextInput {
     //-default_size_binding:expands_to_parent_geometry
     //-accepts_focus
     /// Selects the text between two UTF-8 offsets.
-    function set-selection-offsets(start: int, end: int) {
+    /// `anchor` is the end of the selection that stays put and `focus` the end the cursor moves to,
+    /// so `focus` may precede `anchor` to select backwards.
+    function set-selection-offsets(anchor: int, focus: int) {
         BuiltinFunction.SetSelectionOffsets
     }
     /// Selects all text.
@@ -2064,12 +2053,25 @@ export component GridLayout {
 /// they will be computed by the layout respecting the minimum and maximum sizes and the stretch factor.
 /// \footer
 /// ## Cell elements
-/// Cell elements inside a `VerticalLayout` obtain the following new property:
+/// Cell elements inside a `VerticalLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
 /// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element.
 /// The default value `auto` uses the container's `cross-axis-alignment`.
+/// </SlintProperty>
+///
+/// ### layout-order
+/// <SlintProperty propName="layout-order" typeName="int" defaultValue="0">
+/// Controls the visual order of the elements: they are laid out in ascending
+/// order value, and elements with the same value keep their declaration order.
+/// ```slint no-test
+/// VerticalLayout {
+///     Rectangle { layout-order: 2; }
+///     Rectangle { layout-order: 1; }  // appears first
+/// }
+/// ```
+/// Only the visual order changes: keyboard focus still moves in declaration order.
 /// </SlintProperty>
 /// \group:layouts
 export component VerticalLayout {
@@ -2138,12 +2140,25 @@ export component VerticalLayout {
 /// they will be computed by the layout respecting the minimum and maximum sizes and the stretch factor.
 /// \footer
 /// ## Cell elements
-/// Cell elements inside a `HorizontalLayout` obtain the following new property:
+/// Cell elements inside a `HorizontalLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
 /// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element.
 /// The default value `auto` uses the container's `cross-axis-alignment`.
+/// </SlintProperty>
+///
+/// ### layout-order
+/// <SlintProperty propName="layout-order" typeName="int" defaultValue="0">
+/// Controls the visual order of the elements: they are laid out in ascending
+/// order value, and elements with the same value keep their declaration order.
+/// ```slint no-test
+/// HorizontalLayout {
+///     Rectangle { layout-order: 2; }
+///     Rectangle { layout-order: 1; }  // appears first
+/// }
+/// ```
+/// Only the visual order changes: keyboard focus still moves in declaration order.
 /// </SlintProperty>
 /// \group:layouts
 export component HorizontalLayout {
@@ -2195,7 +2210,15 @@ export component HorizontalLayout {
     in property <CrossAxisAlignment> cross-axis-alignment;
 }
 
-/// `FlexboxLayout` is a flexible box layout that arranges its children in rows or columns with automatic wrapping. It implements a CSS Flexbox-like layout model suitable for creating flexible, responsive UIs.
+/// `FlexboxLayout` is a flexible box layout that arranges its children in rows or columns with automatic wrapping.
+/// It implements a CSS Flexbox-like layout model suitable for creating flexible, responsive UIs.
+///
+/// Use `FlexboxLayout` when the items should wrap: items that don't fit continue on the next line.
+/// That's why `flex-wrap` defaults to `wrap`, unlike CSS.
+/// For a single row or column, use the simpler and faster
+/// <Link type="HorizontalLayout" /> or <Link type="VerticalLayout" /> instead,
+/// unless you need a `flex-direction` that changes at runtime,
+/// or the reversed directions (`row-reverse` / `column-reverse`).
 ///
 ///
 /// ```slint playground imageAlt="flexboxlayout example with row direction" width="300" height="150"
@@ -2241,13 +2264,53 @@ export component HorizontalLayout {
 ///
 /// \footer
 /// ## Cell elements
-/// Cell elements inside a `FlexboxLayout` obtain the following new property:
+/// Cell elements inside a `FlexboxLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
 /// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element. CSS Flexbox calls this "align-self".
 /// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
+///
+/// ### layout-order
+/// <SlintProperty propName="layout-order" typeName="int" defaultValue="0">
+/// Controls the visual order of the items, like the CSS `order` property:
+/// items are laid out in ascending order value, and items with the same value keep
+/// their declaration order.
+/// ```slint no-test
+/// FlexboxLayout {
+///     Rectangle { layout-order: 2; }
+///     Rectangle { layout-order: 1; }  // appears first
+/// }
+/// ```
+/// Only the visual order changes: keyboard focus still moves in declaration order.
+/// </SlintProperty>
+///
+/// ## CSS Mapping
+///
+/// The container properties map to CSS Flexbox as follows:
+///
+/// | CSS               | Slint                                                     |
+/// | ----------------- | --------------------------------------------------------- |
+/// | `flex-direction`  | `flex-direction`                                          |
+/// | `flex-wrap`       | `flex-wrap`, but the default is `wrap` (CSS: `nowrap`)    |
+/// | `justify-content` | `alignment`                                               |
+/// | `align-items`     | `cross-axis-alignment`                                    |
+/// | `align-content`   | `cross-axis-line-alignment`                               |
+/// | `gap`             | `spacing`                                                 |
+/// | `column-gap`      | `spacing-horizontal`                                      |
+/// | `row-gap`         | `spacing-vertical`                                        |
+/// | `padding`         | `padding`, `padding-left` / `-right` / `-top` / `-bottom` |
+///
+/// The CSS per-item flexbox properties are expressed with the properties the
+/// other layouts already use:
+///
+/// | CSS           | Slint                                                          |
+/// | ------------- | -------------------------------------------------------------- |
+/// | `flex-grow`   | `alignment: stretch` on the container, weighted per item by `horizontal-stretch` / `vertical-stretch`; `max-width` / `max-height` caps growing (space a capped item cannot take stays free) |
+/// | `flex-shrink` | nothing to opt into: every item shrinks, in proportion to its preferred size; `min-width` / `min-height` refuses shrinking |
+/// | `flex-basis`  | `preferred-width` (row) / `preferred-height` (column)          |
+/// | `align-self`  | `cross-axis-self-alignment`                                    |
 ///
 /// ## Layout Behavior
 ///
@@ -2256,6 +2319,7 @@ export component HorizontalLayout {
 /// You can learn more about the CSS Flexbox specification from
 /// - <a href="https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Flexible_box_layout/Basic_concepts">the Mozilla developer website</a>
 /// - <a href="https://css-tricks.com/snippets/css/a-guide-to-flexbox/">A Complete Guide To Flexbox by CSS Tricks</a>. This is detailed guide with illustrations and comprehensive written explanation of the different Flexbox properties and how they work.
+///
 /// \group:layouts
 export component FlexboxLayout {
     //! ## Spacing Properties
@@ -2303,12 +2367,12 @@ export component FlexboxLayout {
     /// Set the distribution of flex lines along the cross axis. CSS Flexbox calls this "align-content";
     /// the name here pairs with `cross-axis-alignment`, which aligns the items within one line.
     /// The default value is `stretch`.
-    in property <CrossAxisLineAlignment> cross-axis-line-alignment;
+    in property <LayoutAlignment> cross-axis-line-alignment;
     /// Set the alignment of individual items along the cross axis within each flex line.
-    /// The default value is `stretch`.
+    /// CSS Flexbox calls this "align-items". The default value is `stretch`.
     in property <CrossAxisAlignment> cross-axis-alignment;
     /// Controls whether flex items wrap onto multiple lines when they don't fit in the container.
-    /// The default value is `wrap`.
+    /// The default value is `wrap`, unlike CSS where it is `nowrap`.
     in property <FlexboxLayoutWrap> flex-wrap;
 }
 
@@ -2985,9 +3049,9 @@ export global Platform {
     /// When Slint is ported to new operating systems in the future, new enum values will be added.
     /// :::
     out property <OperatingSystemType> os;
-    /// `true` when the user interface is driven by a host application — your business logic written
-    /// in Rust, C++, JavaScript or Python — and `false` when the `.slint` file is being interpreted on
-    /// its own, with nothing behind it, such as when previewed with `slint-viewer` or the editor's preview.
+    /// `true` when the `.slint` file is being interpreted on its own, with nothing behind it, such as
+    /// when previewed with `slint-viewer` or the editor's preview, and `false` when the user interface
+    /// is driven by a host application: your business logic written in Rust, C++, JavaScript or Python.
     ///
     /// Use it to provide placeholder data and preview-only decorations that are removed from your
     /// compiled application. This property is a compile-time constant, so branches that depend on it
@@ -3004,7 +3068,7 @@ export global Platform {
     // export component Example inherits Window {
     //     width: 150px;
     //     height: 150px;
-    //     in property<[Data]> data: Platform.is-app ? [] : [
+    //     in property<[Data]> data: Platform.uses-mock-data ? [
     //                 { text: "Blue", color: #0000ff, bg: #eeeeee},
     //                 { text: "Red", color: #ff0000, bg: #eeeeee},
     //                 { text: "Green", color: #00ff00, bg: #eeeeee},
@@ -3013,7 +3077,7 @@ export global Platform {
     //                 { text: "White", color: #ffffff, bg: #222222 },
     //                 { text: "Magenta", color: #ff00ff, bg: #eeeeee },
     //                 { text: "Cyan", color: #00ffff, bg: #222222 },
-    //             ];
+    //             ] : [];
     //
     //     VerticalBox {
     //         ListView {
@@ -3031,7 +3095,7 @@ export global Platform {
     //     }
     // }
     // ```
-    out property <bool> is-app;
+    out property <bool> uses-mock-data;
     /// The name of the currently selected <Link type="StyleWidgets" label="widget style"/>. Some widget
     /// styles have dark and light variant suffixes, such as `fluent-light`. This property contains the
     /// style name without the suffix. Use <Link type="Palette" label="Palette"/>'s `color-scheme` to

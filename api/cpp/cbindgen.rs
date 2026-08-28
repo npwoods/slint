@@ -150,7 +150,17 @@ fn builtin_structs(path: &Path) -> anyhow::Result<()> {
                         "f32" | "Coord" => "float",
                         other => other,
                     };
-                    writeln!(file, "    {} {}{{ {} }};", field_type, stringify!($field), stringify!($($field_default)*))?;
+                    // The raw tokens of the default value stringify with spaces, such as
+                    // `CapitalizationMode :: Sentences`; the header reads better without them.
+                    let default_value: String = stringify!($($field_default)*)
+                        .chars().filter(|c| !c.is_whitespace()).collect();
+                    // Doxygen documents the attribute without its initializer, so document
+                    // the default value in the comment too.
+                    if !default_value.is_empty() {
+                        let documented = default_value.trim_matches(|c| c == '(' || c == ')');
+                        writeln!(file, "    /// Defaults to `{documented}`.")?;
+                    }
+                    writeln!(file, "    {} {}{{ {} }};", field_type, stringify!($field), default_value)?;
                 )*
                 writeln!(file, "    /// \\private")?;
                 writeln!(file, "    {}", format!("friend bool operator==(const {name}&, const {name}&) = default;", name = stringify!($Name)))?;
@@ -742,7 +752,7 @@ fn gen_corelib(
             }",
         ),
         (
-            vec!["Keys", "KeysInner", "slint_keys_to_string", "slint_keys", "slint_keys_from_parts"],
+            vec!["Keys", "KeysInner", "slint_keys_to_string", "slint_keys", "slint_keys_from_parts", "slint_keys_to_parts"],
             "slint_keys_internal.h",
             "#include \"private/slint_builtin_structs.h\"\n\
             namespace slint::cbindgen_private::types {\n\
@@ -760,6 +770,7 @@ fn gen_corelib(
             "slint_keys_to_string",
             "slint_keys",
             "slint_keys_from_parts",
+            "slint_keys_to_parts",
             "slint_visit_item_tree",
             "slint_windowrc_drop",
             "slint_windowrc_clone",

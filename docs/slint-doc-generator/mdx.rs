@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cspell:ignore capitalizationmode keyboardmodifiers
+
 use crate::Config;
 use anyhow::Context;
 use std::fs::create_dir_all;
@@ -31,15 +33,17 @@ pub fn generate(cfg: &Config) -> Result<Vec<String>, Box<dyn std::error::Error>>
         std::fs::remove_dir_all(&cfg.generated_dir)
             .context(format!("error clearing {:?}", cfg.generated_dir))?;
     }
-    generate_enum_docs(cfg)?;
-    generate_builtin_struct_docs(cfg)?;
+    // The struct pages link to the type pages, so both are written from the
+    // same maps: a type this run leaves out is never linked to.
+    let enums = extract_enum_docs(cfg.include_experimental, cfg.sc_only);
+    let structs = extract_builtin_structs(cfg.include_experimental, cfg.sc_only);
+    write_individual_enum_files(cfg, &enums)?;
+    write_individual_struct_files(cfg, &structs, &enums)?;
     if !cfg.sc_only {
         generate_keys_docs(cfg)?;
     }
     crate::element_docs::generate(cfg)?;
 
-    let enums = extract_enum_docs(cfg.include_experimental, cfg.sc_only);
-    let structs = extract_builtin_structs(cfg.include_experimental, cfg.sc_only);
     if !cfg.sc_only || !enums.is_empty() || !structs.is_empty() {
         write_builtin_structs_and_enums(cfg, &structs, &enums)?;
     }
@@ -53,6 +57,11 @@ pub fn generate(cfg: &Config) -> Result<Vec<String>, Box<dyn std::error::Error>>
 
     Ok(gaps)
 }
+
+/// The pages listing every built-in struct and enum, linked to from the field
+/// documentation of the structs.
+const BUILTIN_STRUCTS_SLUG: &str = "reference/property-types/builtin-structs";
+const BUILTIN_ENUMS_SLUG: &str = "reference/property-types/builtin-enums";
 
 /// An enum documented on its own type page rather than in the Builtin Enums list.
 fn enum_documented_elsewhere(name: &str) -> bool {
@@ -78,7 +87,7 @@ fn write_builtin_structs_and_enums(
         r#"---
 title: Built-in Structs
 description: The built-in struct types provided by Slint.
-slug: reference/property-types/builtin-structs
+slug: {BUILTIN_STRUCTS_SLUG}
 ---
 "#
     )?;
@@ -107,7 +116,7 @@ slug: reference/property-types/builtin-structs
         r#"---
 title: Built-in Enums
 description: The built-in enumeration types provided by Slint.
-slug: reference/property-types/builtin-enums
+slug: {BUILTIN_ENUMS_SLUG}
 ---
 "#
     )?;
@@ -170,7 +179,15 @@ description: {0} content
         }
         writeln!(file, "{}", e.description)?;
         for v in &e.values {
-            writeln!(file, r#"* **`{}`**: {}"#, v.key, v.description)?;
+            // A struct field default links to the value it takes, and every enum
+            // shares the Builtin Enums page, so the id carries the enum name.
+            writeln!(
+                file,
+                r#"* **<span id="{}">`{}`</span>**: {}"#,
+                enum_value_anchor(k, &v.key),
+                v.key,
+                v.description
+            )?;
         }
 
         file.flush()?;
@@ -234,16 +251,13 @@ pub fn extract_enum_docs(
     enums
 }
 
-pub fn generate_enum_docs(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let enums = extract_enum_docs(cfg.include_experimental, cfg.sc_only);
-    write_individual_enum_files(cfg, &enums)?;
-    Ok(())
-}
-
 pub struct StructFieldDoc {
     key: String,
     description: String,
     type_name: String,
+    /// The value the field takes when it isn't set, written in `.slint` syntax,
+    /// or `None` for the zero value of the field's type.
+    default_value: Option<String>,
 }
 
 pub struct StructDoc {
@@ -268,11 +282,13 @@ pub fn extract_builtin_structs(
                         key: "x".to_string(),
                         description: String::new(),
                         type_name: "length".to_string(),
+                        default_value: None,
                     },
                     StructFieldDoc {
                         key: "y".to_string(),
                         description: String::new(),
                         type_name: "length".to_string(),
+                        default_value: None,
                     },
                 ],
             },
@@ -286,11 +302,13 @@ pub fn extract_builtin_structs(
                         key: "width".to_string(),
                         description: String::new(),
                         type_name: "length".to_string(),
+                        default_value: None,
                     },
                     StructFieldDoc {
                         key: "height".to_string(),
                         description: String::new(),
                         type_name: "length".to_string(),
+                        default_value: None,
                     },
                 ],
             },
@@ -337,13 +355,16 @@ pub fn extract_builtin_structs(
 
                 let mut fields = Vec::new();
                 $(
-                    let key = stringify!($field).to_string();
+                    let key = stringify!($field).replace('_', "-");
                     let type_name = map_type!($field_type).to_string();
                     let mut f_description = String::new();
                     $(
                         f_description += &format!("{}", $field_doc);
                     )*
-                    fields.push(StructFieldDoc { key, description: f_description, type_name });
+                    let default_value =
+                        i_slint_common::builtin_struct_field_default_tokens!($($field_default)?)
+                            .map(declared_default);
+                    fields.push(StructFieldDoc { key, description: f_description, type_name, default_value });
                 )*
                 structs.insert(name, StructDoc { description, fields });
             )*
@@ -368,16 +389,79 @@ pub fn extract_builtin_structs(
     structs
 }
 
+/// The section documenting `type_name` on the built-in enums or structs page.
+/// The maps are the ones those pages are written from, so a type left out of
+/// this run gets no link rather than one to a missing anchor.
+/// The link is written from the site root; `remarkBaseLinks` adds the base of
+/// whichever site renders it.
+fn type_href(
+    type_name: &str,
+    enums: &std::collections::BTreeMap<String, EnumDoc>,
+    structs: &std::collections::BTreeMap<String, StructDoc>,
+) -> Option<String> {
+    let page = if enums.contains_key(type_name) && !enum_documented_elsewhere(type_name) {
+        BUILTIN_ENUMS_SLUG
+    } else if structs.contains_key(type_name) {
+        BUILTIN_STRUCTS_SLUG
+    } else {
+        return None;
+    };
+    Some(format!("/{page}/#{}", type_name.to_lowercase()))
+}
+
+/// The id of one value on the page documenting `enum_name`.
+fn enum_value_anchor(enum_name: &str, value: &str) -> String {
+    format!("{}-{value}", enum_name.to_lowercase())
+}
+
+/// The `.slint` form of a field default declared in builtin_structs.rs.
+fn declared_default(tokens: &str) -> String {
+    let text: String =
+        tokens.chars().filter(|c| !c.is_whitespace() && *c != '(' && *c != ')').collect();
+    match text.split_once("::") {
+        // Enum values are written in kebab case in .slint
+        Some((_, variant)) => to_kebab_case(variant.trim_start_matches("r#")),
+        // bool and number literals are written the same way
+        None => text,
+    }
+}
+
+/// The list entry documenting one field of a struct, with the field's type
+/// linked to its own documentation when it has any.
+fn struct_field_line(
+    field: &StructFieldDoc,
+    enums: &std::collections::BTreeMap<String, EnumDoc>,
+    structs: &std::collections::BTreeMap<String, StructDoc>,
+) -> String {
+    let name = &field.type_name;
+    let type_name = type_href(name, enums, structs)
+        .map_or_else(|| format!("_{name}_"), |href| format!("[_{name}_]({href})"));
+    let default_value = field.default_value.as_ref().map_or_else(String::new, |value| {
+        // An enum value links to its own documentation, next to the values it could
+        // take instead; `type_href` decides whether the enum is documented there.
+        let documented = enums.contains_key(name) && type_href(name, enums, structs).is_some();
+        match documented {
+            true => format!(
+                " Defaults to [`{value}`](/{BUILTIN_ENUMS_SLUG}/#{}).",
+                enum_value_anchor(name, value)
+            ),
+            false => format!(" Defaults to `{value}`."),
+        }
+    });
+    format!("- **`{}`** ({}): {}{}", field.key, type_name, field.description, default_value)
+}
+
 fn write_individual_struct_files(
     cfg: &Config,
-    structs: std::collections::BTreeMap<String, StructDoc>,
+    structs: &std::collections::BTreeMap<String, StructDoc>,
+    enums: &std::collections::BTreeMap<String, EnumDoc>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let structs_dir = cfg.reference_dir().join("structs");
     create_dir_all(&structs_dir).context(format!(
         "Failed to create folder holding individual structs doc files {structs_dir:?}"
     ))?;
 
-    for (s, v) in &structs {
+    for (s, v) in structs {
         let path = structs_dir.join(format!("_{s}.md"));
         let mut file = BufWriter::new(
             std::fs::File::create(&path).context(format!("error creating {path:?}"))?,
@@ -400,18 +484,13 @@ description: {0} content
         )?;
 
         for f in &v.fields {
-            writeln!(file, r#"- **`{}`** (_{}_): {}"#, f.key, f.type_name, f.description)?;
+            writeln!(file, "{}", struct_field_line(f, enums, structs))?;
         }
 
         file.flush()?;
     }
 
     Ok(())
-}
-
-pub fn generate_builtin_struct_docs(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let structs = extract_builtin_structs(cfg.include_experimental, cfg.sc_only);
-    write_individual_struct_files(cfg, structs)
 }
 
 /// Convert a ascii pascal case string to kebab case.
@@ -471,4 +550,54 @@ fn test_is_generated_dir() {
     assert!(!is_generated_dir(&astro.join("src/content/docs/reference"), astro));
     assert!(!is_generated_dir(std::path::Path::new(""), astro));
     assert!(!is_generated_dir(std::path::Path::new("/elsewhere/generated"), astro));
+}
+
+#[test]
+fn test_type_href() {
+    let enum_doc = || EnumDoc { description: String::new(), values: vec![] };
+    let enums = std::collections::BTreeMap::from([
+        ("CapitalizationMode".to_string(), enum_doc()),
+        ("BuiltInMouseCursor".to_string(), enum_doc()),
+    ]);
+    let structs = std::collections::BTreeMap::from([(
+        "KeyboardModifiers".to_string(),
+        StructDoc { description: String::new(), fields: vec![] },
+    )]);
+    let href = |type_name| type_href(type_name, &enums, &structs);
+
+    assert_eq!(
+        href("CapitalizationMode").as_deref(),
+        Some("/reference/property-types/builtin-enums/#capitalizationmode")
+    );
+    assert_eq!(
+        href("KeyboardModifiers").as_deref(),
+        Some("/reference/property-types/builtin-structs/#keyboardmodifiers")
+    );
+    // A type without a section of its own, and one documented elsewhere.
+    assert_eq!(href("int"), None);
+    assert_eq!(href("BuiltInMouseCursor"), None);
+
+    let field = StructFieldDoc {
+        key: "field".to_string(),
+        description: "The docs".to_string(),
+        type_name: "CapitalizationMode".to_string(),
+        default_value: None,
+    };
+    assert_eq!(
+        struct_field_line(&field, &enums, &structs),
+        "- **`field`** ([_CapitalizationMode_](/reference/property-types/builtin-enums/#capitalizationmode)): The docs"
+    );
+    // A declared default value is documented after the description.
+    let with_default = StructFieldDoc {
+        key: "field".to_string(),
+        description: "The docs".to_string(),
+        type_name: "CapitalizationMode".to_string(),
+        default_value: Some(declared_default("(CapitalizationMode::Sentences)")),
+    };
+    assert_eq!(
+        struct_field_line(&with_default, &enums, &structs),
+        "- **`field`** ([_CapitalizationMode_](/reference/property-types/builtin-enums/#capitalizationmode)): The docs Defaults to [`sentences`](/reference/property-types/builtin-enums/#capitalizationmode-sentences)."
+    );
+    let field = StructFieldDoc { type_name: "int".to_string(), ..field };
+    assert_eq!(struct_field_line(&field, &enums, &structs), "- **`field`** (_int_): The docs");
 }

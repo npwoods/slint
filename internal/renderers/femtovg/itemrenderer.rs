@@ -139,16 +139,16 @@ fn rect_to_path(r: PhysicalRect) -> femtovg::Path {
 }
 
 impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
-    pub fn global_alpha_transparent(&self) -> bool {
-        self.state.last().unwrap().global_alpha == 0.0
-    }
-
     pub fn metrics(&self) -> RenderingMetrics {
         self.metrics.clone()
     }
 }
 
 impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer<'a, R> {
+    fn global_alpha_transparent(&self) -> bool {
+        self.state.last().unwrap().global_alpha == 0.0
+    }
+
     fn draw_rectangle(
         &mut self,
         rect: Pin<&dyn RenderRectangle>,
@@ -158,9 +158,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
     ) {
         let geometry = PhysicalRect::from(size * self.scale_factor);
         if geometry.is_empty() {
-            return;
-        }
-        if self.global_alpha_transparent() {
             return;
         }
         // TODO: cache path in item to avoid re-tesselation
@@ -185,9 +182,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         let Some(layout) = BorderRectLayout::new(rect, size, self.scale_factor) else {
             return;
         };
-        if self.global_alpha_transparent() {
-            return;
-        }
 
         let fill_paint = self.brush_to_paint(rect.background(), layout.brush_size);
 
@@ -240,10 +234,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        if self.global_alpha_transparent() {
-            return;
-        }
-
         sharedparley::draw_text(self, text, Some(self_rc), size, Some(self.text_layout_cache));
     }
 
@@ -253,18 +243,10 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         self_rc: &ItemRc,
         size: LogicalSize,
     ) {
-        if self.global_alpha_transparent() {
-            return;
-        }
-
         sharedparley::draw_text_input(self, text_input, self_rc, size, self.text_layout_cache);
     }
 
     fn draw_path(&mut self, path: Pin<&items::Path>, item_rc: &ItemRc, size: LogicalSize) {
-        if self.global_alpha_transparent() {
-            return;
-        }
-
         let (offset, path_events) = match path.fitted_path_events(item_rc) {
             Some(offset_and_events) => offset_and_events,
             None => return,
@@ -406,9 +388,10 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         {
             return;
         }
-        // TODO: implement inset shadows and spread for femtovg. Until then, skip rendering inset
-        // shadows entirely (otherwise they'd render incorrectly as a drop shadow). Spread is
-        // silently ignored.
+        // TODO: implement inset shadows and spread for femtovg, using the shape_size,
+        // outer_radius and inner_radius of the BoxShadowOptions. Until then, skip rendering
+        // inset shadows entirely (otherwise they'd render incorrectly as a drop shadow).
+        // Spread is silently ignored.
         if box_shadow.inset() {
             return;
         }
@@ -456,7 +439,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
 
                     let shadow_path = rect_with_radius_to_path(
                         PhysicalRect::new(
-                            PhysicalPoint::from_lengths(blur, blur),
+                            shadow_options.shape_origin(),
                             PhysicalSize::from_lengths(width, height),
                         ),
                         radius,
@@ -468,8 +451,9 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
                 }
 
                 let shadow_image = if blur.get() > 0. {
-                    let blurred_image = shadow_image
-                        .filter(femtovg::ImageFilter::GaussianBlur { sigma: blur.get() / 2. });
+                    let blurred_image = shadow_image.filter(femtovg::ImageFilter::GaussianBlur {
+                        sigma: shadow_options.blur_sigma(),
+                    });
 
                     self.canvas.borrow_mut().set_render_target(blurred_image.as_render_target());
 
@@ -1217,23 +1201,13 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                 let tiling = item.tiling();
 
                 let target_size_for_scalable_source = if image_inner.is_svg() {
-                    let image_size = image.size().cast::<f32>();
-                    if image_size.is_empty() {
-                        return None;
-                    }
-                    let t = item.target_size() * self.scale_factor;
-                    let fit = i_slint_core::graphics::fit(
+                    Some(i_slint_core::graphics::scalable_render_size(
+                        image.size(),
                         item.image_fit(),
-                        t,
-                        IntRect::from_size(image_size.cast()),
+                        item.target_size() * self.scale_factor,
                         self.scale_factor,
-                        Default::default(), // We only care about the size, so alignments don't matter
                         tiling,
-                    );
-                    Some(euclid::size2(
-                        (image_size.width * fit.source_to_target_x) as u32,
-                        (image_size.height * fit.source_to_target_y) as u32,
-                    ))
+                    )?)
                 } else {
                     None
                 };

@@ -12,7 +12,7 @@ use smol_str::SmolStr;
 
 use crate::diagnostics::{BuildDiagnostics, SourceLocation, Spanned};
 use crate::expression_tree::{BindingExpression, Callable, Expression};
-use crate::langtype::{ElementType, Function, PropertyLookupResult, Type};
+use crate::langtype::{ElementType, Function, PropertyLookupMode, PropertyLookupResult, Type};
 use crate::namedreference::NamedReference;
 use crate::object_tree::{
     Element, ElementRc, PropertyDeclaration, PropertyVisibility, QualifiedTypeName,
@@ -378,7 +378,7 @@ fn validate_interface_member_implementation(
         return None;
     }
 
-    let lookup_result = element.lookup_property(member_name);
+    let lookup_result = element.lookup_property(member_name, PropertyLookupMode::ComponentLocal);
     let Err(violations) =
         property_matches_interface(&lookup_result, interface_member, member_name, binding)
     else {
@@ -388,8 +388,14 @@ fn validate_interface_member_implementation(
     let joined_errors = violations.iter().map(|v| v.error.as_str()).join("\n");
     let mut conflicts = InterfaceMemberDiagnostics::from(joined_errors);
 
+    // A shadowing member is stored under a mangled name, so look it up shadow-aware first,
+    // falling back to the base chain for an inherited member.
+    let source = element
+        .declaration(member_name)
+        .and_then(|(_, declaration)| declaration.node.clone())
+        .or_else(|| element.base_type.property_declaration_node(member_name));
     if lookup_result.is_valid()
-        && let Some(source) = element.property_declaration_node(member_name)
+        && let Some(source) = source
     {
         conflicts.notes = violations
             .into_iter()
@@ -437,7 +443,10 @@ pub(super) fn apply_child_implement_statements(
         let mut conflicts = Vec::new();
         let mut notes = Vec::new();
         for (name, prop_decl) in interface.borrow().property_declarations.iter() {
-            let lookup_result = element.borrow().base_type.lookup_property(name);
+            let lookup_result = element
+                .borrow()
+                .base_type
+                .lookup_property(name, PropertyLookupMode::ComponentLocal);
             if let Err(message) =
                 check_property_declaration_conflicts(&lookup_result, &element.borrow().base_type)
             {
@@ -461,11 +470,18 @@ pub(super) fn apply_child_implement_statements(
             let mut prop_decl = prop_decl.clone();
             prop_decl.node = Some(node.QualifiedName().into());
 
-            if let Some(existing_property) =
-                element.borrow_mut().property_declarations.insert(name.clone(), prop_decl.clone())
-            {
-                let source = existing_property
-                    .node
+            // A shadowing declaration also occupies the name, though stored under a different one
+            let shadowing =
+                element.borrow().declaration(name).map(|(_, declaration)| declaration.node.clone());
+            let existing_node = shadowing.or_else(|| {
+                element
+                    .borrow_mut()
+                    .property_declarations
+                    .insert(name.clone(), prop_decl.clone())
+                    .map(|existing| existing.node.clone())
+            });
+            if let Some(existing_node) = existing_node {
+                let source = existing_node
                     .as_ref()
                     .and_then(|node| node.child_node(SyntaxKind::DeclaredIdentifier))
                     .and_then(|node| node.child_token(SyntaxKind::Identifier))
@@ -495,9 +511,7 @@ pub(super) fn apply_child_implement_statements(
                 }
                 _ => element.borrow_mut().set_binding(
                     name.clone(),
-                    BindingExpression::new_two_way(
-                        NamedReference::new(&child, name.clone()).into(),
-                    ),
+                    BindingExpression::new_two_way(member_reference(&child, name).into()),
                 ),
             };
             debug_assert!(
@@ -720,6 +734,14 @@ fn property_matches_interface(
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
+/// A reference to the member of `elem` written as `name` in the source, which for a shadowing
+/// declaration is stored under a different internal name.
+fn member_reference(elem: &ElementRc, name: &SmolStr) -> NamedReference {
+    let internal_name =
+        elem.borrow().declaration(name).map_or_else(|| name.clone(), |(n, _)| n.clone());
+    NamedReference::new(elem, internal_name)
+}
+
 fn apply_uses_statement_function_binding(
     element: &ElementRc,
     child: &ElementRc,
@@ -734,7 +756,7 @@ fn apply_uses_statement_function_binding(
         .collect();
 
     let call_expr = Expression::FunctionCall {
-        function: Callable::Function(NamedReference::new(child, name.clone())),
+        function: Callable::Function(member_reference(child, name)),
         arguments: args_expr,
         source_location: None,
     };

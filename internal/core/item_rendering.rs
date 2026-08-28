@@ -144,6 +144,14 @@ impl<T> ItemCache<T> {
         self.map.borrow().is_empty()
     }
 
+    /// Keeps only the entries for which `f` returns true.
+    pub fn retain(&self, mut f: impl FnMut(&T) -> bool) {
+        self.map.borrow_mut().retain(|_, per_component| {
+            per_component.retain(|_, entry| f(&entry.data));
+            !per_component.is_empty()
+        });
+    }
+
     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
     /// `item_rc`, updating the cache entry first if necessary using `update_fn`.
     ///
@@ -209,7 +217,10 @@ pub fn render_item_children(
 
             // Don't render items that are clipped, with the exception of the Clip or Flickable since
             // they themselves clip their content.
-            let render_result = if do_draw
+            let render_result = if renderer.global_alpha_transparent() {
+                // apply_opacity only multiplies, so the whole subtree stays transparent.
+                RenderingResult::ContinueRenderingWithoutChildren
+            } else if do_draw
                || item.as_ref().clips_children()
                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
@@ -662,6 +673,10 @@ pub trait ItemRenderer {
     fn scale(&mut self, scale_x_factor: f32, scale_y_factor: f32);
     /// Apply the opacity (between 0 and 1) for all following items until the next call to restore_state.
     fn apply_opacity(&mut self, opacity: f32);
+    /// Returns true when the opacity accumulated via [`Self::apply_opacity`] is zero.
+    fn global_alpha_transparent(&self) -> bool {
+        false
+    }
 
     fn save_state(&mut self);
     fn restore_state(&mut self);

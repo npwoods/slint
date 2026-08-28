@@ -11,13 +11,13 @@ use crate::expression_tree::{
     BuiltinFunction, BuiltinMacroFunction, Callable, EasingCurve, Expression, MouseCursorInner,
     Unit,
 };
-use crate::langtype::{ElementType, Enumeration, EnumerationValue, Type};
+use crate::langtype::{ElementType, Enumeration, EnumerationValue, PropertyLookupMode, Type};
 use crate::namedreference::NamedReference;
 use crate::object_tree::{ElementRc, PropertyVisibility};
 use crate::parser::NodeOrToken;
 use crate::symbol_counters::SymbolCounters;
 use crate::typeregister::TypeRegister;
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::RefCell;
 
 pub use i_slint_common::color_parsing::named_colors;
@@ -90,6 +90,12 @@ impl<'a> LookupCtx<'a> {
             Type::Callback(f) | Type::Function(f) => &f.return_type,
             _ => &self.property_type,
         }
+    }
+
+    /// Whether lookup offers experimental entries: enabled experimental features,
+    /// or the builtin widget library, which may use them.
+    fn experimental_lookup_enabled(&self) -> bool {
+        self.diag.enable_experimental || self.type_register.expose_internal_types
     }
 
     /// Run `f` with `expected_type` temporarily set to `ty`, restoring it afterwards.
@@ -441,13 +447,13 @@ impl LookupObject for InScopeLookup {
             |str, r| f.borrow_mut()(str, r),
             |elem| elem.for_each_entry(ctx, *f.borrow_mut()),
             |elem| {
-                for (name, prop) in &elem.borrow().property_declarations {
+                for (internal_name, prop) in &elem.borrow().property_declarations {
                     let e = expression_from_reference(
-                        NamedReference::new(elem, name.clone()),
+                        NamedReference::new(elem, internal_name.clone()),
                         &prop.property_type,
                         None,
                     );
-                    if let Some(r) = f.borrow_mut()(name, e) {
+                    if let Some(r) = f.borrow_mut()(prop.declared_name(internal_name), e) {
                         return Some(r);
                     }
                 }
@@ -465,9 +471,10 @@ impl LookupObject for InScopeLookup {
             |str, r| (str == name).then_some(r),
             |elem| elem.lookup(ctx, name),
             |elem| {
-                elem.borrow().property_declarations.get(name).map(|prop| {
+                let elem_borrow = elem.borrow();
+                elem_borrow.declaration(name).map(|(internal_name, prop)| {
                     expression_from_reference(
-                        NamedReference::new(elem, name.clone()),
+                        NamedReference::new(elem, internal_name.clone()),
                         &prop.property_type,
                         None,
                     )
@@ -483,9 +490,10 @@ impl LookupObject for ElementRc {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        for (name, prop) in &self.borrow().property_declarations {
+        for (internal_name, prop) in &self.borrow().property_declarations {
+            let name = prop.declared_name(internal_name);
             let r = expression_from_reference(
-                NamedReference::new(self, name.clone()),
+                NamedReference::new(self, internal_name.clone()),
                 &prop.property_type,
                 check_extra_deprecated(self, ctx, name),
             );
@@ -493,9 +501,20 @@ impl LookupObject for ElementRc {
                 return Some(r);
             }
         }
+        // NamedReference::new borrows the element, so the check can't hold a borrow across the loop
+        let has_shadows = !self.borrow().shadowing_members.is_empty();
         let list = self.borrow().base_type.property_list();
         for (name, ty) in list {
-            let e = expression_from_reference(NamedReference::new(self, name.clone()), &ty, None);
+            // A shadowing declaration above already offered this name
+            if has_shadows && self.borrow().shadowing_members.contains_key(&name) {
+                continue;
+            }
+            // Resolve the source name to the storage key so a shadow in a base resolves correctly.
+            let key = self
+                .borrow()
+                .lookup_property(&name, PropertyLookupMode::ComponentLocal)
+                .internal_or_resolved_name();
+            let e = expression_from_reference(NamedReference::new(self, key), &ty, None);
             if let Some(r) = f(&name, e) {
                 return Some(r);
             }
@@ -523,7 +542,7 @@ impl LookupObject for ElementRc {
     }
 
     fn lookup(&self, ctx: &LookupCtx, name: &SmolStr) -> Option<LookupResult> {
-        let lookup_result = self.borrow().lookup_property(name);
+        let lookup_result = self.borrow().lookup_property(name, PropertyLookupMode::ComponentLocal);
         if lookup_result.property_type != Type::Invalid
             && (lookup_result.is_local_to_component
                 || lookup_result.property_visibility != PropertyVisibility::Private)
@@ -540,7 +559,7 @@ impl LookupObject for ElementRc {
                 })
                 .or_else(|| check_extra_deprecated(self, ctx, name));
             Some(expression_from_reference(
-                NamedReference::new(self, lookup_result.resolved_name.to_smolstr()),
+                NamedReference::new(self, lookup_result.internal_or_resolved_name()),
                 &lookup_result.property_type,
                 deprecated,
             ))
@@ -892,7 +911,7 @@ struct MouseCursorSpecific;
 impl LookupObject for MouseCursorSpecific {
     fn for_each_entry<R>(
         &self,
-        _ctx: &LookupCtx,
+        ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
         let e = crate::typeregister::BUILTIN.enums.BuiltInMouseCursor.clone();
@@ -904,6 +923,10 @@ impl LookupObject for MouseCursorSpecific {
             }
         }
         r.or_else(|| {
+            // Experimental until the language has enums with data.
+            if !ctx.experimental_lookup_enabled() {
+                return None;
+            }
             f(&SmolStr::new_static("custom"), BuiltinMacroFunction::CustomMouseCursor.into())
         })
     }
@@ -1257,13 +1280,13 @@ impl LookupObject for ArrayExpression<'_> {
             .or_else(|| f("push", member_macro(BuiltinMacroFunction::ArrayPush)))
             .or_else(|| f("remove", member_macro(BuiltinMacroFunction::ArrayRemove)))
             .or_else(|| f("insert", member_macro(BuiltinMacroFunction::ArrayInsert)))
-            .or_else(|| f("index-of", member_macro(BuiltinMacroFunction::ArrayIndexOf)))
             .or_else(|| {
-                // `any`, `all` and `find-index` take a closure argument; closures are experimental.
-                if !ctx.diag.enable_experimental && !ctx.type_register.expose_internal_types {
+                // Experimental: pending optional types for the -1 result, and closures.
+                if !ctx.experimental_lookup_enabled() {
                     return None;
                 }
-                f("any", member_function(BuiltinFunction::ArrayAny))
+                f("index-of", member_macro(BuiltinMacroFunction::ArrayIndexOf))
+                    .or_else(|| f("any", member_function(BuiltinFunction::ArrayAny)))
                     .or_else(|| f("all", member_function(BuiltinFunction::ArrayAll)))
                     .or_else(|| f("find-index", member_function(BuiltinFunction::ArrayFindIndex)))
             })

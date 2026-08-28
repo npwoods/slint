@@ -12,7 +12,9 @@
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::*;
 use crate::langtype;
-use crate::langtype::{ElementType, KeyboardModifiers, Struct, StructName, Type};
+use crate::langtype::{
+    ElementType, KeyboardModifiers, PropertyLookupMode, Struct, StructName, Type,
+};
 use crate::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use crate::object_tree::*;
 use crate::parser::{NodeOrToken, SyntaxKind, SyntaxNode, identifier_text, syntax_nodes};
@@ -113,65 +115,201 @@ fn resolve_expression(
             Expression::DebugHook { expression, .. } => **expression = new_expr,
             _ => *expr = new_expr,
         }
-    // Specifically used to resolve match expressions
-    } else if let Expression::BinaryExpression { lhs, rhs, op } = expr {
-        let op = *op;
-        let rhs_node =
-            if let Expression::Uncompiled(node) = rhs.as_ref() { Some(node.clone()) } else { None };
+    }
+}
 
+/// Resolve the subject and the case values to create a standard conditional element
+fn resolve_match_elements(
+    elem: &ElementRc,
+    scope: &[ElementRc],
+    type_register: &TypeRegister,
+    type_loader: &crate::typeloader::TypeLoader,
+    diag: &mut BuildDiagnostics,
+) {
+    let mut match_elements = std::mem::take(&mut elem.borrow_mut().match_elements);
+    for match_element in &mut match_elements {
+        if match_element.cases.is_empty()
+            && matches!(match_element.wildcard, WildcardMatchCaseInfo::None)
+        {
+            continue;
+        }
         resolve_expression(
             elem,
-            lhs,
-            property_name,
+            &mut match_element.subject,
+            None,
             Type::Invalid,
             scope,
             type_register,
             type_loader,
             diag,
         );
-        resolve_expression(
-            elem,
-            rhs,
-            property_name,
-            lhs.ty(),
-            scope,
-            type_register,
-            type_loader,
-            diag,
-        );
-        if op == '=' {
-            let is_literal = matches!(
-                rhs.as_ref(),
-                Expression::NumberLiteral(..)
-                    | Expression::StringLiteral(..)
-                    | Expression::BoolLiteral(..)
-                    | Expression::EnumerationValue(..)
+        let case_type = match_element.subject.ty();
+        for case in &mut match_element.cases {
+            resolve_expression(
+                elem,
+                &mut case.value,
+                None,
+                case_type.clone(),
+                scope,
+                type_register,
+                type_loader,
+                diag,
             );
-            let is_cast = matches!(rhs.as_ref(), Expression::Cast { .. });
-            let is_valid_cast = matches!(
-                rhs.as_ref(),
-                Expression::Cast { from, to, .. }
-                    if matches!(from.as_ref(), Expression::NumberLiteral(..))
-                        && matches!(to, Type::Color | Type::Int32)
-            );
-            if let Expression::NumberLiteral(val, unit) = rhs.as_ref()
-                && *unit == Unit::None
-                && val.fract() != 0.0
-                && let Some(node) = &rhs_node
-            {
-                diag.push_warning("Floating point comparison is not recommended".into(), node);
-            }
-
-            if let Some(node) = rhs_node {
-                if is_literal || is_valid_cast {
-                    // pass
-                } else if is_cast {
-                    diag.push_error("Cannot perform type conversion".into(), &node);
-                } else {
-                    diag.push_error("Match expressions must be literal values".into(), &node);
-                }
-            }
+            check_case_value(&case.value, &case.node, diag);
         }
+        let values: Vec<Option<CaseValue>> =
+            match_element.cases.iter().map(|case| CaseValue::new(&case.value)).collect();
+        check_duplicate_cases(&match_element.cases, &values, diag);
+        check_exhaustiveness(match_element, &values, diag);
+        match_element.lower_to_conditional_elements();
+    }
+}
+
+/// Confirms that each case is a literal value and matches the type of the subject
+fn check_case_value(value: &Expression, node: &SyntaxNode, diag: &mut BuildDiagnostics) {
+    let is_literal = as_number_literal(value).is_some()
+        || matches!(
+            value,
+            Expression::StringLiteral(..)
+                | Expression::BoolLiteral(..)
+                | Expression::EnumerationValue(..)
+        );
+    let is_valid_cast = matches!(
+        value,
+        Expression::Cast { from, to, .. }
+            if as_number_literal(from).is_some()
+                && matches!(to, Type::Color | Type::Int32)
+    );
+
+    if let Some((number, Unit::None)) = as_number_literal(value)
+        && number.fract() != 0.0
+    {
+        diag.push_warning("Floating point comparison is not recommended".into(), node);
+    }
+
+    if is_literal || is_valid_cast {
+        // pass
+    } else if matches!(value, Expression::Cast { .. }) {
+        diag.push_error("Cannot perform type conversion".into(), node);
+    } else {
+        diag.push_error("Cases must be literal values".into(), node);
+    }
+}
+
+fn as_number_literal(value: &Expression) -> Option<(f64, Unit)> {
+    match value {
+        Expression::NumberLiteral(number, unit) => Some((*number, *unit)),
+        Expression::UnaryOp { sub, op: '-' } => as_number_literal(sub).map(|(n, u)| (-n, u)),
+        _ => None,
+    }
+}
+
+#[derive(PartialEq)]
+enum CaseValue {
+    Number(f64, Unit),
+    String(SmolStr),
+    Bool(bool),
+    Enumeration(langtype::EnumerationValue),
+}
+
+impl CaseValue {
+    fn new(value: &Expression) -> Option<Self> {
+        match value {
+            Expression::Cast { from, .. } => Self::new(from),
+            Expression::UnaryOp { sub, op: '-' } => match Self::new(sub)? {
+                Self::Number(number, unit) => Some(Self::Number(-number, unit)),
+                _ => None,
+            },
+            Expression::NumberLiteral(number, unit) => Some(Self::Number(*number, *unit)),
+            Expression::StringLiteral(string) => Some(Self::String(string.clone())),
+            Expression::BoolLiteral(boolean) => Some(Self::Bool(*boolean)),
+            Expression::EnumerationValue(value) => Some(Self::Enumeration(value.clone())),
+            _ => None, // For invalid non-literals
+        }
+    }
+}
+
+/// Reports every case whose value is already covered by an earlier case
+fn check_duplicate_cases(
+    cases: &[MatchCaseInfo],
+    values: &[Option<CaseValue>],
+    diag: &mut BuildDiagnostics,
+) {
+    let mut seen: Vec<&CaseValue> = Vec::with_capacity(values.len());
+    for (case, value) in cases.iter().zip(values) {
+        let Some(value) = value else {
+            continue; // not a valid literal
+        };
+        if seen.contains(&value) {
+            diag.push_error("Duplicate case value".into(), &case.node);
+        } else {
+            seen.push(value);
+        }
+    }
+}
+
+impl std::fmt::Display for CaseValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaseValue::Number(number, _) => write!(f, "{number}"),
+            CaseValue::String(string) => write!(f, "{string:?}"),
+            CaseValue::Bool(boolean) => write!(f, "{boolean}"),
+            CaseValue::Enumeration(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// Reports a match element that does not cover every value its subject can take
+fn check_exhaustiveness(
+    match_element: &MatchElementInfo,
+    values: &[Option<CaseValue>],
+    diag: &mut BuildDiagnostics,
+) {
+    if !matches!(match_element.wildcard, WildcardMatchCaseInfo::None) {
+        return;
+    }
+    // Prevents duplicated errors if both not a literal and not exhaustive
+    let mut covered: Vec<&CaseValue> = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(value) = value else {
+            return;
+        };
+        covered.push(value);
+    }
+    let subject_node = match_element.node.Expression();
+    let subject_type = match_element.subject.ty();
+    let expected: Vec<CaseValue> = match &subject_type {
+        Type::Bool => vec![CaseValue::Bool(true), CaseValue::Bool(false)],
+        Type::Enumeration(enumeration) => (0..enumeration.values.len())
+            .map(|value| {
+                CaseValue::Enumeration(langtype::EnumerationValue {
+                    value,
+                    enumeration: enumeration.clone(),
+                })
+            })
+            .collect(),
+        // The subject expression failed to resolve, so an error was already reported
+        Type::Invalid => return,
+        _ => {
+            diag.push_error(
+                format!("Non-exhaustive match on {subject_type}: a '*' case is required"),
+                &subject_node,
+            );
+            return;
+        }
+    };
+
+    let mut missing = Vec::new();
+    for value in &expected {
+        if !covered.contains(&value) {
+            missing.push(format!("'{value}'"));
+        }
+    }
+    if !missing.is_empty() {
+        diag.push_error(
+            format!("Non-exhaustive match on {subject_type}: missing {}", missing.join(", ")),
+            &subject_node,
+        );
     }
 }
 
@@ -221,6 +359,8 @@ pub fn resolve_expressions(
                         );
                     });
                 }
+
+                resolve_match_elements(elem, &scope.0, &doc.local_registry, type_loader, diag);
 
                 resolve_two_way_bindings_for_element(elem, &scope.0, &doc.local_registry, diag);
 
@@ -2530,8 +2670,14 @@ fn continue_lookup_within_element(
     };
     let prop_name = crate::parser::normalize_identifier(second.text());
 
-    let lookup_result = elem.borrow().lookup_property(&prop_name);
-    let local_to_component = lookup_result.is_local_to_component && ctx.is_local_element(elem);
+    let is_local_element = ctx.is_local_element(elem);
+    let mode = if is_local_element {
+        PropertyLookupMode::ComponentLocal
+    } else {
+        PropertyLookupMode::FromOutside
+    };
+    let lookup_result = elem.borrow().lookup_property(&prop_name, mode);
+    let local_to_component = lookup_result.is_local_to_component && is_local_element;
     // A property or function whose type is outside the Slint SC subset
     // doesn't resolve; callbacks do, so a handler can invoke them.
     let sc_resolves = !ctx.diag.is_slint_sc() || lookup_result.property_type.is_slint_sc();
@@ -2569,17 +2715,20 @@ fn continue_lookup_within_element(
         }
         let prop = Expression::PropertyReference(NamedReference::new(
             elem,
-            lookup_result.resolved_name.to_smolstr(),
+            lookup_result.internal_or_resolved_name(),
         ));
         maybe_lookup_object(prop.into(), it, ctx)
     } else if matches!(lookup_result.property_type, Type::Callback { .. }) {
+        if let Some(message) = lookup_result.deprecated.as_ref().filter(|_| !local_to_component) {
+            ctx.diag.push_property_deprecation_warning_with_message(&prop_name, message, &second);
+        }
         if let Some(x) = it.next() {
             ctx.diag.push_error("Cannot access fields of callback".into(), &x)
         }
         Some(LookupResult::Callable(LookupResultCallable::Callable(Callable::Callback(
-            NamedReference::new(elem, lookup_result.resolved_name.to_smolstr()),
+            NamedReference::new(elem, lookup_result.internal_or_resolved_name()),
         ))))
-    } else if sc_resolves && let Type::Function(fun) = lookup_result.property_type {
+    } else if sc_resolves && let Type::Function(fun) = &lookup_result.property_type {
         if lookup_result.property_visibility == PropertyVisibility::Private && !local_to_component {
             let message = format!(
                 "The function '{}' is private. Annotate it with 'public' to make it accessible from other components",
@@ -2597,6 +2746,9 @@ fn continue_lookup_within_element(
         {
             ctx.diag.push_error(format!("The function '{}' is protected", second.text()), &second);
         }
+        if let Some(message) = lookup_result.deprecated.as_ref().filter(|_| !local_to_component) {
+            ctx.diag.push_property_deprecation_warning_with_message(&prop_name, message, &second);
+        }
         if let Some(x) = it.next() {
             ctx.diag.push_error("Cannot access fields of a function".into(), &x)
         }
@@ -2604,7 +2756,7 @@ fn continue_lookup_within_element(
             Some(builtin) => Callable::Builtin(builtin),
             None => Callable::Function(NamedReference::new(
                 elem,
-                lookup_result.resolved_name.to_smolstr(),
+                lookup_result.internal_or_resolved_name(),
             )),
         };
         if matches!(fun.args.first(), Some(Type::ElementReference)) {
@@ -2642,7 +2794,10 @@ fn continue_lookup_within_element(
             // Attempt to recover if the user wanted to write "-"
             if elem
                 .borrow()
-                .lookup_property(&crate::parser::normalize_identifier(&second.text()[0..minus_pos]))
+                .lookup_property(
+                    &crate::parser::normalize_identifier(&second.text()[0..minus_pos]),
+                    mode,
+                )
                 .property_type
                 != Type::Invalid
             {
@@ -2757,14 +2912,22 @@ fn resolve_two_way_bindings_for_element(
             .or_else(|| elem.borrow().callback_alias_declaration_node(prop_name));
         if let Some(n) = twb_node {
             let node: SyntaxNode = n.clone().into();
-            let lhs_lookup = elem.borrow().lookup_property(prop_name);
+            let lhs_lookup =
+                elem.borrow().lookup_property(prop_name, PropertyLookupMode::InternalName);
             if !lhs_lookup.is_valid() {
                 // An attempt to resolve this already failed when trying to resolve the property type
                 assert!(diag.has_errors());
                 continue;
             }
+            // Diagnostics name the property as written in the source, not by its mangled key.
+            let declared_name = elem
+                .borrow()
+                .property_declarations
+                .get(prop_name)
+                .and_then(|d| d.shadowed_name.clone())
+                .unwrap_or_else(|| prop_name.clone());
             let mut lookup_ctx = LookupCtx {
-                property_name: Some(prop_name.as_str()),
+                property_name: Some(declared_name.as_str()),
                 property_type: lhs_lookup.property_type.clone(),
                 expected_type: lhs_lookup.property_type.clone(),
                 component_scope: scope,
@@ -2811,7 +2974,10 @@ fn resolve_two_way_bindings_for_element(
                 }
 
                 // Check the compatibility.
-                let mut rhs_lookup = nr.element().borrow().lookup_property(nr.name());
+                let mut rhs_lookup = nr
+                    .element()
+                    .borrow()
+                    .lookup_property(nr.name(), PropertyLookupMode::InternalName);
                 if rhs_lookup.property_type == Type::Invalid {
                     // An attempt to resolve this already failed when trying to resolve the property type
                     assert!(diag.has_errors());

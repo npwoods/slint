@@ -329,6 +329,9 @@ fn if_condition() {
         export component Ui inherits Window {
             in property <bool> c : true;
             background: black;
+            // Static siblings before and after the conditional: toggling the condition
+            // must not repaint them.
+            Rectangle { x: 5px; y: 5px; width: 8px; height: 8px; background: green; }
             if c: Rectangle {
                 x: 45px;
                 y: 45px;
@@ -336,6 +339,7 @@ fn if_condition() {
                 width: 32px;
                 height: 3px;
             }
+            Rectangle { x: 100px; y: 200px; width: 20px; height: 20px; background: blue; }
         }
     }
 
@@ -654,6 +658,229 @@ fn moving_rendering_dirty_item_clears_old_position() {
     assert!(window.draw_if_needed(|renderer| {
         do_test_render_region(renderer, 20, 50, 300, 70);
     }));
+}
+
+#[test]
+/// Two overlapping siblings swapping their dynamic z order must repaint the overlap,
+/// even though nothing but the stacking order changed. See #12397.
+fn dynamic_z_order() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <int> z-red: 1;
+            in property <int> z-blue: 2;
+            background: black;
+            // Two fully overlapping rectangles: only the z order decides which is visible.
+            Rectangle {
+                x: 10phx;
+                y: 20phx;
+                width: 30phx;
+                height: 40phx;
+                background: red;
+                z: root.z-red;
+            }
+            Rectangle {
+                x: 10phx;
+                y: 20phx;
+                width: 30phx;
+                height: 40phx;
+                background: blue;
+                z: root.z-blue;
+            }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(180, 260));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 180, 260);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Bring the red rectangle on top. Nothing moved, but the overlap must be
+    // repainted because the visible pixels there change from blue to red.
+    ui.set_z_red(3);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 20, 10 + 30, 20 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Swapping back must repaint the overlap again.
+    ui.set_z_red(1);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 20, 10 + 30, 20 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+/// Assert that drawing produces no repaint: either no redraw is requested, or the
+/// dirty region is empty.
+#[track_caller]
+fn do_test_no_repaint(window: &MinimalSoftwareWindow) {
+    window.draw_if_needed(|renderer| {
+        let mut buffer = vec![TestPixel(false); 500 * 500];
+        let r = renderer.render(buffer.as_mut_slice(), 500);
+        assert_eq!(r.bounding_box_size(), PhysicalSize::default(), "expected no repaint");
+        assert!(buffer.iter().all(|p| !p.0), "expected no pixel to be written");
+    });
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+/// Like `dynamic_z_order`, but the reordered siblings are `for` instances whose z comes
+/// from the model. Two spatially separate clusters (kept apart in z so they never
+/// interleave) check that only the reordered cluster repaints, that moving an instance
+/// across several others repaints, and that a z change preserving the order repaints nothing.
+fn dynamic_z_order_repeater() {
+    slint::slint! {
+        struct ZItem { px: length, py: length, z: int }
+        export component Ui inherits Window {
+            in property <[ZItem]> items;
+            background: black;
+            for it in items: Rectangle {
+                x: it.px;
+                y: it.py;
+                width: 40phx;
+                height: 40phx;
+                background: red;
+                z: it.z;
+            }
+        }
+    }
+
+    // Cluster A stacked at (10,20), cluster B at (150,150).
+    let items = std::rc::Rc::new(slint::VecModel::from(vec![
+        ZItem { px: 10., py: 20., z: 10 },
+        ZItem { px: 10., py: 20., z: 20 },
+        ZItem { px: 10., py: 20., z: 30 },
+        ZItem { px: 150., py: 150., z: 110 },
+        ZItem { px: 150., py: 150., z: 120 },
+        ZItem { px: 150., py: 150., z: 130 },
+    ]));
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    ui.set_items(items.clone().into());
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(300, 300));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 300, 300);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    let set_z = |i: usize, z: i32| {
+        let mut it = items.row_data(i).unwrap();
+        it.z = z;
+        items.set_row_data(i, it);
+    };
+
+    // Reorder inside cluster A (instance 0 rises above instance 1): only cluster A repaints.
+    set_z(0, 25);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 20, 10 + 40, 20 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // A z change that keeps the order (still between 20 and 30): nothing repaints.
+    set_z(0, 27);
+    do_test_no_repaint(&window);
+
+    // Reorder inside cluster B: only cluster B repaints, cluster A stays clean.
+    set_z(3, 125);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 150, 150, 150 + 40, 150 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Move instance 0 across both other cluster-A instances to the top: cluster A repaints.
+    set_z(0, 35);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 20, 10 + 40, 20 + 40);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+/// Reversing the z order of three siblings in one frame must repaint the overlap of
+/// every pair whose relative order flipped — including a pair where neither member's
+/// rank *decreased*: here B keeps its middle rank and A only rises, yet A slides on
+/// top of B, so the A∩B overlap must be repainted (via A's rect).
+fn dynamic_z_order_reversal() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> rev: false;
+            background: black;
+            // A and B overlap each other; C is far away from both.
+            Rectangle { x: 10phx; y: 10phx; width: 30phx; height: 30phx; background: red; z: rev ? 30 : 10; } // A
+            Rectangle { x: 25phx; y: 25phx; width: 30phx; height: 30phx; background: blue; z: 20; } // B
+            Rectangle { x: 150phx; y: 150phx; width: 30phx; height: 30phx; background: green; z: rev ? 10 : 30; } // C
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(300, 300));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 300, 300);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // Reverse the stacking order: A (rank 0→2) and C (rank 2→0) change rank, B stays
+    // at rank 1. The dirty region is A ∪ C, which covers both flipped overlaps
+    // (A∩B is within A, B∩C within C).
+    ui.set_rev(true);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 10, 180, 180);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // And back.
+    ui.set_rev(false);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 10, 10, 180, 180);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+}
+
+#[test]
+/// A sibling appearing in the same frame as a z swap must not mask the swap: the
+/// conditional element enters the stacking order below everything, shifting the
+/// following ranks up, so the demoted rectangle's rank does not decrease — but the
+/// overlap of the swapped pair must still be repainted.
+fn dynamic_z_order_swap_with_appearing_sibling() {
+    slint::slint! {
+        export component Ui inherits Window {
+            in property <bool> front: false;
+            background: black;
+            // Appears below everything, away from the overlapping pair.
+            if front: Rectangle { x: 140phx; y: 140phx; width: 8phx; height: 8phx; background: green; z: -1; }
+            Rectangle { x: 20phx; y: 20phx; width: 30phx; height: 30phx; background: red; z: front ? 0 : 10; }
+            Rectangle { x: 20phx; y: 20phx; width: 30phx; height: 30phx; background: blue; z: 5; }
+        }
+    }
+
+    slint::platform::set_platform(Box::new(TestPlatform)).ok();
+    let ui = Ui::new().unwrap();
+    let window = WINDOW.with(|x| x.clone());
+    window.set_size(slint::PhysicalSize::new(200, 200));
+    ui.show().unwrap();
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 0, 0, 200, 200);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
+
+    // One property flip shows the green rectangle and swaps red below blue.
+    // The dirty region is the swapped pair's rect plus the appearing rectangle.
+    ui.set_front(true);
+    assert!(window.draw_if_needed(|renderer| {
+        do_test_render_region(renderer, 20, 20, 148, 148);
+    }));
+    assert!(!window.draw_if_needed(|_| { unreachable!() }));
 }
 
 #[test]

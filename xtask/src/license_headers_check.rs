@@ -7,7 +7,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use std::cell::RefCell;
-use std::str::FromStr;
 use std::sync::LazyLock;
 use std::{path::Path, path::PathBuf};
 
@@ -544,16 +543,19 @@ static LICENSE_LOCATION_FOR_FILE: LazyLock<Vec<(regex::Regex, LicenseLocation)>>
             // Extension matches:
             ("\\.60$", LicenseLocation::Tag(LicenseTagStyle::cpp_style_comment_style())),
             ("\\.60\\.disabled$", LicenseLocation::Tag(LicenseTagStyle::cpp_style_comment_style())),
+            ("\\.appxmanifest\\.in$", LicenseLocation::NoLicense),
             ("\\.astro$", LicenseLocation::Tag(LicenseTagStyle::cpp_style_comment_style())),
             ("\\.cmake$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.cmake.in$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.conf$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.cpp$", LicenseLocation::Tag(LicenseTagStyle::cpp_style_comment_style())),
             ("\\.css$", LicenseLocation::NoLicense),
+            ("\\.desktop$", LicenseLocation::NoLicense),
             ("\\.dict$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.gitattributes$", LicenseLocation::NoLicense),
             ("\\.gitignore$", LicenseLocation::NoLicense),
             ("\\.gltf$", LicenseLocation::NoLicense),
+            ("\\.gpg$", LicenseLocation::NoLicense),
             ("\\.icns$", LicenseLocation::NoLicense),
             ("\\.ico$", LicenseLocation::NoLicense),
             ("\\.vscodeignore$", LicenseLocation::NoLicense),
@@ -609,6 +611,7 @@ static LICENSE_LOCATION_FOR_FILE: LazyLock<Vec<(regex::Regex, LicenseLocation)>>
             ("\\.wgsl$", LicenseLocation::Tag(LicenseTagStyle::cpp_style_comment_style())),
             ("\\.woff$", LicenseLocation::NoLicense),
             ("\\.xml$", LicenseLocation::NoLicense),
+            ("\\.xml\\.in$", LicenseLocation::NoLicense),
             ("\\.yaml$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.yml$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
             ("\\.py$", LicenseLocation::Tag(LicenseTagStyle::shell_comment_style())),
@@ -686,50 +689,6 @@ const EXPECTED_HEADER: LicenseHeader<'static> = LicenseHeader(SPDX_LICENSE_LINE)
 const EXPECTED_HOMEPAGE: &str = "https://slint.dev";
 const ALLOWED_HOMEPAGE: &str = "https://slint.rs";
 const EXPECTED_REPOSITORY: &str = "https://github.com/slint-ui/slint";
-
-fn collect_files() -> Result<Vec<PathBuf>> {
-    let root = super::root_dir();
-
-    let mut files = Vec::new();
-    let (ls_files_output, split_char) = if root.join(".jj").exists() {
-        (
-            super::run_command(
-                "jj",
-                &["file", "list"],
-                std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
-            )?
-            .stdout,
-            b'\n',
-        )
-    } else {
-        (
-            super::run_command(
-                "git",
-                &["ls-files", "-z"],
-                std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
-            )?
-            .stdout,
-            b'\0',
-        )
-    };
-
-    for path in ls_files_output.split(|ch| *ch == split_char) {
-        if path.is_empty() {
-            continue;
-        }
-        let path = PathBuf::from_str(
-            std::str::from_utf8(path)
-                .context("Error decoding file list command output from VCS as utf-8")?,
-        )
-        .context("Failed to decide path output in VCS file list")?;
-
-        if !path.is_dir() {
-            files.push(root.join(path));
-        }
-    }
-
-    Ok(files)
-}
 
 #[derive(Debug)]
 enum CargoDependency {
@@ -942,7 +901,7 @@ pub struct LicenseHeaderCheck {
 impl LicenseHeaderCheck {
     pub fn check_license_headers(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut seen_errors = false;
-        for path in &collect_files()? {
+        for path in &super::collect_files()? {
             let result = self
                 .check_file(path.as_path())
                 .with_context(|| format!("checking {}", path.to_string_lossy()));

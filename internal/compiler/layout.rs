@@ -5,10 +5,10 @@
 
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::{ElementType, PropertyLookupResult, Type};
+use crate::langtype::{ElementType, PropertyLookupMode, PropertyLookupResult, Type};
 use crate::object_tree::{Component, ElementRc};
 
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, ToSmolStr};
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -81,13 +81,9 @@ pub struct LayoutItem {
     /// The `cross-axis-self-alignment` property, if set.
     /// Used by box layouts and FlexboxLayout; always `None` in a GridLayout.
     pub cross_axis_self_alignment: Option<NamedReference>,
-}
-
-/// A FlexboxLayout child item, wrapping a LayoutItem with flex-specific properties.
-#[derive(Debug, Clone)]
-pub struct FlexboxLayoutItem {
-    pub item: LayoutItem,
-    pub order: Option<NamedReference>,
+    /// The `layout-order` property, if set.
+    /// Used by box layouts and FlexboxLayout; always `None` in a GridLayout.
+    pub layout_order: Option<NamedReference>,
 }
 
 /// A child within a repeated Row in a GridLayout.
@@ -132,8 +128,10 @@ impl RowChildTemplate {
 impl LayoutItem {
     pub fn rect(&self) -> LayoutRect {
         let p = |unresolved_name: &str| {
-            let PropertyLookupResult { resolved_name, property_type, .. } =
-                self.element.borrow().lookup_property(unresolved_name);
+            let PropertyLookupResult { resolved_name, property_type, .. } = self
+                .element
+                .borrow()
+                .lookup_property(unresolved_name, PropertyLookupMode::ComponentLocal);
             if property_type == Type::LogicalLength {
                 Some(NamedReference::new(&self.element, resolved_name.to_smolstr()))
             } else {
@@ -465,6 +463,13 @@ pub struct GridLayoutCell {
     pub colspan_expr: RowColExpr,
     pub rowspan_expr: RowColExpr,
     pub child_items: Option<Vec<RowChildTemplate>>, // for repeated rows
+    /// Set on every cell of a grid whose horizontal solve can read back into
+    /// its vertical cache, i.e. one holding a repeated width-for-height cell.
+    /// The vertical pass must then not measure repeated cells at their solved
+    /// column width, because reading the horizontal cache would close a
+    /// binding loop. Computed by `mark_grid_h_solve_reads_v_cache`, which runs
+    /// once the `layoutinfo-h-with-constraint` functions exist.
+    pub h_solve_reads_v_cache: bool,
 }
 
 impl GridLayoutCell {
@@ -743,6 +748,9 @@ impl BoxLayout {
             if let Some(e) = cell.cross_axis_self_alignment.as_mut() {
                 visitor(&mut *e);
             }
+            if let Some(e) = cell.layout_order.as_mut() {
+                visitor(&mut *e);
+            }
         }
         self.geometry.visit_named_references(visitor);
         if let Some(e) = self.cross_alignment.as_mut() {
@@ -754,7 +762,7 @@ impl BoxLayout {
 /// Internal representation of a FlexboxLayout (row or column direction with wrapping)
 #[derive(Debug, Clone)]
 pub struct FlexboxLayout {
-    pub elems: Vec<FlexboxLayoutItem>,
+    pub elems: Vec<LayoutItem>,
     pub geometry: LayoutGeometry,
     pub direction: Option<NamedReference>,
     pub cross_axis_line_alignment: Option<NamedReference>,
@@ -831,11 +839,11 @@ impl FlexboxLayout {
 
     pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
-            cell.item.constraints.visit_named_references(visitor);
-            if let Some(e) = cell.item.cross_axis_self_alignment.as_mut() {
+            cell.constraints.visit_named_references(visitor);
+            if let Some(e) = cell.cross_axis_self_alignment.as_mut() {
                 visitor(&mut *e)
             }
-            if let Some(e) = cell.order.as_mut() {
+            if let Some(e) = cell.layout_order.as_mut() {
                 visitor(&mut *e)
             }
         }
@@ -1003,22 +1011,14 @@ pub fn static_native_stretch(elem: &ElementRc) -> Option<Expression> {
 /// Create a new property based on the name. (it might get a different name if that property exist)
 pub fn create_new_prop(elem: &ElementRc, tentative_name: SmolStr, ty: Type) -> NamedReference {
     let mut e = elem.borrow_mut();
-    if !e.lookup_property(&tentative_name).is_valid() {
-        e.property_declarations.insert(tentative_name.clone(), ty.into());
-        drop(e);
-        NamedReference::new(elem, tentative_name)
+    let name = if e.lookup_property(&tentative_name, PropertyLookupMode::InternalName).is_valid() {
+        e.unique_member_name(&tentative_name)
     } else {
-        let mut counter = 0;
-        loop {
-            counter += 1;
-            let name = format_smolstr!("{}{}", tentative_name, counter);
-            if !e.lookup_property(&name).is_valid() {
-                e.property_declarations.insert(name.clone(), ty.into());
-                drop(e);
-                return NamedReference::new(elem, name);
-            }
-        }
-    }
+        tentative_name
+    };
+    e.property_declarations.insert(name.clone(), ty.into());
+    drop(e);
+    NamedReference::new(elem, name)
 }
 
 /// Return true if this type is a layout that has constraints

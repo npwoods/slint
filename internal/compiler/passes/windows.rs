@@ -48,10 +48,12 @@ pub fn ensure_window(
         children: std::mem::take(&mut win_elem_mut.children),
         enclosing_component: win_elem_mut.enclosing_component.clone(),
         property_declarations: Default::default(),
+        shadowing_members: Default::default(),
         named_references: Default::default(),
         repeated: Default::default(),
         states: Default::default(),
         transitions: Default::default(),
+        match_elements: Default::default(),
         child_of_layout: false,
         child_of_flexbox: false,
         parent_box_layout_orientation: None,
@@ -64,6 +66,7 @@ pub fn ensure_window(
         geometry_props: Default::default(),
         is_flickable_content: false,
         is_tooltip: false,
+        z_order: None,
         item_index: Default::default(),
         item_index_of_first_children: Default::default(),
         grid_layout_cell: None,
@@ -163,7 +166,7 @@ pub fn inherits_window(component: &Rc<Component>) -> bool {
 /// application sets, has none.
 #[cfg(feature = "slint-sc")]
 fn literal_alpha(expr: &Expression) -> Option<u8> {
-    match crate::passes::ignore_debug_hooks(expr) {
+    match expr.ignore_debug_hooks() {
         Expression::Cast { from, to: Type::Color | Type::Brush } => literal_alpha(from),
         // A color literal is a number carrying its channels, alpha highest
         Expression::NumberLiteral(value, _) => Some((*value as u32 >> 24) as u8),
