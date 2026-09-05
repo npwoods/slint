@@ -185,6 +185,21 @@ impl IntrospectionState {
             .ok_or_else(|| "Attempting to access deleted window".to_string())
     }
 
+    /// Runs the instantiation pass on every tracked window.
+    ///
+    /// The pass materializes repeaters, conditionals and component containers.
+    /// Introspection reads the item tree between events, where nothing else runs the pass.
+    /// A model changed since the last event would otherwise report its old instances (#13223).
+    /// Call this from a transport entry point, never from within a property evaluation.
+    pub fn ensure_windows_instantiated(&self) {
+        // Collect first: the pass runs change handlers, which may re-enter `add_window`.
+        let adapters: Vec<_> =
+            self.windows.borrow().values().filter_map(|w| w.window_adapter.upgrade()).collect();
+        for adapter in adapters {
+            WindowInner::from_pub(adapter.window()).ensure_tree_instantiated();
+        }
+    }
+
     pub fn root_element_handle(&self, window_index: ArenaIndex) -> Result<ArenaIndex, String> {
         Ok(self
             .windows
@@ -687,6 +702,9 @@ pub(crate) fn convert_to_proto_accessible_role(
         i_slint_core::items::AccessibleRole::Image => proto::AccessibleRole::Image,
         i_slint_core::items::AccessibleRole::RadioButton => proto::AccessibleRole::RadioButton,
         i_slint_core::items::AccessibleRole::RadioGroup => proto::AccessibleRole::RadioGroup,
+        i_slint_core::items::AccessibleRole::WindowTitleBar => {
+            proto::AccessibleRole::WindowTitleBar
+        }
         i_slint_core::items::AccessibleRole::Banner => proto::AccessibleRole::Banner,
         i_slint_core::items::AccessibleRole::Complementary => proto::AccessibleRole::Complementary,
         i_slint_core::items::AccessibleRole::ContentInfo => proto::AccessibleRole::ContentInfo,
@@ -737,6 +755,9 @@ pub(crate) fn convert_from_proto_accessible_role(
         proto::AccessibleRole::Image => i_slint_core::items::AccessibleRole::Image,
         proto::AccessibleRole::RadioButton => i_slint_core::items::AccessibleRole::RadioButton,
         proto::AccessibleRole::RadioGroup => i_slint_core::items::AccessibleRole::RadioGroup,
+        proto::AccessibleRole::WindowTitleBar => {
+            i_slint_core::items::AccessibleRole::WindowTitleBar
+        }
         proto::AccessibleRole::Banner => i_slint_core::items::AccessibleRole::Banner,
         proto::AccessibleRole::Complementary => i_slint_core::items::AccessibleRole::Complementary,
         proto::AccessibleRole::ContentInfo => i_slint_core::items::AccessibleRole::ContentInfo,
@@ -920,6 +941,25 @@ pub(crate) mod dispatch {
         Ok(())
     }
 
+    /// Move the pointer to an element's center without pressing any button.
+    ///
+    /// `click` and `drag` both press, so hover-only behavior cannot be reached
+    /// through them.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn move_pointer_to_element(
+        state: &IntrospectionState,
+        element: ArenaIndex,
+    ) -> Result<(), String> {
+        let element = state.element("move_pointer", element)?;
+        let position = element.absolute_center();
+        let window_adapter =
+            element.window_adapter().ok_or_else(|| "element has no window".to_string())?;
+        window_adapter
+            .window()
+            .dispatch_event(i_slint_core::platform::WindowEvent::PointerMoved { position });
+        Ok(())
+    }
+
     pub(crate) async fn drag(
         state: &IntrospectionState,
         element: ArenaIndex,
@@ -966,6 +1006,14 @@ fn test_dispatch_click_double_click_stale_handle() {
         .unwrap_err();
         assert!(err.contains("Invalid element handle"), "got: {err}");
     });
+}
+
+#[test]
+#[cfg(feature = "mcp")]
+fn test_dispatch_move_pointer_stale_handle() {
+    let state = IntrospectionState::new();
+    let err = dispatch::move_pointer_to_element(&state, ArenaIndex::default()).unwrap_err();
+    assert!(err.contains("Invalid element handle"), "got: {err}");
 }
 
 #[test]
@@ -1152,7 +1200,9 @@ fn test_accessibility_enum_mapping_complete() {
 #[cfg(test)]
 mod dispatch_result_tests {
     use i_slint_core::api::LogicalPosition;
-    use i_slint_core::input::{InternalKeyEvent, KeyEvent, KeyEventType, MouseEvent, TouchPhase};
+    use i_slint_core::input::{
+        BackendMouseEvent, InternalKeyEvent, KeyEvent, KeyEventType, TouchPhase,
+    };
     use i_slint_core::items::PointerEventButton;
     use i_slint_core::lengths::LogicalPoint;
     use i_slint_core::platform::{InternalEvent, WindowEvent, WindowEventDispatchResult};
@@ -1341,7 +1391,7 @@ mod dispatch_result_tests {
         assert_eq!(
             record_dispatch(
                 app.window(),
-                WindowEvent::internal(MouseEvent::Pressed {
+                WindowEvent::internal(BackendMouseEvent::Pressed {
                     position: LogicalPoint::new(50.0, 50.0),
                     button: PointerEventButton::Left,
                     click_count: 0,
@@ -1369,7 +1419,7 @@ mod dispatch_result_tests {
         }
         let app = App::new().unwrap();
         assert_eq!(
-            record_dispatch(app.window(), WindowEvent::internal(MouseEvent::Exit)),
+            record_dispatch(app.window(), WindowEvent::internal(BackendMouseEvent::Exit)),
             vec![(WindowEvent::PointerExited, WindowEventDispatchResult::Accepted)]
         );
     }

@@ -2973,7 +2973,7 @@ fn repeated_layout_item_fields(
             let cross_o = orientation_name(cross_o);
             format!(
                 "(o == slint::cbindgen_private::Orientation::{cross_o}) ? ({expr}) \
-                 : slint::cbindgen_private::CrossAxisSelfAlignment::Auto"
+                 : slint::cbindgen_private::CrossAxisAlignment::Auto"
             )
         }
         None => "{}".to_owned(),
@@ -4314,7 +4314,7 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
             )
         }
         Expression::PropertyReference(nr) => access_member(nr, ctx).get_property(),
-        Expression::BuiltinFunctionCall { function, arguments } => {
+        Expression::BuiltinFunctionCall { function, arguments, .. } => {
             compile_builtin_function_call(function.clone(), arguments, ctx)
         }
         Expression::CallBackCall { callback, arguments } => {
@@ -4700,6 +4700,9 @@ fn compile_expression(expr: &llr::Expression, ctx: &EvaluationContext) -> String
         }
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => format!(
             "slint::cbindgen_private::EasingCurve(slint::cbindgen_private::EasingCurve::Tag::CubicBezier, {a}, {b}, {c}, {d})"
+        ),
+        Expression::EasingCurve(EasingCurve::Spring(a)) => format!(
+            "slint::cbindgen_private::EasingCurve(slint::cbindgen_private::EasingCurve::Tag::Spring, {a})"
         ),
         // The other curves have no parameters and their C++ Tag matches the variant name.
         Expression::EasingCurve(e) => {

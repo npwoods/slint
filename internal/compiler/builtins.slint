@@ -1048,8 +1048,10 @@ component KeyBinding {
 ///    a `TouchArea`, then `Flickable` will flick immediately on pointer move events when the euclidean distance
 ///    to the coordinates of the press event exceeds 8 logical pixels.
 ///
-/// All pointer and mouse events that occur within the bounds of a `Flickable` are intercepted by the `Flickable`
-/// itself and are not propagated to any elements underneath it.
+/// If no element underneath claims a press, the `Flickable` itself only intercepts it when it can actually pan in some direction,
+/// i.e. when its `content-width`/`content-height` exceed its own size, or its content is currently scrolled away from the origin.
+/// Otherwise the event is forwarded to elements underneath it,
+/// the same way wheel/scroll events already are (see below).
 ///
 /// ## Wheel/Scroll Event Interaction
 ///
@@ -1137,6 +1139,15 @@ export component Flickable inherits Empty {
 ///
 /// Pointer press events on the recognizer's area are forwarded to the children with a small delay.
 /// If the pointer moves by more than 8 logical pixels in one of the enabled swipe directions, the gesture is recognized, and events are no longer forwarded to the children.
+///
+/// To keep the gesture-recognition area large enough to feel responsive, wrap the `SwipeGestureHandler` around the controls it should
+/// handle swipes for, rather than placing it as a sibling before them.
+///
+/// :::note{Known issue}
+/// [#6781](https://github.com/slint-ui/slint/issues/6781): `SwipeGestureHandler` can interfere with other controls that also recognize swipe gestures, such as `Slider`.
+/// Work around it by disabling the relevant `handle-swipe-*` properties while the child is being interacted with, for example in a
+/// `Slider`'s `changed` and `released` callbacks.
+/// :::
 /// \group:gestures
 export component SwipeGestureHandler {
     /// When disabled, the `SwipeGestureHandler` doesn't recognize any gestures.
@@ -1469,7 +1480,7 @@ component ContextMenu inherits Empty {
     callback show(position: Point);
     function close() {
     }
-    function is-open() -> bool {
+    pure function is-open() -> bool {
     }
     in property <bool> enabled: true;
 }
@@ -1838,6 +1849,7 @@ export component TextInput {
     /// Selects the text between two UTF-8 offsets.
     /// `anchor` is the end of the selection that stays put and `focus` the end the cursor moves to,
     /// so `focus` may precede `anchor` to select backwards.
+    /// Pass the same value for both to place the text cursor at that offset without selecting anything.
     function set-selection-offsets(anchor: int, focus: int) {
         BuiltinFunction.SetSelectionOffsets
     }
@@ -2056,7 +2068,7 @@ export component GridLayout {
 /// Cell elements inside a `VerticalLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
-/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element.
 /// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
@@ -2143,7 +2155,7 @@ export component VerticalLayout {
 /// Cell elements inside a `HorizontalLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
-/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element.
 /// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
@@ -2267,7 +2279,7 @@ export component HorizontalLayout {
 /// Cell elements inside a `FlexboxLayout` obtain the following new properties:
 ///
 /// ### cross-axis-self-alignment
-/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisSelfAlignment" defaultValue="auto">
+/// <SlintProperty propName="cross-axis-self-alignment" typeName="enum" enumName="CrossAxisAlignment" defaultValue="auto">
 /// Overrides the container's `cross-axis-alignment` for this element. CSS Flexbox calls this "align-self".
 /// The default value `auto` uses the container's `cross-axis-alignment`.
 /// </SlintProperty>
@@ -2550,14 +2562,14 @@ export component Path {
     /// If a `t` outside the bounds of 0 and 1 is passed, it will be converted to its decimal fraction.
     /// Ex: 1.5 -> 0.5 and 2.0 -> 1.0. This allows for N iterations of a loop
     /// by animating t from 0 to N. If `t` is animated from N to 0, it will loop N times backwards.
-    function point-at(t: float) -> Point {
+    pure function point-at(t: float) -> Point {
         BuiltinFunction.PathPointAt
     }
     /// Returns the angle (in degrees) between the x-axis and the path's tangent vector at the given `t`.
     /// The tangent points in the direction the path was defined, so this reflects the path's shape and not
     /// the object's current direction of travel. Returns 0 if the path is empty.
     /// If a `t` outside the bounds of 0 and 1 is passed, the decimal fraction will be passed.
-    function angle-at(t: float) -> angle {
+    pure function angle-at(t: float) -> angle {
         BuiltinFunction.PathAngleAt
     }
     //!

@@ -81,13 +81,17 @@ jobs:
             save_if: ${{ github.ref == 'refs/heads/master' }}
 
     visual_editor:
-        if: ${{ contains(fromJSON(inputs.changes), 'visual_editor') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(fromJSON(inputs.changes), 'visual_editor') }}
         name: Visual Editor
         runs-on: macos-14
         timeout-minutes: 120
         env:
             RUSTFLAGS: -D warnings
             SLINT_EMIT_DEBUG_INFO: '1'
+            # The UI tests need a private package that GitHub doesn't hand the
+            # token for to pull requests from forks. Lint and build the editor
+            # there anyway, and skip only the steps that need the token.
+            UI_TESTS: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         steps:
             - uses: actions/checkout@v7
             - uses: ./.github/actions/install-skia-dependencies
@@ -101,6 +105,7 @@ jobs:
                   python-version: '3.11'
             - uses: astral-sh/setup-uv@v7
             - name: Install UI test dependencies
+              if: ${{ env.UI_TESTS == 'true' }}
               working-directory: tools/editor/ui-tests
               env:
                   UV_INDEX: slint-private=https://testing.slint.dev/simple/
@@ -114,6 +119,7 @@ jobs:
             - name: Build the visual editor UI test binary
               run: cargo build --locked -p slint-editor --all-features --features slint/mcp
             - name: Run visual editor UI tests
+              if: ${{ env.UI_TESTS == 'true' }}
               working-directory: tools/editor/ui-tests
               env:
                   SLINT_BACKEND: headless-skia
@@ -370,7 +376,10 @@ jobs:
     # Compile checks that need cross-compilation toolchains: the mcu backend
     # for no_std targets (ARM and ESP32) and the 32-bit ARM FFI build. They
     # share one job to keep the number of runners a PR occupies down; each
-    # step only runs when its own filter group matched.
+    # step only runs when its own filter group matched. The mcu-embassy
+    # simulator is checked here too, next to its mcu counterpart, even though
+    # it builds for the host; cargo check doesn't link, so it needs no
+    # system libraries.
     cross_compile_checks:
         if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'api_cpp') }}
         env:
@@ -398,6 +407,13 @@ jobs:
               env:
                   RUSTFLAGS: --cfg slint_int_coord -D warnings
               run: cargo check --bin ui_mcu --target=thumbv8m.main-none-eabihf --no-default-features --features="mcu-embassy/mcu" --release
+              working-directory: examples/mcu-embassy
+            - name: Check mcu-embassy simulator
+              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
+              env:
+                  RUSTFLAGS: -D warnings
+              # Host target, overriding the embedded default target of this directory's .cargo/config.toml
+              run: cargo check --bin ui_simulator --target=x86_64-unknown-linux-gnu --no-default-features --features=simulator --release
               working-directory: examples/mcu-embassy
             - name: Check all boards
               if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') }}
@@ -759,6 +775,52 @@ jobs:
               # The excluded crates need a dedicated toolchain or don't cross-compile here.
               run: cargo xwin build --target i686-pc-windows-msvc --locked --workspace --exclude slint-node --exclude slint-cpp --exclude slint-python --exclude slint-sc --exclude slint-doc-generator --exclude i-slint-renderer-skia --exclude slint-editor
 
+    # `backend-linuxkms` is the bare backend and `compat-1-2` restores its pre-1.18
+    # meaning of libseat + libinput. Getting that implication wrong still compiles,
+    # it just silently changes what an application links against, so assert the
+    # resolution itself, from the CMake options down. `cargo tree` and CMake only, no
+    # compilation and no system libraries.
+    linuxkms_features:
+        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'slint') || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'api_cpp') }}
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/setup-rust
+              with:
+                  key: x-linuxkms-features
+            - name: Check LinuxKMS feature resolution
+              run: ./api/cpp/tests/check_linuxkms_features.sh
+
+    # Compile the four combinations of the LinuxKMS backend's libseat and libinput
+    # features, to catch mistakes in their `#[cfg]` gating. That a combination really
+    # drops its dependencies is asserted by linuxkms_features above, which inspects the
+    # resolved dependency graph instead of relying on which packages a runner image
+    # happens to ship.
+    linuxkms_build_matrix:
+        if: ${{ inputs.full }}
+        runs-on: ubuntu-24.04
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: "minimal"
+                      features: "compat-1-18,backend-linuxkms,renderer-software"
+                    - name: "libseat"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libseat,renderer-software"
+                    - name: "libinput"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libinput,renderer-software"
+                    - name: "libseat + libinput"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libseat,backend-linuxkms-libinput,renderer-software"
+        name: LinuxKMS ${{ matrix.name }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: ./.github/actions/setup-rust
+              with:
+                  key: x-linuxkms-${{ matrix.name }}
+            - name: Build
+              run: cargo build -p slint --no-default-features --features ${{ matrix.features }}
+
     qa-tree-sitter-latest:
         if: ${{ inputs.full }}
         uses: ./.github/workflows/tree_sitter.yaml
@@ -815,7 +877,7 @@ jobs:
                   # runner's system libclang is too old for; use the one installed above.
                   export LIBCLANG_PATH=/usr/lib/llvm-20/lib
                   mkdir ${{ runner.workspace }}/cppbuild
-                  cmake -GNinja -B ${{ runner.workspace }}/cppbuild -S . -DRust_CARGO_TARGET=${{ matrix.target }} -DSLINT_BUILD_TESTING=ON -DSLINT_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_BACKEND_QT=OFF -DSLINT_FEATURE_BACKEND_LINUXKMS=ON -DSLINT_FEATURE_INTERPRETER=ON
+                  cmake -GNinja -B ${{ runner.workspace }}/cppbuild -S . -DRust_CARGO_TARGET=${{ matrix.target }} -DSLINT_BUILD_TESTING=ON -DSLINT_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_BACKEND_QT=OFF -DSLINT_FEATURE_BACKEND_LINUXKMS_LIBSEAT=ON -DSLINT_FEATURE_BACKEND_LINUXKMS_LIBINPUT=ON -DSLINT_FEATURE_INTERPRETER=ON
                   cmake --build ${{ runner.workspace }}/cppbuild
 
     mcu_zephyr:

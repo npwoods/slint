@@ -289,6 +289,15 @@ pub(crate) fn completion_at(
         })?;
     } else if node.kind() == SyntaxKind::AtKeys {
         return with_lookup_ctx(document_cache, node, Some(offset), at_keys_completions);
+    } else if let Some(member) = syntax_nodes::ObjectMember::new(node.clone()) {
+        // Completing an object-literal field value (the value expression is still empty).
+        if let Some(colon) = member.child_token(SyntaxKind::Colon)
+            && offset >= colon.text_range().end()
+        {
+            return with_lookup_ctx(document_cache, node, Some(offset), |ctx| {
+                resolve_expression_scope(ctx, document_cache, snippet_support)
+            })?;
+        }
     } else if let Some(q) = syntax_nodes::QualifiedName::new(node.clone()) {
         match q.parent()?.kind() {
             SyntaxKind::Element => {
@@ -2013,6 +2022,88 @@ mod tests {
     }
 
     #[test]
+    fn expected_type_comparison_rhs() {
+        // A bare enum value / color resolves against the type of the comparison's left-hand
+        // side, so completion offers the matching values after `==`.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                in property <Direction> dir;
+                in property <color> col;
+                out property <bool> b1: dir == 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "down").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+        // The left-hand side is an enum, so colors must not be offered here.
+        assert!(!res.iter().any(|ci| ci.label == "red"));
+
+        let source = r#"
+            component Foo {
+                in property <color> fg;
+                out property <bool> b1: fg != 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "red").unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+    }
+
+    #[test]
+    fn expected_type_call_argument() {
+        // A bare enum value resolves against the parameter type at its argument position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(1, 🔺) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        // First argument is an int, so the enum values must not leak into that position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(🔺, up) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        assert!(!res.iter().any(|ci| ci.label == "up"));
+    }
+
+    #[test]
+    fn expected_type_struct_field_and_array() {
+        // Struct-literal field values and array elements resolve against the field/element type.
+        let source = r#"
+            enum Direction { up, down, forward }
+            struct S { dir: Direction, count: int }
+            component Foo {
+                in property <S> s: { dir: 🔺 };
+            }
+        "#;
+        let res = get_completions(source).unwrap_or_default();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        let source = r#"
+            component Foo {
+                in property <[color]> cols: [red, 🔺];
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+        res.iter().find(|ci| ci.label == "green").unwrap();
+    }
+
+    #[test]
     fn function_calls() {
         let source = r#"
             component Foo {
@@ -2927,6 +3018,39 @@ component Foo {{
                 assert!(
                     results.iter().any(|completion| completion.label == prop),
                     "no '{prop}' completion in a {layout}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_auto_completion_for_cross_axis_alignment() {
+        // `auto` cannot be set on `cross-axis-alignment`, so don't offer it there,
+        // neither as a bare value nor after `CrossAxisAlignment.`
+        for (binding, has_auto) in [
+            ("cross-axis-alignment: @value Rectangle {}", false),
+            ("Rectangle { cross-axis-self-alignment: @value }", true),
+        ] {
+            for value in ["🔺", "CrossAxisAlignment.🔺"] {
+                let binding = binding.replace("@value", value);
+                let source = format!(
+                    r#"
+component Foo {{
+    VerticalLayout {{
+        {binding}
+    }}
+}}
+"#
+                );
+                let results = get_completions(&source).unwrap();
+                assert_eq!(
+                    results.iter().any(|completion| completion.label == "auto"),
+                    has_auto,
+                    "wrong 'auto' completion in `{binding}`"
+                );
+                assert!(
+                    results.iter().any(|completion| completion.label == "center"),
+                    "no 'center' completion in `{binding}`"
                 );
             }
         }

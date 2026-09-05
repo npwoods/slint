@@ -25,8 +25,9 @@ name = "slint-lsp"
 path = "main.rs"
 
 [lib]
-# lib is there only for the web
-crate-type = ["cdylib"]
+# lib is there only for the web.
+# "rlib" is also needed so cdylib don't cause error on musl (#13169)
+crate-type = ["cdylib", "rlib"]
 path = "wasm_main.rs"
 # On windows building this package creates slint-lsp.exe and slint-lsp.dll.
 # To avoid that both end up trying to create slint-lsp.pdb for their debug
@@ -40,7 +41,8 @@ backend-winit = ["slint/backend-winit", "preview"]
 backend-winit-x11 = ["slint/backend-winit-x11", "preview"]
 backend-winit-wayland = ["slint/backend-winit-wayland", "preview"]
 backend-linuxkms = ["slint/backend-linuxkms", "preview"]
-backend-linuxkms-noseat = ["slint/backend-linuxkms-noseat", "preview"]
+backend-linuxkms-libseat = ["slint/backend-linuxkms-libseat", "preview"]
+backend-linuxkms-libinput = ["slint/backend-linuxkms-libinput", "preview"]
 backend-default = ["slint/backend-default", "preview"]
 
 renderer-femtovg = ["slint/renderer-femtovg", "preview"]
@@ -152,6 +154,8 @@ spin_on = { workspace = true }
 tempfile = "3"
 # The remote connector tests talk to the real viewer-side connection.
 i-slint-live-preview = { path = "../../internal/live-preview", features = ["remote"] }
+tokio-tungstenite = "0.30.0"
+tokio = { version = "1.50.0", features = ["test-util"] }
 
 [build-dependencies]
 slint-build = { workspace = true, optional = true }

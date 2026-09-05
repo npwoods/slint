@@ -175,7 +175,7 @@ impl Document {
                 name: name.clone(),
                 values,
                 default_value: 0,
-                node: Some(crate::langtype::DeclNode::new(&n)),
+                node: Some(n.to_source_location()),
                 rust_attributes: n
                     .AtRustAttr()
                     .map(|a| SmolStr::from(a.text().to_string()))
@@ -3173,7 +3173,7 @@ impl Element {
             is_shadowable: p.shadowable,
             builtin_function: None,
             #[cfg(feature = "slint-sc")]
-            is_slint_sc: false,
+            is_slint_sc: true,
             deprecated: p.deprecated.clone(),
             internal_name: None,
         }
@@ -3190,7 +3190,9 @@ impl Element {
             let lookup_result =
                 self.lookup_property(&unresolved_name, PropertyLookupMode::ComponentLocal);
             #[cfg(feature = "slint-sc")]
-            if lookup_result.is_valid() && !lookup_result.is_slint_sc {
+            if b.kind() == SyntaxKind::TwoWayBinding {
+                diag.slint_sc_error("Two-way bindings are", &b);
+            } else if lookup_result.is_valid() && !lookup_result.is_slint_sc {
                 diag.slint_sc_error(&format!("The property '{unresolved_name}' is"), &name_token);
             }
             if !lookup_result.property_type.is_property_type() {
@@ -3774,7 +3776,7 @@ pub(crate) fn apply_default_type_properties(element: &mut Element) {
         for (prop, info) in &builtin_base.properties {
             if let BuiltinPropertyDefault::Expr(expr) = &info.default_value {
                 element.bindings.0.entry(prop.clone()).or_insert_with(|| {
-                    let mut binding = BindingExpression::from(expr.clone());
+                    let mut binding = BindingExpression::from(expr.to_expression());
                     binding.priority = i32::MAX;
                     RefCell::new(binding)
                 });
@@ -3873,7 +3875,7 @@ pub fn type_struct_from_node(
                 .and_then(|p| syntax_nodes::StructDeclaration::new(p.clone()))
                 .map(|d| d.AtRustAttr().map(|a| SmolStr::from(a.text().to_string())).collect())
                 .unwrap_or_default();
-            let node = crate::langtype::DeclNode::new(struct_decl.as_ref().unwrap_or(&object_node));
+            let node = struct_decl.as_ref().unwrap_or(&object_node).to_source_location();
             StructName::User { name, node, rust_attributes, field_order }
         }),
     }))
@@ -4129,9 +4131,17 @@ pub fn recurse_elem<State>(
     state: &State,
     vis: &mut impl FnMut(&ElementRc, &State) -> State,
 ) {
+    recurse_elem_dyn(elem, state, vis)
+}
+
+fn recurse_elem_dyn<State>(
+    elem: &ElementRc,
+    state: &State,
+    vis: &mut dyn FnMut(&ElementRc, &State) -> State,
+) {
     let state = vis(elem, state);
     for sub in &elem.borrow().children {
-        recurse_elem(sub, &state, vis);
+        recurse_elem_dyn(sub, &state, vis);
     }
 }
 
@@ -4141,7 +4151,15 @@ pub fn recurse_elem_including_sub_components<State>(
     state: &State,
     vis: &mut impl FnMut(&ElementRc, &State) -> State,
 ) {
-    recurse_elem(&component.root_element, state, &mut |elem, state| {
+    recurse_elem_including_sub_components_dyn(component, state, vis)
+}
+
+fn recurse_elem_including_sub_components_dyn<State>(
+    component: &Component,
+    state: &State,
+    vis: &mut dyn FnMut(&ElementRc, &State) -> State,
+) {
+    recurse_elem_dyn(&component.root_element, state, &mut |elem, state| {
         debug_assert!(std::ptr::eq(
             component as *const Component,
             (&*elem.borrow().enclosing_component.upgrade().unwrap()) as *const Component
@@ -4150,7 +4168,7 @@ pub fn recurse_elem_including_sub_components<State>(
             && let ElementType::Component(base) = &elem.borrow().base_type
             && base.parent_element().is_some()
         {
-            recurse_elem_including_sub_components(base, state, vis);
+            recurse_elem_including_sub_components_dyn(base, state, vis);
         }
         vis(elem, state)
     });
@@ -4158,12 +4176,12 @@ pub fn recurse_elem_including_sub_components<State>(
         .popup_windows
         .borrow()
         .iter()
-        .for_each(|p| recurse_elem_including_sub_components(&p.component, state, vis));
+        .for_each(|p| recurse_elem_including_sub_components_dyn(&p.component, state, vis));
     component
         .menu_item_tree
         .borrow()
         .iter()
-        .for_each(|c| recurse_elem_including_sub_components(c, state, vis));
+        .for_each(|c| recurse_elem_including_sub_components_dyn(c, state, vis));
 }
 
 /// Same as recurse_elem, but will take the children from the element as to not keep the element borrow
@@ -4172,10 +4190,18 @@ pub fn recurse_elem_no_borrow<State>(
     state: &State,
     vis: &mut impl FnMut(&ElementRc, &State) -> State,
 ) {
+    recurse_elem_no_borrow_dyn(elem, state, vis)
+}
+
+fn recurse_elem_no_borrow_dyn<State>(
+    elem: &ElementRc,
+    state: &State,
+    vis: &mut dyn FnMut(&ElementRc, &State) -> State,
+) {
     let state = vis(elem, state);
     let children = elem.borrow().children.clone();
     for sub in &children {
-        recurse_elem_no_borrow(sub, &state, vis);
+        recurse_elem_no_borrow_dyn(sub, &state, vis);
     }
 }
 
@@ -4185,7 +4211,15 @@ pub fn recurse_elem_including_sub_components_no_borrow<State>(
     state: &State,
     vis: &mut impl FnMut(&ElementRc, &State) -> State,
 ) {
-    recurse_elem_no_borrow(&component.root_element, state, &mut |elem, state| {
+    recurse_elem_including_sub_components_no_borrow_dyn(component, state, vis)
+}
+
+fn recurse_elem_including_sub_components_no_borrow_dyn<State>(
+    component: &Component,
+    state: &State,
+    vis: &mut dyn FnMut(&ElementRc, &State) -> State,
+) {
+    recurse_elem_no_borrow_dyn(&component.root_element, state, &mut |elem, state| {
         let base = if elem.borrow().repeated.is_some() {
             if let ElementType::Component(base) = &elem.borrow().base_type {
                 if base.parent_element().is_some() {
@@ -4201,20 +4235,18 @@ pub fn recurse_elem_including_sub_components_no_borrow<State>(
             None
         };
         if let Some(base) = base {
-            recurse_elem_including_sub_components_no_borrow(&base, state, vis);
+            recurse_elem_including_sub_components_no_borrow_dyn(&base, state, vis);
         }
         vis(elem, state)
     });
-    component
-        .popup_windows
-        .borrow()
-        .iter()
-        .for_each(|p| recurse_elem_including_sub_components_no_borrow(&p.component, state, vis));
+    component.popup_windows.borrow().iter().for_each(|p| {
+        recurse_elem_including_sub_components_no_borrow_dyn(&p.component, state, vis)
+    });
     component
         .menu_item_tree
         .borrow()
         .iter()
-        .for_each(|c| recurse_elem_including_sub_components_no_borrow(c, state, vis));
+        .for_each(|c| recurse_elem_including_sub_components_no_borrow_dyn(c, state, vis));
 }
 
 /// Visit the model expression of `elem`, if `elem` is the body of a `for`.
@@ -4242,9 +4274,16 @@ pub fn visit_element_expressions_excluding_repeater_model(
     elem: &ElementRc,
     mut vis: impl FnMut(&mut Expression, Option<&str>, &dyn Fn() -> Type),
 ) {
+    visit_element_expressions_excluding_repeater_model_dyn(elem, &mut vis)
+}
+
+fn visit_element_expressions_excluding_repeater_model_dyn(
+    elem: &ElementRc,
+    vis: &mut dyn FnMut(&mut Expression, Option<&str>, &dyn Fn() -> Type),
+) {
     fn visit_element_expressions_simple(
         elem: &ElementRc,
-        vis: &mut impl FnMut(&mut Expression, Option<&str>, &dyn Fn() -> Type),
+        vis: &mut dyn FnMut(&mut Expression, Option<&str>, &dyn Fn() -> Type),
     ) {
         for (name, expr) in elem.borrow().bindings_including_synthetic() {
             vis(&mut expr.borrow_mut(), Some(name.as_str()), &|| {
@@ -4275,7 +4314,7 @@ pub fn visit_element_expressions_excluding_repeater_model(
         }
     }
 
-    visit_element_expressions_simple(elem, &mut vis);
+    visit_element_expressions_simple(elem, vis);
 
     for expr in elem.borrow().change_callbacks.values() {
         for expr in expr.borrow_mut().iter_mut() {
@@ -4302,7 +4341,7 @@ pub fn visit_element_expressions_excluding_repeater_model(
     let mut transitions = std::mem::take(&mut elem.borrow_mut().transitions);
     for t in &mut transitions {
         for (_, _, a) in &mut t.property_animations {
-            visit_element_expressions_simple(a, &mut vis);
+            visit_element_expressions_simple(a, vis);
         }
     }
     elem.borrow_mut().transitions = transitions;
@@ -4327,7 +4366,14 @@ pub fn visit_named_references_in_expression(
     expr: &mut Expression,
     vis: &mut impl FnMut(&mut NamedReference),
 ) {
-    expr.visit_mut(|sub| visit_named_references_in_expression(sub, vis));
+    visit_named_references_in_expression_dyn(expr, vis)
+}
+
+fn visit_named_references_in_expression_dyn(
+    expr: &mut Expression,
+    vis: &mut dyn FnMut(&mut NamedReference),
+) {
+    expr.visit_mut(|sub| visit_named_references_in_expression_dyn(sub, vis));
     match expr {
         Expression::PropertyReference(r) => vis(r),
         Expression::FunctionCall {
@@ -4370,8 +4416,15 @@ pub fn visit_all_named_references_in_element(
     elem: &ElementRc,
     mut vis: impl FnMut(&mut NamedReference),
 ) {
+    visit_all_named_references_in_element_dyn(elem, &mut vis)
+}
+
+fn visit_all_named_references_in_element_dyn(
+    elem: &ElementRc,
+    mut vis: &mut dyn FnMut(&mut NamedReference),
+) {
     visit_element_expressions(elem, |expr, _, _| {
-        visit_named_references_in_expression(expr, &mut vis)
+        visit_named_references_in_expression_dyn(expr, vis)
     });
     let mut states = std::mem::take(&mut elem.borrow_mut().states);
     for s in &mut states {
@@ -4418,7 +4471,7 @@ pub fn visit_all_named_references_in_element(
     let mut debug = std::mem::take(&mut elem.borrow_mut().debug);
     for d in debug.iter_mut() {
         if let Some(l) = d.layout.as_mut() {
-            l.visit_named_references(&mut vis)
+            l.visit_named_references(vis)
         }
     }
     elem.borrow_mut().debug = debug;
@@ -4472,11 +4525,15 @@ pub fn visit_all_named_references(
     component: &Component,
     vis: &mut impl FnMut(&mut NamedReference),
 ) {
-    recurse_elem_including_sub_components_no_borrow(
+    visit_all_named_references_dyn(component, vis)
+}
+
+fn visit_all_named_references_dyn(component: &Component, vis: &mut dyn FnMut(&mut NamedReference)) {
+    recurse_elem_including_sub_components_no_borrow_dyn(
         component,
         &Weak::new(),
         &mut |elem, parent_compo| {
-            visit_all_named_references_in_element(elem, |nr| vis(nr));
+            visit_all_named_references_in_element_dyn(elem, vis);
             let compo = elem.borrow().enclosing_component.clone();
             if !Weak::ptr_eq(parent_compo, &compo) {
                 let compo = compo.upgrade().unwrap();
@@ -4495,7 +4552,7 @@ pub fn visit_all_named_references(
                 });
                 for o in compo.optimized_elements.borrow().iter() {
                     visit_element_expressions(o, |expr, _, _| {
-                        visit_named_references_in_expression(expr, vis)
+                        visit_named_references_in_expression_dyn(expr, vis)
                     });
                 }
             }
@@ -4511,7 +4568,14 @@ pub fn visit_all_expressions(
     component: &Component,
     mut vis: impl FnMut(&mut Expression, &dyn Fn() -> Type),
 ) {
-    recurse_elem_including_sub_components(component, &Weak::new(), &mut |elem, parent_compo| {
+    visit_all_expressions_dyn(component, &mut vis)
+}
+
+fn visit_all_expressions_dyn(
+    component: &Component,
+    vis: &mut dyn FnMut(&mut Expression, &dyn Fn() -> Type),
+) {
+    recurse_elem_including_sub_components_dyn(component, &Weak::new(), &mut |elem, parent_compo| {
         visit_element_expressions(elem, |expr, _, ty| vis(expr, ty));
         let compo = elem.borrow().enclosing_component.clone();
         if !Weak::ptr_eq(parent_compo, &compo) {

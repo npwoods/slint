@@ -7,112 +7,43 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use i_slint_core::platform::Clipboard;
-use slint::{ComponentHandle, Image, ModelRc, SharedString, ToSharedString as _, VecModel};
+use i_slint_live_preview::protocol::PreviewComponent;
+use lsp_types::Url;
+use slint::{Image, ModelRc, SharedString, ToSharedString as _, VecModel};
 
-use super::{Api, EditorSurfaceMode, EditorUi, FileTreeNode, FileTreeNodeKind, ImageAssetPreview};
+use super::{Api, EditorSurfaceMode, FileTreeNode, FileTreeNodeKind, ImageAssetPreview, Project};
 
-#[cfg(not(target_arch = "wasm32"))]
-const NEW_PROJECT_NAME: &str = "Slint UI Project";
-const NEW_PROJECT_MAIN_FILE: &str = "main.slint";
-const NEW_PROJECT_MAIN_FILE_CONTENTS: &str = r#"export component MainWindow inherits Window {
-    width: 400px;
-    height: 300px;
+pub(in crate::preview) type SharedFileTreeController = Rc<RefCell<Option<FileTreeController>>>;
 
-    Text {
-        text: "Hello from Slint";
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-"#;
+pub fn setup(
+    api: &Api<'_>,
+    api_weak: slint::Weak<Api<'static>>,
+    project: &Project<'_>,
+    project_weak: slint::Weak<Project<'static>>,
+) -> SharedFileTreeController {
+    project.set_file_tree(Default::default());
+    project.set_selected_project_file(Default::default());
 
-pub fn setup(api: &Api<'_>, api_weak: slint::Weak<Api<'static>>, editor_ui: slint::Weak<EditorUi>) {
-    let initial_paths = initial_file_tree_paths();
-    api.set_startup_wizard_visible(initial_paths.is_none());
-
-    let controller = Rc::new(RefCell::new(
-        initial_paths.map(|(root, selected_path)| FileTreeController::new(root, selected_path)),
-    ));
-    if let Some(controller) = controller.borrow().as_ref() {
-        controller.publish(api);
-    } else {
-        api.set_file_tree(Default::default());
-        api.set_selected_project_file(Default::default());
-    }
+    let controller: SharedFileTreeController = Rc::new(RefCell::new(None));
 
     let controller_for_select = controller.clone();
     let api_weak_for_select = api_weak.clone();
+    let project_weak_for_select = project_weak.clone();
     api.on_file_tree_select(move |path| {
         if let Some(api) = api_weak_for_select.upgrade()
+            && let Some(project) = project_weak_for_select.upgrade()
             && let Some(controller) = controller_for_select.borrow_mut().as_mut()
         {
-            controller.select(Path::new(path.as_str()), &api);
+            controller.open_from_file_tree(Path::new(path.as_str()), &api, &project);
         }
     });
 
-    let controller_for_open = controller.clone();
-    let api_weak_for_open = api_weak.clone();
-    let window_for_open = editor_ui.clone();
-    api.on_open_existing_project(move || {
-        // The handle is only valid once the window manager created the window.
-        let window = window_for_open.upgrade().map(|editor_ui| editor_ui.window().window_handle());
-        let Some(path) = choose_project_file(window) else {
-            return false;
-        };
-        let Some(root) = path.parent().map(Path::to_path_buf) else {
-            return false;
-        };
-        if let Some(api) = api_weak_for_open.upgrade() {
-            let mut controller = controller_for_open.borrow_mut();
-            *controller = Some(FileTreeController::new(root, Some(path.clone())));
-            if let Some(controller) = controller.as_mut() {
-                controller.publish(&api);
-            }
-            api.set_startup_wizard_visible(false);
-            super::super::request_file_tree_preview(&path);
-            true
-        } else {
-            false
-        }
-    });
-
-    let controller_for_new = controller.clone();
-    let api_weak_for_new = api_weak.clone();
-    let window_for_new = editor_ui;
-    api.on_create_new_project(move || {
-        let window = window_for_new.upgrade().map(|editor_ui| editor_ui.window().window_handle());
-        let Some(path) = choose_new_project_path(window) else {
-            return false;
-        };
-        if let Err(err) = std::fs::create_dir_all(&path) {
-            tracing::warn!("Failed to create project directory {}: {err}", path.display());
-            return false;
-        }
-        let main_file_path = path.join(NEW_PROJECT_MAIN_FILE);
-        if let Err(err) = std::fs::write(&main_file_path, NEW_PROJECT_MAIN_FILE_CONTENTS) {
-            tracing::warn!("Failed to create project file {}: {err}", main_file_path.display());
-            return false;
-        }
-        if let Some(api) = api_weak_for_new.upgrade() {
-            let mut controller = controller_for_new.borrow_mut();
-            *controller = Some(FileTreeController::new(path, Some(main_file_path.clone())));
-            if let Some(controller) = controller.as_mut() {
-                controller.publish(&api);
-            }
-            api.set_editor_surface_mode(EditorSurfaceMode::Component);
-            api.set_startup_wizard_visible(false);
-            super::super::request_file_tree_preview(&main_file_path);
-            true
-        } else {
-            false
-        }
-    });
-
+    let controller_for_toggle = controller.clone();
     api.on_file_tree_toggle(move |path| {
-        if let Some(api) = api_weak.upgrade()
-            && let Some(controller) = controller.borrow_mut().as_mut()
+        if let Some(project) = project_weak.upgrade()
+            && let Some(controller) = controller_for_toggle.borrow_mut().as_mut()
         {
-            controller.toggle(Path::new(path.as_str()), &api);
+            controller.toggle(Path::new(path.as_str()), &project);
         }
     });
 
@@ -127,92 +58,11 @@ pub fn setup(api: &Api<'_>, api_weak: slint::Weak<Api<'static>>, editor_ui: slin
             tracing::warn!("Failed to copy nine-slice expression to clipboard: {err}");
         }
     });
+
+    controller
 }
 
-fn initial_file_tree_paths() -> Option<(PathBuf, Option<PathBuf>)> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let selected_path = std::fs::canonicalize(std::env::args_os().nth(1)?).ok()?;
-        let root = selected_path.parent()?.to_path_buf();
-        Some((root, Some(selected_path)))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn choose_project_file(window: Option<slint::WindowHandle>) -> Option<PathBuf> {
-    let dialog =
-        rfd::FileDialog::new().set_title("Open Slint File").add_filter("Slint files", &["slint"]);
-    with_parent(dialog, window).pick_file()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn choose_project_file(_window: Option<slint::WindowHandle>) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn with_parent(dialog: rfd::FileDialog, window: Option<slint::WindowHandle>) -> rfd::FileDialog {
-    match window {
-        Some(window) => dialog.set_parent(&window),
-        None => dialog,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn unique_new_project_path(parent: &Path) -> PathBuf {
-    let path = parent.join(NEW_PROJECT_NAME);
-    if !path.exists() {
-        return path;
-    }
-
-    for index in 2.. {
-        let path = parent.join(format!("{NEW_PROJECT_NAME} {index}"));
-        if !path.exists() {
-            return path;
-        }
-    }
-
-    unreachable!("unbounded project-name search must find a free path")
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn choose_new_project_path(window: Option<slint::WindowHandle>) -> Option<PathBuf> {
-    let parent = default_new_project_parent();
-    let path = unique_new_project_path(&parent);
-    let file_name = path.file_name()?.to_string_lossy();
-
-    let dialog = rfd::FileDialog::new()
-        .set_title("New Slint UI Project")
-        .set_directory(parent)
-        .set_file_name(file_name.as_ref());
-    with_parent(dialog, window).save_file()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn choose_new_project_path(_window: Option<slint::WindowHandle>) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn default_new_project_parent() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if let Some(documents) =
-        home.as_ref().map(|home| home.join("Documents")).filter(|path| path.is_dir())
-    {
-        return documents;
-    }
-    if let Some(home) = home.filter(|path| path.is_dir()) {
-        return home;
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-struct FileTreeController {
+pub(in crate::preview) struct FileTreeController {
     root: PathBuf,
     expanded: HashSet<PathBuf>,
     selected_path: Option<PathBuf>,
@@ -237,20 +87,16 @@ impl FileTreeController {
         Self { root, expanded, selected_path, active_folder_path }
     }
 
-    fn select(&mut self, path: &Path, api: &Api<'_>) {
+    fn open_from_file_tree(&mut self, path: &Path, api: &Api<'_>, project: &Project<'_>) {
         let Some(path) = self.path_in_root(path) else {
             return;
         };
-        let is_slint_file = is_slint_file(&path);
 
-        self.selected_path = Some(path.clone());
-        self.active_folder_path = active_folder_for_path(&path).unwrap_or(&self.root).to_path_buf();
-        self.publish(api);
-
-        if is_slint_file {
-            api.set_editor_surface_mode(EditorSurfaceMode::Component);
-            super::super::request_file_tree_preview(&path);
+        if is_slint_file(&path) {
+            super::super::request_preview_path(&path, None);
         } else if is_image_file(&path) {
+            self.select(&path);
+            self.publish(project);
             api.set_selected_image_asset(load_image_asset_preview(&self.root, &path));
             api.set_image_nine_slice_top(0);
             api.set_image_nine_slice_right(0);
@@ -260,7 +106,18 @@ impl FileTreeController {
         }
     }
 
-    fn toggle(&mut self, path: &Path, api: &Api<'_>) {
+    fn select(&mut self, path: &Path) {
+        self.selected_path = Some(path.to_path_buf());
+        self.active_folder_path = active_folder_for_path(path).unwrap_or(&self.root).to_path_buf();
+    }
+
+    fn open_preview(&mut self, path: &Path) -> bool {
+        let Some(path) = self.path_in_root(path) else { return false };
+        self.select(&path);
+        true
+    }
+
+    fn toggle(&mut self, path: &Path, project: &Project<'_>) {
         let Some(path) = self.path_in_root(path) else {
             return;
         };
@@ -273,18 +130,18 @@ impl FileTreeController {
         } else {
             self.expanded.insert(path);
         }
-        self.publish(api);
+        self.publish(project);
     }
 
-    fn publish(&self, api: &Api<'_>) {
+    fn publish(&self, project: &Project<'_>) {
         let rows = build_file_tree_rows(
             &self.root,
             &self.expanded,
             self.selected_path.as_deref(),
             &self.active_folder_path,
         );
-        api.set_file_tree(ModelRc::new(VecModel::from(rows)));
-        api.set_selected_project_file(
+        project.set_file_tree(ModelRc::new(VecModel::from(rows)));
+        project.set_selected_project_file(
             selected_project_file(&self.root, self.selected_path.as_deref()).into(),
         );
     }
@@ -293,6 +150,45 @@ impl FileTreeController {
         let path = std::fs::canonicalize(path).ok()?;
         (path == self.root || path.starts_with(&self.root)).then_some(path)
     }
+}
+
+pub(in crate::preview) fn open_project(
+    controller: &SharedFileTreeController,
+    root: &Url,
+    api: &Api<'_>,
+    project: &Project<'_>,
+) {
+    let Ok(root) = root.to_file_path() else { return };
+    let Ok(root) = std::fs::canonicalize(root) else { return };
+    if !root.is_dir() {
+        return;
+    }
+    *controller.borrow_mut() = Some(FileTreeController::new(root, None));
+
+    if let Some(file_tree) = controller.borrow().as_ref() {
+        file_tree.publish(project);
+    }
+    api.set_editor_surface_mode(EditorSurfaceMode::Component);
+    api.set_startup_wizard_visible(false);
+}
+
+pub(in crate::preview) fn open_preview(
+    controller: &SharedFileTreeController,
+    component: &PreviewComponent,
+    api: &Api<'_>,
+    project: &Project<'_>,
+) {
+    let selected = component
+        .url
+        .to_file_path()
+        .ok()
+        .and_then(|path| controller.borrow_mut().as_mut().map(|tree| tree.open_preview(&path)))
+        .unwrap_or(false);
+    if selected && let Some(file_tree) = controller.borrow().as_ref() {
+        file_tree.publish(project);
+    }
+    api.set_editor_surface_mode(EditorSurfaceMode::Component);
+    api.set_startup_wizard_visible(false);
 }
 
 fn active_folder_for_path(path: &Path) -> Option<&Path> {
@@ -760,37 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn unique_new_project_path_uses_base_name_when_free() {
-        let tree = TempTree::new();
-
-        assert_eq!(unique_new_project_path(&tree.root), tree.root.join(NEW_PROJECT_NAME));
-    }
-
-    #[test]
-    fn unique_new_project_path_adds_number_when_base_name_exists() {
-        let tree = TempTree::new();
-        tree.dir(NEW_PROJECT_NAME);
-
-        assert_eq!(unique_new_project_path(&tree.root), tree.root.join("Slint UI Project 2"));
-    }
-
-    #[test]
-    fn unique_new_project_path_skips_existing_numbered_names() {
-        let tree = TempTree::new();
-        tree.dir(NEW_PROJECT_NAME);
-        tree.dir("Slint UI Project 2");
-        tree.file("Slint UI Project 3");
-
-        assert_eq!(unique_new_project_path(&tree.root), tree.root.join("Slint UI Project 4"));
-    }
-
-    #[test]
-    fn new_project_main_file_is_a_window_component() {
-        assert!(NEW_PROJECT_MAIN_FILE_CONTENTS.contains("export component MainWindow"));
-        assert!(NEW_PROJECT_MAIN_FILE_CONTENTS.contains("inherits Window"));
-    }
-
-    #[test]
     fn nine_slice_expression_uses_slint_order_and_escapes_path() {
         let expression =
             format_nine_slice_expression("icons/quote\"slash\\tab\t.png".into(), 1, 2, 3, 4);
@@ -853,5 +718,46 @@ mod tests {
 
         assert!(is_directory(&dir));
         assert!(!is_directory(&file));
+    }
+
+    #[test]
+    fn open_project_replaces_file_tree_root() {
+        let first_tree = TempTree::new();
+        let second_tree = TempTree::new();
+        let first_file = first_tree.file("first.slint");
+        let mut controller =
+            Some(FileTreeController::new(first_tree.root.clone(), Some(first_file)));
+        assert_eq!(
+            controller.as_ref().unwrap().root,
+            std::fs::canonicalize(&first_tree.root).unwrap()
+        );
+
+        controller = Some(FileTreeController::new(second_tree.root.clone(), None));
+        assert_eq!(controller.unwrap().root, std::fs::canonicalize(&second_tree.root).unwrap());
+    }
+
+    #[test]
+    fn open_preview_preserves_file_tree_root() {
+        let tree = TempTree::new();
+        let first_file = tree.file("first.slint");
+        let second_file = std::fs::canonicalize(tree.file("second.slint")).unwrap();
+        let expected_root = std::fs::canonicalize(&tree.root).unwrap();
+        let mut controller = FileTreeController::new(tree.root.clone(), Some(first_file));
+
+        assert!(controller.open_preview(&second_file));
+        assert_eq!(controller.root, expected_root);
+        assert_eq!(controller.selected_path, Some(second_file));
+    }
+
+    #[test]
+    fn open_preview_outside_root_preserves_selection() {
+        let tree = TempTree::new();
+        let outside_tree = TempTree::new();
+        let first_file = std::fs::canonicalize(tree.file("first.slint")).unwrap();
+        let outside_file = std::fs::canonicalize(outside_tree.file("outside.slint")).unwrap();
+        let mut controller = FileTreeController::new(tree.root.clone(), Some(first_file.clone()));
+
+        assert!(!controller.open_preview(&outside_file));
+        assert_eq!(controller.selected_path, Some(first_file));
     }
 }

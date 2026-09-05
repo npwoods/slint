@@ -36,7 +36,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
-use user_settings::{PREVIEW_SETTINGS_FILE, PreviewUserSettings};
 
 #[cfg(target_arch = "wasm32")]
 use i_slint_editor_preview::wasm_prelude::*;
@@ -53,58 +52,36 @@ mod outline;
 mod properties;
 #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
 pub mod remote;
+pub(crate) mod settings;
 pub mod ui;
 mod undo_redo;
-pub mod user_settings;
 
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
-pub fn run(
-    to_lsp: Rc<dyn i_slint_editor_preview::PreviewToLsp>,
-    fullscreen: bool,
-) -> std::result::Result<(), slint::PlatformError> {
-    run_with_ui(ui::create_ui(&to_lsp, "")?, to_lsp, fullscreen)
-}
+use settings::{Project, SETTINGS_FILE, VisualEditorSettings};
 
-/// Hand a window over to the preview engine and run the event loop until it
-/// closes. Applications that add their own chrome create the window with
-/// [`ui::create_ui`] and set it up before calling this.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run_with_ui(
-    editor_ui: ui::EditorUi,
+pub fn initialize(
+    editor_ui: &ui::EditorUi,
     to_lsp: Rc<dyn i_slint_editor_preview::PreviewToLsp>,
-    fullscreen: bool,
-) -> std::result::Result<(), slint::PlatformError> {
+    settings: VisualEditorSettings,
+) {
+    PREVIEW_STATE.with_borrow_mut(|preview_state| {
+        *preview_state.to_lsp.borrow_mut() = Some(to_lsp.clone());
+        let api = editor_ui.global::<ui::Api>();
+        preview_state.api = <ui::Api as slint::Global<'_, ui::EditorUi>>::as_weak(&api);
+        preview_state.editor_ui = Some(editor_ui.clone_strong());
+        preview_state.settings = settings;
+    });
+
     to_lsp
         .send_telemetry(&mut [(
             "type".to_string(),
             serde_json::to_value("preview_opened").unwrap(),
         )])
         .ok();
-    editor_ui.window().set_fullscreen(fullscreen);
 
     tracing::debug!("Preview: requesting state from LSP");
     to_lsp
-        .send(&PreviewToLspMessage::RequestState {
-            files: Vec::new(),
-            settings: vec![PREVIEW_SETTINGS_FILE.into()],
-        })
+        .send(&PreviewToLspMessage::RequestState { files: Vec::new(), settings: Vec::new() })
         .unwrap();
-
-    let editor_ui_clone = PREVIEW_STATE.with(move |preview_state| {
-        let mut preview_state = preview_state.borrow_mut();
-        *preview_state.to_lsp.borrow_mut() = Some(to_lsp);
-        let api = editor_ui.global::<ui::Api>();
-        preview_state.api = <ui::Api as slint::Global<'_, ui::EditorUi>>::as_weak(&api);
-        preview_state.editor_ui = Some(editor_ui.clone_strong());
-        editor_ui
-    });
-
-    tracing::debug!("Preview: starting event loop (run)");
-    editor_ui_clone.run()?;
-    tracing::debug!("Preview: event loop exited");
-
-    Ok(())
 }
 
 /// Apply a message from the LSP to the preview. Whatever transport carried the
@@ -125,13 +102,21 @@ pub fn lsp_to_preview(message: LspToPreviewMessage) {
         M::SetUserSettings { name, contents } => {
             set_user_settings(name, contents);
         }
-        M::ShowPreview(pc) => {
+        M::ShowPreview(preview_component) => {
             tracing::debug!(
-                "Preview: ShowPreview for url={}, component={:?}",
-                pc.url,
-                pc.component
+                "Preview: opening url={}, component={:?}",
+                preview_component.url,
+                preview_component.component
             );
-            load_preview(pc, LoadBehavior::BringWindowToFront);
+            apply_preview_to_file_tree(&preview_component);
+            load_preview(preview_component, LoadBehavior::BringWindowToFront);
+        }
+        M::OpenProject { root } => {
+            PREVIEW_STATE.with_borrow_mut(|preview_state| {
+                preview_state.current_project_root = Some(root.clone());
+            });
+            apply_project_to_file_tree(&root);
+            record_current_project();
         }
         M::HighlightFromEditor { url, offset } => {
             highlight(url, offset.into());
@@ -146,6 +131,12 @@ pub fn lsp_to_preview(message: LspToPreviewMessage) {
         }
         M::Ping => {
             // Keepalive for the remote-preview WebSocket; local previews never see it.
+        }
+        // Part of the remote pairing handshake, which the LSP's WebSocket
+        // connector completes before a session exists. A local preview is
+        // never on the receiving end of one.
+        M::PairingHello { .. } | M::PairingResponse { .. } => {
+            tracing::warn!("Ignoring a pairing message addressed to a local preview");
         }
     }
 }
@@ -228,11 +219,12 @@ pub struct PreviewState {
     resources: HashSet<Url>,
     dependencies: HashSet<Url>,
     pub config: PreviewConfig,
-    /// The most recent user settings synced with the LSP, used to suppress
+    /// The most recent settings synced with the editor, used to suppress
     /// redundant updates when the UI re-reports settings we just applied.
-    last_user_settings: PreviewUserSettings,
+    settings: VisualEditorSettings,
     current_previewed_component: Option<PreviewComponent>,
-    pending_file_tree_preview: Option<PreviewComponent>,
+    current_project_root: Option<Url>,
+    file_tree_controller: Option<ui::file_tree::SharedFileTreeController>,
     current_load_behavior: Option<LoadBehavior>,
     loading_state: PreviewFutureState,
 
@@ -270,6 +262,14 @@ impl PreviewState {
             .as_ref()
             .map_or(i_slint_editor_preview::ByteFormat::Utf8, |dc| dc.format)
     }
+}
+
+pub(in crate::preview) fn set_file_tree_controller(
+    controller: ui::file_tree::SharedFileTreeController,
+) {
+    PREVIEW_STATE.with_borrow_mut(|preview_state| {
+        preview_state.file_tree_controller = Some(controller);
+    });
 }
 thread_local! {pub static PREVIEW_STATE: std::cell::RefCell<PreviewState> = Default::default();}
 
@@ -315,37 +315,69 @@ fn delete_document(url: &lsp_types::Url) {
     }
 }
 
-pub(super) fn set_user_settings(name: String, contents: String) {
-    // The LSP forwards any stored settings blob; only react to the one we own.
-    if name != PREVIEW_SETTINGS_FILE {
-        return;
+pub fn set_user_settings(name: String, contents: String) {
+    if name.as_str() == SETTINGS_FILE {
+        let Some(settings) = VisualEditorSettings::deserialize(&contents) else {
+            return;
+        };
+        PREVIEW_STATE.with_borrow_mut(|preview_state| {
+            if let Some(editor_ui) = preview_state.editor_ui.as_ref() {
+                apply_visible_recent_projects(editor_ui, &settings);
+            }
+            preview_state.settings = settings;
+        });
     }
-    let Some(settings) = PreviewUserSettings::deserialize(&contents) else {
-        return;
-    };
-    PREVIEW_STATE.with_borrow_mut(|preview_state| {
-        if let Some(editor_ui) = &preview_state.editor_ui {
-            ui::apply_preview_user_settings(editor_ui, &settings);
-        }
-        preview_state.last_user_settings = settings;
-    });
 }
 
-pub(super) fn update_user_settings_from_ui(settings: PreviewUserSettings) {
-    PREVIEW_STATE.with_borrow_mut(|preview_state| {
-        if preview_state.last_user_settings == settings {
-            return;
-        }
-        preview_state.last_user_settings = settings.clone();
+pub(crate) fn apply_visible_recent_projects(
+    editor_ui: &ui::EditorUi,
+    settings: &VisualEditorSettings,
+) {
+    let project = editor_ui.global::<ui::Project>();
+    project.set_recent(Rc::new(slint::VecModel::from(settings.visible_recent_projects())).into());
+}
 
-        if let Some(to_lsp) = preview_state.to_lsp.borrow().as_ref() {
-            let message = PreviewToLspMessage::UpdateUserSettings {
-                name: PREVIEW_SETTINGS_FILE.into(),
-                contents: settings.serialize(),
-            };
-            if let Err(err) = to_lsp.send(&message) {
-                tracing::warn!("Failed to send preview user settings update: {err}");
-            }
+fn record_current_project() {
+    let Some((root, component)) = PREVIEW_STATE.with_borrow(|preview_state| {
+        Some((
+            preview_state.current_project_root.clone()?,
+            preview_state.current_previewed_component.clone()?,
+        ))
+    }) else {
+        return;
+    };
+    let Ok(root) = root.to_file_path() else { return };
+    let Ok(root) = std::fs::canonicalize(root) else { return };
+    if !root.is_dir() {
+        return;
+    }
+    let Ok(path) = component.url.to_file_path() else { return };
+    let Ok(path) = std::fs::canonicalize(path) else { return };
+    if !path.is_file() || !path.starts_with(&root) {
+        return;
+    }
+    let Some(component_name) = component.component else { return };
+    let Ok(url) = Url::from_file_path(path) else { return };
+    let project =
+        Project { root, preview: PreviewComponent { url, component: Some(component_name) } };
+    let update = PREVIEW_STATE.with_borrow_mut(|preview_state| {
+        if !preview_state.settings.add_recent_project(project) {
+            return None;
+        }
+        if let Some(editor_ui) = preview_state.editor_ui.as_ref() {
+            apply_visible_recent_projects(editor_ui, &preview_state.settings);
+        }
+        Some(preview_state.settings.serialize())
+    });
+    let Some(contents) = update else { return };
+    PREVIEW_STATE.with_borrow(|preview_state| {
+        if let Some(to_lsp) = preview_state.to_lsp.borrow().as_ref()
+            && let Err(error) = to_lsp.send(&PreviewToLspMessage::UpdateUserSettings {
+                name: SETTINGS_FILE.into(),
+                contents,
+            })
+        {
+            tracing::warn!("Failed to send visual editor settings update: {error}");
         }
     });
 }
@@ -403,10 +435,6 @@ fn set_contents(url: &VersionedUrl, content: String) {
             SourceCodeCacheEntry { version: *url.version(), code: content.clone() },
         );
 
-        if let Some(pending) = take_pending_file_tree_preview(preview_state, url.url()) {
-            return Some((pending, LoadBehavior::Load));
-        }
-
         if Some(content) == old.map(|o| o.code) {
             return None;
         }
@@ -421,43 +449,54 @@ fn set_contents(url: &VersionedUrl, content: String) {
     }
 }
 
-fn take_pending_file_tree_preview(
-    preview_state: &mut PreviewState,
-    url: &Url,
-) -> Option<PreviewComponent> {
-    if preview_state.pending_file_tree_preview.as_ref().is_none_or(|pending| pending.url != *url) {
-        return None;
-    }
-    preview_state.pending_file_tree_preview.take()
+fn apply_project_to_file_tree(root: &Url) {
+    PREVIEW_STATE.with_borrow(|preview_state| {
+        let Some(editor_ui) = preview_state.editor_ui.as_ref() else { return };
+        let Some(controller) = preview_state.file_tree_controller.as_ref() else { return };
+        let api = editor_ui.global::<ui::Api>();
+        let project = editor_ui.global::<ui::Project>();
+        ui::file_tree::open_project(controller, root, &api, &project);
+    });
 }
 
-fn request_file_tree_preview(path: &Path) {
+fn apply_preview_to_file_tree(component: &PreviewComponent) {
+    PREVIEW_STATE.with_borrow(|preview_state| {
+        let Some(editor_ui) = preview_state.editor_ui.as_ref() else { return };
+        let Some(controller) = preview_state.file_tree_controller.as_ref() else { return };
+        let api = editor_ui.global::<ui::Api>();
+        let project = editor_ui.global::<ui::Project>();
+        ui::file_tree::open_preview(controller, component, &api, &project);
+    });
+}
+
+fn preview_component(path: &Path, component: Option<String>) -> Option<PreviewComponent> {
     let Ok(path) = std::fs::canonicalize(path) else {
-        return;
+        return None;
     };
     if !path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("slint"))
     {
-        return;
+        return None;
     }
     let Ok(url) = Url::from_file_path(&path) else {
-        return;
+        return None;
     };
-    let pending = PreviewComponent { url: url.clone(), component: None };
-    let to_lsp = PREVIEW_STATE.with_borrow_mut(|preview_state| {
-        preview_state.pending_file_tree_preview = Some(pending);
-        preview_state.to_lsp.borrow().clone()
-    });
+    Some(PreviewComponent { url, component })
+}
+
+pub(super) fn request_preview_path(path: &Path, component: Option<String>) -> bool {
+    let Some(component) = preview_component(path, component) else { return false };
+    let to_lsp = PREVIEW_STATE.with_borrow(|preview_state| preview_state.to_lsp.borrow().clone());
     let Some(to_lsp) = to_lsp else {
-        return;
+        return false;
     };
-    if let Err(err) =
-        to_lsp.send(&PreviewToLspMessage::RequestState { files: vec![url], settings: Vec::new() })
-    {
-        tracing::warn!("Failed to request file tree preview contents: {err}");
+    if let Err(err) = to_lsp.send(&PreviewToLspMessage::RequestPreview { component }) {
+        tracing::warn!("Failed to request preview for {}: {err}", path.display());
+        return false;
     }
+    true
 }
 
 fn property_declaration_ranges(name: slint::SharedString) -> ui::PropertyDeclaration {
@@ -1140,6 +1179,21 @@ fn resize_selected_element(x: f32, y: f32, width: f32, height: f32) {
     send_workspace_edit(label, edit, true);
 }
 
+fn persist_selected_element_geometry() {
+    let Some(element_selection) = &selected_element() else {
+        return;
+    };
+    let Some(element_node) = element_selection.as_element_node() else {
+        return;
+    };
+
+    let Some((edit, label)) = persist_selected_element_geometry_impl(&element_node) else {
+        return;
+    };
+
+    send_workspace_edit(label, edit, true);
+}
+
 fn rotate_selected_element(angle: f32) {
     let Some(element_selection) = &selected_element() else { return };
     let Some(element_node) = element_selection.as_element_node() else { return };
@@ -1502,6 +1556,12 @@ fn resize_selected_element_impl(
         rect.height(),
     );
 
+    persist_selected_element_geometry_impl(element_node)
+}
+
+fn persist_selected_element_geometry_impl(
+    element_node: &ElementRcNode,
+) -> Option<(lsp_types::WorkspaceEdit, String)> {
     let element_hash = element_node
         .element
         .borrow()
@@ -1510,14 +1570,12 @@ fn resize_selected_element_impl(
         .map(|d| d.element_hash)
         .unwrap_or(0);
     if element_hash == 0 {
-        tracing::debug!("Element does not have a hash, cannot resize");
+        tracing::debug!("Element does not have a hash, cannot persist geometry");
         return None;
     }
 
-    // They all have the same size anyway:
     let (path, offset) = element_node.path_and_offset();
 
-    // Apply the overrides permanently
     let properties = ["x", "y", "width", "height"];
     let geometry_changes = PREVIEW_STATE.with_borrow(|preview_state| {
         let overrides = (*preview_state.debug_hook_overrides).borrow();
@@ -1566,101 +1624,6 @@ fn resize_selected_element_impl(
         geometry_changes,
     )
     .map(|edit| (edit, "Repositioning element".to_owned()))
-}
-
-fn can_move_selected_element(x: f32, y: f32, mouse_x: f32, mouse_y: f32) -> bool {
-    let position = LogicalPoint::new(x, y);
-    let mouse_position = LogicalPoint::new(mouse_x, mouse_y);
-    let Some(selected) = selected_element() else {
-        return false;
-    };
-    let Some(selected_element_node) = selected.as_element_node() else {
-        return false;
-    };
-    let Some(document_cache) = document_cache() else {
-        return false;
-    };
-
-    drop_location::can_move_to(
-        &document_cache,
-        position,
-        mouse_position,
-        selected_element_node,
-        selected.instance_index,
-    )
-}
-
-fn move_selected_element(x: f32, y: f32, mouse_x: f32, mouse_y: f32) {
-    let position = LogicalPoint::new(x, y);
-    let mouse_position = LogicalPoint::new(mouse_x, mouse_y);
-    let Some(selected) = selected_element() else {
-        return;
-    };
-    let Some(selected_element_node) = selected.as_element_node() else {
-        return;
-    };
-    let Some(document_cache) = document_cache() else {
-        return;
-    };
-
-    if let Some((edit, drop_data)) = drop_location::move_element_to(
-        &document_cache,
-        selected_element_node.clone(),
-        selected.instance_index,
-        position,
-        mouse_position,
-    ) {
-        element_selection::restore_selection(
-            ElementSelection {
-                path: drop_data.path,
-                offset: drop_data.selection_offset,
-                instance_index: selected.instance_index,
-            },
-            SelectionNotification::AfterUpdate,
-        );
-
-        send_workspace_edit("Move element".to_string(), edit, false);
-    } else {
-        let Some(component_instance) = component_instance() else {
-            element_selection::reselect_element();
-            return;
-        };
-        let Some(parent_node) = selected_element_node.parent() else {
-            element_selection::reselect_element();
-            return;
-        };
-        let Some(element_size) = selected_element_node
-            .geometries(&component_instance)
-            .get(selected.instance_index)
-            .map(|geometry| geometry.rect.size)
-        else {
-            element_selection::reselect_element();
-            return;
-        };
-        let Some((parent_position, parent_angle)) = parent_node
-            .geometries(&component_instance)
-            .get(selected.instance_index)
-            .map(|geometry| (geometry.rect.origin, geometry.angle))
-        else {
-            element_selection::reselect_element();
-            return;
-        };
-        if parent_angle != 0.0 {
-            element_selection::reselect_element();
-            return;
-        }
-        let local_position =
-            LogicalPoint::new(position.x - parent_position.x, position.y - parent_position.y);
-        let Some((edit, label)) = resize_selected_element_impl(
-            &selected_element_node,
-            selected.instance_index,
-            LogicalRect::new(local_position, element_size),
-        ) else {
-            element_selection::reselect_element();
-            return;
-        };
-        send_workspace_edit(label, edit, true);
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2122,7 +2085,8 @@ async fn parse_source(
             )]),
         );
 
-    let result = builder.build_from_source(source_code, path).await;
+    let result =
+        builder.build_static_from_source(source_code, path, i_slint_core::InternalToken).await;
 
     let compiled = result.components().next();
     (result.diagnostics().collect(), compiled, open_file_fallback, source_file_versions)
@@ -2208,6 +2172,22 @@ async fn reload_preview_impl(
 
     update_preview_area(compiled, behavior, open_import_callback, source_file_versions, format)?;
 
+    if let Some(loaded_component_name) = loaded_component_name {
+        let current_preview_loaded = PREVIEW_STATE.with_borrow_mut(|preview_state| {
+            let Some(current) = preview_state.current_previewed_component.as_mut() else {
+                return false;
+            };
+            if current != &component {
+                return false;
+            }
+            current.component = Some(loaded_component_name);
+            true
+        });
+        if current_preview_loaded {
+            record_current_project();
+        }
+    }
+
     finish_parsing();
     Ok(())
 }
@@ -2275,8 +2255,8 @@ fn set_preview_factory(
     api.set_resize_to_preferred_size(behavior != LoadBehavior::Reload);
 }
 
-/// Highlight the element pointed at the offset in the path.
-/// When the URL is None, remove the highlight.
+/// Push the remote connection's state to the Remote Preview pane, which
+/// shows it and, while pairing, collects the code from the user.
 pub fn set_remote_connection_state(
     state: i_slint_live_preview::protocol::RemoteConnectionState,
     target: String,
@@ -2288,6 +2268,8 @@ pub fn set_remote_connection_state(
             let ui_state = match state {
                 R::Disconnected => ui::RemoteConnectionState::Disconnected,
                 R::Connecting => ui::RemoteConnectionState::Connecting,
+                R::PairingRequired => ui::RemoteConnectionState::PairingRequired,
+                R::UnpairedWarning => ui::RemoteConnectionState::UnpairedWarning,
                 R::Connected => ui::RemoteConnectionState::Connected,
                 R::Failed => ui::RemoteConnectionState::Failed,
             };
@@ -2784,136 +2766,119 @@ mod tests {
         path
     }
 
+    fn temp_project(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir()
+            .join(format!("slint-preview-project-{}-{name}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let path = root.join("main.slint");
+        fs::write(&path, "").unwrap();
+        (root, path)
+    }
+
     #[test]
-    fn request_file_tree_preview_requests_slint_file_contents() {
+    fn request_preview_path_requests_slint_preview() {
         let messages = Rc::new(RefCell::new(Vec::new()));
         reset_preview_state(messages.clone());
         let path = temp_file("selected.slint");
         let url = Url::from_file_path(std::fs::canonicalize(&path).unwrap()).unwrap();
 
-        request_file_tree_preview(&path);
+        assert!(request_preview_path(&path, None));
 
         let messages = messages.borrow();
         assert!(matches!(
             &messages[..],
-            [PreviewToLspMessage::RequestState { files, settings }]
-                if files == &vec![url.clone()] && settings.is_empty()
+            [PreviewToLspMessage::RequestPreview { component }]
+                if component == &PreviewComponent { url: url.clone(), component: None }
         ));
-        PREVIEW_STATE.with_borrow(|state| {
-            assert_eq!(
-                state.pending_file_tree_preview.as_ref().map(|pending| &pending.url),
-                Some(&url)
-            );
-        });
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn request_file_tree_preview_ignores_non_slint_files() {
+    fn request_preview_path_ignores_non_slint_files() {
         let messages = Rc::new(RefCell::new(Vec::new()));
         reset_preview_state(messages.clone());
         let path = temp_file("image.png");
 
-        request_file_tree_preview(&path);
+        assert!(!request_preview_path(&path, None));
 
         assert!(messages.borrow().is_empty());
-        PREVIEW_STATE.with_borrow(|state| {
-            assert!(state.pending_file_tree_preview.is_none());
-        });
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn matching_set_contents_consumes_pending_file_tree_preview() {
+    fn record_current_project_updates_settings() {
         let messages = Rc::new(RefCell::new(Vec::new()));
-        reset_preview_state(messages);
-        let url = Url::parse("file:///tmp/selected.slint").unwrap();
-        let pending = PreviewComponent { url: url.clone(), component: None };
-
+        reset_preview_state(messages.clone());
+        let (root, path) = temp_project("recent");
+        let component = PreviewComponent {
+            url: Url::from_file_path(std::fs::canonicalize(&path).unwrap()).unwrap(),
+            component: Some("MainWindow".into()),
+        };
         PREVIEW_STATE.with_borrow_mut(|state| {
-            state.pending_file_tree_preview = Some(pending.clone());
-            assert_eq!(take_pending_file_tree_preview(state, &url), Some(pending));
-            assert!(state.pending_file_tree_preview.is_none());
+            state.current_project_root =
+                Some(Url::from_directory_path(std::fs::canonicalize(&root).unwrap()).unwrap());
+            state.current_previewed_component = Some(component);
         });
-    }
 
-    #[test]
-    fn set_user_settings_keeps_updates_local() {
-        let messages = Rc::new(RefCell::new(Vec::new()));
-        reset_preview_state(messages.clone());
-
-        let settings = PreviewUserSettings {
-            version: PreviewUserSettings::CURRENT_VERSION,
-            always_on_top: true,
-            show_library: false,
-            show_properties: true,
-            show_outline: false,
-            show_simulation_data: true,
-            show_console: false,
-        };
-        set_user_settings(PREVIEW_SETTINGS_FILE.into(), settings.serialize());
-        set_user_settings(PREVIEW_SETTINGS_FILE.into(), settings.serialize());
-
-        assert!(messages.borrow().is_empty());
-    }
-
-    #[test]
-    fn update_preview_user_settings_routes_updates_to_lsp() {
-        let messages = Rc::new(RefCell::new(Vec::new()));
-        reset_preview_state(messages.clone());
-
-        let settings = PreviewUserSettings {
-            version: PreviewUserSettings::CURRENT_VERSION,
-            always_on_top: false,
-            show_library: true,
-            show_properties: false,
-            show_outline: true,
-            show_simulation_data: false,
-            show_console: true,
-        };
-        update_user_settings_from_ui(settings.clone());
+        record_current_project();
+        record_current_project();
 
         let messages = messages.borrow();
         assert_eq!(messages.len(), 1);
         assert!(matches!(
             &messages[0],
             PreviewToLspMessage::UpdateUserSettings { name, contents }
-                if name == PREVIEW_SETTINGS_FILE && contents == &settings.serialize()
+                if name == SETTINGS_FILE
+                    && VisualEditorSettings::deserialize(contents).is_some_and(|settings| {
+                        settings.visible_recent_projects().first().is_some_and(|project| {
+                            project.component == "MainWindow"
+                                && project.root_path == root.to_string_lossy().as_ref()
+                        })
+                    })
         ));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn ui_echo_of_applied_settings_is_not_sent_back() {
+    fn record_current_project_ignores_preview_outside_root() {
         let messages = Rc::new(RefCell::new(Vec::new()));
         reset_preview_state(messages.clone());
+        let (root, _) = temp_project("root");
+        let (_, outside_path) = temp_project("outside");
+        PREVIEW_STATE.with_borrow_mut(|state| {
+            state.current_project_root =
+                Some(Url::from_directory_path(std::fs::canonicalize(&root).unwrap()).unwrap());
+            state.current_previewed_component = Some(PreviewComponent {
+                url: Url::from_file_path(std::fs::canonicalize(&outside_path).unwrap()).unwrap(),
+                component: Some("MainWindow".into()),
+            });
+        });
 
-        let settings = PreviewUserSettings {
-            version: PreviewUserSettings::CURRENT_VERSION,
-            always_on_top: true,
-            show_library: false,
-            show_properties: true,
-            show_outline: false,
-            show_simulation_data: true,
-            show_console: false,
-        };
+        record_current_project();
 
-        // The LSP pushes settings; the deferred `changed` handlers then report
-        // the same values back. That echo must not be forwarded to the LSP.
-        set_user_settings(PREVIEW_SETTINGS_FILE.into(), settings.serialize());
-        update_user_settings_from_ui(settings.clone());
         assert!(messages.borrow().is_empty());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside_path.parent().unwrap());
+    }
 
-        // A genuine user change still gets through.
-        let changed = PreviewUserSettings { show_console: true, ..settings };
-        update_user_settings_from_ui(changed.clone());
-        let messages = messages.borrow();
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(
-            &messages[0],
-            PreviewToLspMessage::UpdateUserSettings { name, contents }
-                if name == PREVIEW_SETTINGS_FILE && contents == &changed.serialize()
-        ));
+    #[test]
+    fn settings_from_lsp_are_not_sent_back() {
+        let messages = Rc::new(RefCell::new(Vec::new()));
+        reset_preview_state(messages.clone());
+        let settings = VisualEditorSettings::deserialize(
+            r#"{"version":1,"recent_projects":[{"root":"/missing","preview":{"url":"file:///missing/main.slint","component":"MainWindow"}}]}"#,
+        )
+        .unwrap();
+
+        set_user_settings(SETTINGS_FILE.into(), settings.serialize());
+
+        PREVIEW_STATE.with_borrow(|preview_state| {
+            assert_eq!(preview_state.settings, settings);
+        });
+        assert!(messages.borrow().is_empty());
     }
 }

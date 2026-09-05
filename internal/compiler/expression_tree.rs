@@ -183,6 +183,7 @@ pub enum BuiltinMacroFunction {
     /// Transforms `array.index-of(value)` into `array.find-index((x) => x == value)`
     ArrayIndexOf,
     CustomMouseCursor,
+    Spring,
 }
 
 macro_rules! declare_builtin_function_types {
@@ -1147,6 +1148,10 @@ impl Expression {
 
     /// Call the visitor for each sub-expression.  (note: this function does not recurse)
     pub fn visit(&self, mut visitor: impl FnMut(&Self)) {
+        self.visit_dyn(&mut visitor)
+    }
+
+    fn visit_dyn(&self, visitor: &mut dyn FnMut(&Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1289,6 +1294,10 @@ impl Expression {
     }
 
     pub fn visit_mut(&mut self, mut visitor: impl FnMut(&mut Self)) {
+        self.visit_mut_dyn(&mut visitor)
+    }
+
+    fn visit_mut_dyn(&mut self, visitor: &mut dyn FnMut(&mut Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1624,6 +1633,26 @@ impl Expression {
                                     node,
                                 );
                             }
+                        }
+                    }
+                    if !diag.is_slint_sc() {
+                        let extra = left
+                            .fields
+                            .keys()
+                            .filter(|f| !right.fields.contains_key(*f))
+                            .map(|f| format!("'{f}'"))
+                            .collect::<Vec<_>>();
+                        if let Some((last, rest)) = extra.split_last() {
+                            let (noun, list) = match rest {
+                                [] => ("field", last.clone()),
+                                _ => ("fields", format!("{} and {last}", rest.join(", "))),
+                            };
+                            diag.push_warning(
+                                format!(
+                                    "Conversion to {target_type} ignores the extra {noun} {list}"
+                                ),
+                                node,
+                            );
                         }
                     }
                     if let Expression::Struct { mut values, .. } = self {
@@ -2261,6 +2290,7 @@ pub enum EasingCurve {
     EaseInBounce,
     EaseOutBounce,
     EaseInOutBounce,
+    Spring(f32),
     // CubicBezierNonConst([Box<Expression>; 4]),
     // Custom(Box<dyn Fn(f32)->f32>),
 }

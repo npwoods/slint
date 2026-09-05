@@ -66,6 +66,12 @@ export struct RemoteViewerInfo {
 export enum RemoteConnectionState {
     Disconnected,
     Connecting,
+    /// The viewer is showing a pairing code and is waiting for it to be
+    /// typed in here.
+    PairingRequired,
+    /// The viewer has pairing disabled; waiting for the user to accept the
+    /// unencrypted connection or cancel.
+    UnpairedWarning,
     Connected,
     Failed,
 }
@@ -107,6 +113,22 @@ export struct SelectionRectangle {
     width: length,
     height: length,
     angle: angle,
+}
+
+/// The topmost selectable element under a canvas position.
+export struct HoveredElement {
+    valid: bool,
+    is-selected: bool,
+    is-over-selected-element: bool,
+    element-path: string,
+    element-offset: int,
+    type-name: string,
+    geometry: [SelectionRectangle],
+}
+
+export global Hover {
+    in-out property <HoveredElement> element;
+    pure callback element-at(x: length, y: length, enter-component: bool) -> HoveredElement;
 }
 
 /// A `Selection`
@@ -373,14 +395,6 @@ export global Api {
     in-out property <string> update-error;
     in property <bool> focus-previewed-element;
     callback check-for-update();
-    callback preview-user-settings-changed(
-        always-on-top: bool,
-        show-library: bool,
-        show-properties: bool,
-        show-outline: bool,
-        show-simulation-data: bool,
-        show-console: bool,
-    );
 
     // ## Component Data for ComponentList:
     // All the components
@@ -591,8 +605,6 @@ export global Api {
     callback outline-can-drop(data: data-transfer, uri: string, offset: int, location: DropLocation) -> bool;
 
     // ## File Tree
-    in-out property <[FileTreeNode]> file-tree;
-    in-out property <string> selected-project-file;
     in-out property <bool> startup-wizard-visible;
     in-out property <EditorSurfaceMode> editor-surface-mode: EditorSurfaceMode.component;
     in-out property <ImageAssetPreview> selected-image-asset;
@@ -635,12 +647,10 @@ export global Api {
 
     callback rename-component(old-name: string, defined-at: string, new-name: string);
 
-    callback selected-element-can-move-to(x: length, y: length, mouse-x: length, mouse-y: length) -> bool;
-    callback selected-element-move(x: length, y: length, mouse-x: length, mouse-y: length);
-
     callback override-selected-element-border-radius(corner: CanvasCorner, radius: length, single-corner: bool);
     callback persist-selected-element-border-radius();
     callback selected-element-resize(x: length, y: length, width: length, height: length);
+    callback persist-selected-element-geometry();
     callback selected-element-rotate(rotation: angle);
     callback override-selected-element-geometry(x: length, y: length, width: length, height: length);
     callback override-selected-element-rotation(rotation: angle);
@@ -733,6 +743,12 @@ export global Api {
     callback remote-connect(addresses: [string], port: int);
     callback remote-connect-manual(host-port: string);
     callback remote-disconnect();
+    callback remote-submit-pairing-code(code: string);
+    callback remote-cancel-pairing();
+    /// Connect to the pairing-disabled viewer the warning is about.
+    callback remote-accept-unpaired();
+    /// Digits in a pairing code, from `pairing::CODE_DIGITS`.
+    in-out property <int> remote-pairing-code-length;
 
     // ## SlintPad related APIs
     in-out property <bool> runs-in-slintpad;
@@ -752,8 +768,6 @@ export global Api {
         { url: "examples/sprite-sheet/demo.slint", title: "Sprite sheet Demo" },
     ];
     callback new-file();
-    callback create-new-project() -> bool;
-    callback open-existing-project() -> bool;
     callback share-permalink-to-clipboard();
     callback load-demo(url: string);
     callback show-about-slint();

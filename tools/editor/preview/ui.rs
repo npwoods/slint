@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::{collections::HashMap, iter::once, rc::Rc};
 
-use super::user_settings::PreviewUserSettings;
 use i_slint_compiler::parser::TextRange;
 use i_slint_compiler::{expression_tree, langtype};
 
@@ -63,7 +62,7 @@ fn fuzzy_filter_iter<Item: std::fmt::Debug>(
 }
 
 mod brushes;
-mod file_tree;
+pub(super) mod file_tree;
 pub mod log_messages;
 pub mod palette;
 mod property_view;
@@ -74,57 +73,20 @@ slint::include_modules!();
 
 pub type PropertyDeclarations = HashMap<SmolStr, PropertyDeclaration>;
 
-pub fn preview_user_settings_from_values(
-    always_on_top: bool,
-    show_library: bool,
-    show_properties: bool,
-    show_outline: bool,
-    show_simulation_data: bool,
-    show_console: bool,
-) -> PreviewUserSettings {
-    PreviewUserSettings {
-        version: PreviewUserSettings::CURRENT_VERSION,
-        always_on_top,
-        show_library,
-        show_properties,
-        show_outline,
-        show_simulation_data,
-        show_console,
-    }
+pub fn create_ui() -> Result<EditorUi, PlatformError> {
+    EditorUi::new()
 }
 
-pub fn apply_preview_user_settings(editor_ui: &EditorUi, settings: &PreviewUserSettings) {
-    let api = editor_ui.global::<Api>();
-    api.set_always_on_top(settings.always_on_top);
-}
-
-pub fn setup_preview_user_settings(api: &Api<'_>) {
-    api.on_preview_user_settings_changed(
-        |always_on_top,
-         show_library,
-         show_properties,
-         show_outline,
-         show_simulation_data,
-         show_console| {
-            preview::update_user_settings_from_ui(preview_user_settings_from_values(
-                always_on_top,
-                show_library,
-                show_properties,
-                show_outline,
-                show_simulation_data,
-                show_console,
-            ));
-        },
-    );
-}
-
-pub fn create_ui(
+pub fn initialize_editor(
+    editor_ui: &EditorUi,
     to_lsp: &Rc<dyn i_slint_editor_preview::PreviewToLsp>,
     style: &str,
-) -> Result<EditorUi, PlatformError> {
-    let editor_ui = EditorUi::new()?;
+) {
     let api = editor_ui.global::<Api>();
     let api_weak = <Api as slint::Global<'_, EditorUi>>::as_weak(&api);
+    let hover = editor_ui.global::<Hover>();
+    let project = editor_ui.global::<Project>();
+    let project_weak = <Project as slint::Global<'_, EditorUi>>::as_weak(&project);
 
     // styles:
     let known_styles = once(&"native")
@@ -173,6 +135,7 @@ pub fn create_ui(
     api.on_unselect(super::element_selection::unselect_element);
     api.on_reselect(super::element_selection::reselect_element);
     api.on_select_at(super::element_selection::select_element_at);
+    hover.on_element_at(super::element_selection::hovered_element_at);
     api.on_selection_stack_at(super::element_selection::selection_stack_at);
     api.on_filter_sort_selection_stack(super::element_selection::filter_sort_selection_stack);
     api.on_find_selected_selection_stack_frame(|stack| {
@@ -229,9 +192,8 @@ pub fn create_ui(
         },
     );
     api.on_selected_element_resize(super::resize_selected_element);
+    api.on_persist_selected_element_geometry(super::persist_selected_element_geometry);
     api.on_selected_element_rotate(super::rotate_selected_element);
-    api.on_selected_element_can_move_to(super::can_move_selected_element);
-    api.on_selected_element_move(super::move_selected_element);
     api.on_selected_element_delete(super::delete_selected_element);
     api.on_override_selected_element_geometry(super::override_selected_element_geometry);
     api.on_override_selected_element_rotation(super::override_selected_element_rotation);
@@ -283,24 +245,11 @@ pub fn create_ui(
     brushes::setup(&api);
     log_messages::setup(&api);
     palette::setup(&api);
-    let open_startup_wizard_api_weak = api_weak.clone();
-    api.on_open_startup_wizard(move || {
-        if let Some(api) = open_startup_wizard_api_weak.upgrade() {
-            api.set_startup_wizard_visible(true);
-        }
-    });
-    let close_startup_wizard_api_weak = api_weak.clone();
-    api.on_close_startup_wizard(move || {
-        if let Some(api) = close_startup_wizard_api_weak.upgrade() {
-            api.set_startup_wizard_visible(false);
-        }
-    });
-    file_tree::setup(&api, api_weak.clone(), editor_ui.as_weak());
+    let file_tree_controller = file_tree::setup(&api, api_weak.clone(), &project, project_weak);
+    preview::set_file_tree_controller(file_tree_controller);
     recent_colors::setup(&api, api_weak.clone());
     super::outline::setup(&api, api_weak.clone());
     super::undo_redo::setup(&api);
-    setup_preview_user_settings(&api);
-    apply_preview_user_settings(&editor_ui, &PreviewUserSettings::default());
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
     super::remote::setup(&api, api_weak, to_lsp);
@@ -315,8 +264,6 @@ pub fn create_ui(
     {
         api.set_control_key_name("command".into());
     }
-
-    Ok(editor_ui)
 }
 
 fn extract_definition_location(ci: &ComponentInformation) -> (SharedString, SharedString) {
@@ -1620,9 +1567,44 @@ pub fn ui_set_properties(
 mod tests {
     use crate::preview::preview_data;
 
-    use slint::{Model, SharedString, ToSharedString, VecModel};
+    use slint::{
+        ComponentHandle, LogicalPosition, Model, SharedString, ToSharedString, VecModel,
+        platform::{PointerEventButton, WindowEvent},
+    };
 
     use super::{PropertyInformation, PropertyValue, PropertyValueKind};
+
+    #[test]
+    fn title_area_requests_window_move_on_first_drag() {
+        i_slint_backend_testing::init_no_event_loop();
+        let editor = super::EditorUi::new().unwrap();
+        editor.show().unwrap();
+
+        let title_move_area = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &editor,
+            "EditorUi::title-move-area",
+        )
+        .next()
+        .expect("the title move area must be inside EditorUi's FocusScope");
+        let position = title_move_area.absolute_position();
+        let size = title_move_area.size();
+        let start =
+            LogicalPosition::new(position.x + size.width / 2., position.y + size.height / 2.);
+        editor.window().dispatch_event(WindowEvent::PointerPressed {
+            position: start,
+            button: PointerEventButton::Left,
+        });
+        editor.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(start.x + 20., start.y),
+        });
+
+        assert_eq!(
+            i_slint_backend_testing::access_testing_window(editor.window(), |window| {
+                window.window_move_request_count()
+            }),
+            1
+        );
+    }
 
     fn create_test_property(name: &str, value: &str) -> PropertyInformation {
         PropertyInformation {
@@ -1680,22 +1662,6 @@ mod tests {
         assert_eq!(t.value.code.as_str(), "DDD");
 
         assert!(it.next().is_none());
-    }
-
-    #[test]
-    fn preview_user_settings_from_values_maps_all_toggles() {
-        assert_eq!(
-            super::preview_user_settings_from_values(true, false, true, false, true, false),
-            super::PreviewUserSettings {
-                version: super::PreviewUserSettings::CURRENT_VERSION,
-                always_on_top: true,
-                show_library: false,
-                show_properties: true,
-                show_outline: false,
-                show_simulation_data: true,
-                show_console: false,
-            }
-        );
     }
 
     fn generate_preview_data(

@@ -711,7 +711,8 @@ fn lower_grid_layout(
             );
             collected_children.push(layout_child);
             new_row = true;
-        } else if layout_child.borrow().base_type.type_name() == Some("Row") {
+        } else if matches!(&layout_child.borrow().base_type, ElementType::Builtin(b) if b.name == "Row")
+        {
             new_row = true;
             let row_children = std::mem::take(&mut layout_child.borrow_mut().children);
             for row_child in row_children {
@@ -1730,11 +1731,26 @@ fn clamp_cross_stretch_size(
     size_expr
 }
 
+/// `auto` is the unset default of `cross-axis-alignment` and only valid for
+/// `cross-axis-self-alignment`; setting it explicitly is an error.
+fn check_cross_axis_alignment_not_auto(elem: &ElementRc, diag: &mut BuildDiagnostics) {
+    if let Some(b) = elem.borrow().binding("cross-axis-alignment")
+        && let Expression::EnumerationValue(ev) = b.value_expression()
+        && ev.to_string() == "auto"
+    {
+        diag.push_error(
+            "cross-axis-alignment cannot be set to 'auto', which is only valid for cross-axis-self-alignment; the default is 'stretch'".into(),
+            &*b,
+        );
+    }
+}
+
 fn lower_box_layout(
     layout_element: &ElementRc,
     diag: &mut BuildDiagnostics,
     orientation: Orientation,
 ) {
+    check_cross_axis_alignment_not_auto(layout_element, diag);
     let mut layout = BoxLayout {
         orientation,
         elems: Default::default(),
@@ -1899,6 +1915,7 @@ fn lower_box_layout(
 }
 
 fn lower_flexbox_layout(layout_element: &ElementRc, diag: &mut BuildDiagnostics) {
+    check_cross_axis_alignment_not_auto(layout_element, diag);
     let direction = crate::layout::binding_reference(layout_element, "flex-direction");
     let cross_axis_line_alignment =
         crate::layout::binding_reference(layout_element, "cross-axis-line-alignment");

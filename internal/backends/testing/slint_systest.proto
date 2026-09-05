@@ -158,6 +158,7 @@ enum AccessibleRole {
     Navigation = 26;
     Region = 27;
     Search = 28;
+    WindowTitleBar = 29;
 }
 
 enum RecordedEventResult {
@@ -226,6 +227,19 @@ message RequestElementDrag {
 message RequestDispatchWindowEvent {
     Handle window_handle = 1;
     WindowEvent event = 2;
+}
+
+// Not part of RequestToAUT: moving the pointer, hovering, and clearing a hover
+// all boil down to dispatching a PointerMoveEvent via RequestDispatchWindowEvent,
+// which the wire protocol already supports. These messages exist only to give the
+// move_pointer/hover_element MCP tools their own minimal input schema.
+message RequestMovePointer {
+    Handle window_handle = 1;
+    LogicalPosition position = 2;
+}
+
+message RequestHoverElement {
+    Handle element_handle = 1;
 }
 
 message RequestDispatchKeyEvent {

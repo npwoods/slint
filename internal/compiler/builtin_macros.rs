@@ -146,7 +146,35 @@ pub fn lower_macro(
 
             expr
         }
+        BuiltinMacroFunction::Spring => spring_macro(n, sub_expr.collect(), diag),
     }
+}
+
+fn spring_macro(
+    node: &dyn Spanned,
+    args: Vec<(Expression, Option<NodeOrToken>)>,
+    diag: &mut BuildDiagnostics,
+) -> Expression {
+    let literal = |e: &Expression| match e {
+        Expression::NumberLiteral(val, Unit::None) => Some(*val),
+        _ => None,
+    };
+    let bounce = match args.as_slice() {
+        [(Expression::UnaryOp { sub, op: '-' }, _)] => literal(sub).map(|v| -v),
+        [(Expression::UnaryOp { sub, op: '+' }, _)] => literal(sub),
+        [(expr, _)] => literal(expr),
+        _ => None,
+    };
+    let Some(mut bounce) = bounce else {
+        diag.push_error("The spring curve needs a single number literal argument".into(), node);
+        return Expression::EasingCurve(EasingCurve::Spring(0.));
+    };
+    if !(-1.0..=1.0).contains(&bounce) {
+        let loc = args[0].1.as_ref().map_or(node, |n| n as &dyn Spanned);
+        diag.push_error("The bounce argument to spring curve must be between -1 and 1".into(), loc);
+        bounce = 0.;
+    }
+    Expression::EasingCurve(EasingCurve::Spring(bounce as f32))
 }
 
 fn min_max_macro(

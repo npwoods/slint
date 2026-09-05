@@ -14,8 +14,9 @@ Some convention used in the generated code:
 
 use super::accessor_names::{self, AccessorKind};
 use crate::CompilerConfiguration;
+use crate::diagnostics::SourceLocation;
 use crate::expression_tree::{BuiltinFunction, EasingCurve, MinMaxOp, OperatorClass};
-use crate::langtype::{DeclNode, Enumeration, EnumerationValue, Struct, StructName, Type};
+use crate::langtype::{Enumeration, EnumerationValue, Struct, StructName, Type};
 use crate::layout::Orientation;
 use crate::llr::lower_expression::lower_constant_expression;
 use crate::llr::lower_layout_expression::{
@@ -758,12 +759,12 @@ fn rust_attributes_tokens(
     attributes: &[SmolStr],
     kind: &str,
     name: &SmolStr,
-    node: Option<&DeclNode>,
+    node: Option<&SourceLocation>,
 ) -> TokenStream {
     let attrs = attributes.iter().map(|attr| match TokenStream::from_str(attr) {
         Ok(t) => quote!(#[#t]),
         Err(_) => {
-            let source_location = node.map(|n| n.to_source_location()).unwrap_or_default();
+            let source_location = node.cloned().unwrap_or_default();
             let error = format!(
                 "Error parsing @rust-attr for {kind} '{name}' declared at {source_location}"
             );
@@ -1774,7 +1775,7 @@ fn generate_sub_component(
             quote! {
                 fn cross_axis_self_alignment_for_repeated(
                     self: ::core::pin::Pin<&Self>,
-                ) -> sp::CrossAxisSelfAlignment {
+                ) -> sp::CrossAxisAlignment {
                     #![allow(unused)]
                     let _self = self;
                     #expr
@@ -2727,7 +2728,7 @@ fn generate_repeated_component(
     let ctx = EvaluationContext {
         compilation_unit: unit,
         current_scope: EvaluationScope::SubComponent(repeated.sub_tree.root, Some(parent_ctx)),
-        generator_state: RustGeneratorContext { global_access: quote!(_self) },
+        generator_state: RustGeneratorContext { global_access: quote!(_self.globals()) },
         argument_types: &[],
     };
 
@@ -2871,18 +2872,6 @@ fn generate_repeated_component(
                 // the row-scan literals below default those fields.
                 debug_assert!(root_sc.cross_axis_self_alignment_for_repeated.is_none());
                 debug_assert!(root_sc.layout_order_for_repeated.is_none());
-                // Create a context with proper global_access for compiling layout info expressions
-                let layout_ctx = EvaluationContext {
-                    compilation_unit: unit,
-                    current_scope: EvaluationScope::SubComponent(
-                        repeated.sub_tree.root,
-                        Some(parent_ctx),
-                    ),
-                    generator_state: RustGeneratorContext {
-                        global_access: quote!(_self.globals()),
-                    },
-                    argument_types: &[],
-                };
 
                 // A GridLayout measures an inner repeated child at the column
                 // width it assigns it, like the static children measure at
@@ -2894,7 +2883,7 @@ fn generate_repeated_component(
                         return quote!(inner.as_pin_ref().layout_info(o));
                     };
                     let idx = ident(GRID_MEASURE_CHILD_INDEX_LOCAL);
-                    let w = compile_expression(&e.borrow(), &layout_ctx);
+                    let w = compile_expression(&e.borrow(), &ctx);
                     quote!(match o {
                         sp::Orientation::Vertical => inner
                             .as_pin_ref()
@@ -2917,9 +2906,9 @@ fn generate_repeated_component(
                             llr::RowChildTemplateInfo::Static { child_index } => {
                                 let child = &root_sc.grid_layout_children[*child_index];
                                 let layout_info_h_code =
-                                    compile_expression(&child.layout_info_h.borrow(), &layout_ctx);
+                                    compile_expression(&child.layout_info_h.borrow(), &ctx);
                                 let layout_info_v_code =
-                                    compile_expression(&child.layout_info_v.borrow(), &layout_ctx);
+                                    compile_expression(&child.layout_info_v.borrow(), &ctx);
                                 let advance = (!is_last).then(|| quote! { count += 1; });
                                 quote! {
                                     if count == index {
@@ -3712,7 +3701,7 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
             let prop_type = ctx.property_ty(nr);
             primitive_property_value(prop_type, access)
         }
-        Expression::BuiltinFunctionCall { function, arguments } => {
+        Expression::BuiltinFunctionCall { function, arguments, .. } => {
             compile_builtin_function_call(function.clone(), arguments, ctx)
         }
         Expression::CallBackCall { .. } => compile_callback_call(expr, ctx),
@@ -3785,6 +3774,9 @@ fn compile_expression(expr: &Expression, ctx: &EvaluationContext) -> TokenStream
         },
         Expression::EasingCurve(EasingCurve::CubicBezier(a, b, c, d)) => {
             quote!(sp::EasingCurve::CubicBezier([#a, #b, #c, #d]))
+        }
+        Expression::EasingCurve(EasingCurve::Spring(a)) => {
+            quote!(sp::EasingCurve::Spring(#a))
         }
         // The other curves have no parameters and map to a runtime variant with the same name.
         Expression::EasingCurve(e) => {
@@ -5156,7 +5148,7 @@ fn compile_builtin_function_call(
             quote!({
                 let model = &#model;
                 let value = #value;
-                model.push_row(value);
+                sp::report_model_error("push", None, model.push_row(value));
             })
         }
         BuiltinFunction::ArrayRemove => {
@@ -5164,9 +5156,11 @@ fn compile_builtin_function_call(
             let index = a.next().unwrap();
             quote!({
                 let model = &#model;
-                if let Ok(index) = usize::try_from(#index) {
-                    model.remove_row(index);
-                }
+                let result = match usize::try_from(#index) {
+                    Ok(index) => model.remove_row(index),
+                    Err(_) => Err(sp::ModelError::out_of_bounds(model.row_count())),
+                };
+                sp::report_model_error("remove", None, result);
             })
         }
         BuiltinFunction::ArrayInsert => {
@@ -5177,9 +5171,11 @@ fn compile_builtin_function_call(
                 let model = &#model;
                 let index = #index;
                 let value = #value;
-                if let Ok(index) = usize::try_from(index) {
-                    model.insert_row(index, value);
-                }
+                let result = match usize::try_from(index) {
+                    Ok(index) => model.insert_row(index, value),
+                    Err(_) => Err(sp::ModelError::out_of_bounds(model.row_count())),
+                };
+                sp::report_model_error("insert", None, result);
             })
         }
         BuiltinFunction::Rgb => {

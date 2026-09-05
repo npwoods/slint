@@ -211,6 +211,9 @@ fn eval_expression(
             expression_tree::EasingCurve::CubicBezier(a, b, c, d) => {
                 i_slint_core::animations::EasingCurve::CubicBezier([*a, *b, *c, *d])
             }
+            expression_tree::EasingCurve::Spring(a) => {
+                i_slint_core::animations::EasingCurve::Spring(*a)
+            }
         }),
         Expression::LinearGradient { angle, stops } => {
             let angle = eval_expression(angle, local_context, None);
@@ -676,7 +679,7 @@ fn handle_builtin_function(
             };
             let value = eval_expression(&arguments[1], local_context, None);
 
-            model.push_row(value);
+            let _ = model.push_row(value);
 
             Value::Void
         }
@@ -696,7 +699,7 @@ fn handle_builtin_function(
             };
 
             if let Ok(index) = usize::try_from(index as i64) {
-                model.remove_row(index);
+                let _ = model.remove_row(index);
             }
 
             Value::Void
@@ -717,7 +720,7 @@ fn handle_builtin_function(
 
             let value = eval_expression(&arguments[2], local_context, None);
             if let Ok(index) = usize::try_from(index as i64) {
-                model.insert_row(index, value);
+                let _ = model.insert_row(index, value);
             }
 
             Value::Void
