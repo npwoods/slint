@@ -608,6 +608,10 @@ jobs:
             - name: Build slint-viewer for Android
               run: cargo apk build -p slint-viewer --target aarch64-linux-android --lib --features remote
 
+    android_reproducible:
+        if: ${{ inputs.full }}
+        uses: ./.github/workflows/android_reproducible.yaml
+
     android_cpp:
         if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'api_cpp') || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'android_backend') }}
         runs-on: ubuntu-latest
@@ -841,9 +845,6 @@ jobs:
         runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v7
-            - name: Downgrade cc and ring crate to work around https://github.com/slint-ui/slint/issues/6875
-              run: |
-                  cargo update -p ring --precise 0.17.9
             - name: Fetch Yocto SDK
               run: |
                   # Fetch pre-built SDK built via populate_sdk for core-image-weston with setup from https://github.com/slint-ui/meta-slint/blob/main/.github/workflows/ci.yml
