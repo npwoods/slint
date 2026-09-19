@@ -4776,7 +4776,7 @@ dependencies = [
 
 [[package]]
 name = "material-gallery"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -7851,7 +7851,7 @@ dependencies = [
 
 [[package]]
 name = "slint-material-components"
-version = "1.18.0"
+version = "1.18.1"
 
 [[package]]
 name = "slint-node"
