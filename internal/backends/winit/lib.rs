@@ -38,6 +38,9 @@ pub(crate) mod event_loop;
 mod frame_throttle;
 #[cfg(target_os = "ios")]
 mod ios;
+#[cfg(target_os = "macos")]
+mod macos;
+mod touch_finger_id;
 
 /// Re-export of the winit crate.
 pub use winit;
@@ -82,6 +85,13 @@ mod renderer {
         fn occluded(&self, _: bool) {}
 
         fn suspend(&self) -> Result<(), PlatformError>;
+
+        // The window's transparency changed after the window was created. Renderers that pick
+        // their surface's alpha mode up front have to reconfigure it to match.
+        #[cfg(target_os = "macos")]
+        fn set_transparent(&self, _transparent: bool) -> Result<(), PlatformError> {
+            Ok(())
+        }
 
         // Got winit::Event::Resumed
         fn resume(
@@ -448,6 +458,9 @@ pub(crate) struct SharedBackendData {
     #[cfg(target_os = "ios")]
     #[allow(unused)]
     keyboard_notifications: ios::KeyboardNotifications,
+    #[cfg(target_os = "ios")]
+    #[allow(unused)]
+    scene_lifecycle: ios::SceneLifecycle,
 }
 
 impl SharedBackendData {
@@ -519,6 +532,9 @@ impl SharedBackendData {
         let keyboard_notifications =
             ios::register_keyboard_notifications(Rc::downgrade(&active_windows));
 
+        #[cfg(target_os = "ios")]
+        let scene_lifecycle = ios::install_scene_lifecycle(Rc::downgrade(&active_windows));
+
         let event_loop_proxy = event_loop.create_proxy();
         #[cfg(not(target_arch = "wasm32"))]
         let clipboard = crate::clipboard::create_clipboard(
@@ -546,6 +562,8 @@ impl SharedBackendData {
             desktop_settings: xdg_desktop_settings::DesktopSettings::new(),
             #[cfg(target_os = "ios")]
             keyboard_notifications,
+            #[cfg(target_os = "ios")]
+            scene_lifecycle,
         })
     }
 
@@ -1135,7 +1153,11 @@ pub trait WinitWindowAccessor: private::WinitWindowAccessorSealed {
     ) -> impl std::future::Future<Output = Result<Arc<winit::window::Window>, PlatformError>>;
 
     /// Dispatches a Winit WindowEvent directly to this window
-    fn dispatch_winit_window_event(&self, event_loop: &ActiveEventLoop, event: &WindowEvent);
+    fn dispatch_winit_window_event(
+        &self,
+        event_loop: &ActiveEventLoop,
+        event: &WindowEvent,
+    ) -> Result<(), PlatformError>;
 }
 
 impl WinitWindowAccessor for i_slint_core::api::Window {
@@ -1192,7 +1214,11 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         }
     }
 
-    fn dispatch_winit_window_event(&self, event_loop: &ActiveEventLoop, event: &WindowEvent) {
+    fn dispatch_winit_window_event(
+        &self,
+        event_loop: &ActiveEventLoop,
+        event: &WindowEvent,
+    ) -> Result<(), PlatformError> {
         let adapter = i_slint_core::window::WindowInner::from_pub(self).window_adapter();
         let adapter = adapter
             .internal(i_slint_core::InternalToken)
@@ -1200,7 +1226,11 @@ impl WinitWindowAccessor for i_slint_core::api::Window {
         if let Some(adapter) = adapter
             && let Some(winit_window) = adapter.winit_window()
         {
-            let _ = adapter.dispatch_winit_window_event(event_loop, &winit_window, event);
+            adapter.dispatch_winit_window_event(event_loop, &winit_window, event)
+        } else {
+            Err(PlatformError::OtherError(
+                "Slint window is not backed by a Winit window adapter".to_string().into(),
+            ))
         }
     }
 }
