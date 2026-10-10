@@ -99,7 +99,7 @@
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::{BuiltinFunction, Callable, Expression, NamedReference};
-use crate::langtype::{ElementType, Type};
+use crate::langtype::{ElementType, PropertyLookupMode, Type};
 use crate::object_tree::*;
 use core::cell::RefCell;
 use i_slint_common::MENU_SEPARATOR_PLACEHOLDER_TITLE;
@@ -129,6 +129,7 @@ pub async fn lower_menus(
     // First check if any MenuBar, ContextMenuArea, or SystemTrayIcon is used - avoid loading std-widgets.slint if not needed
     let mut has_menubar_or_context_menu = false;
     doc.visit_all_used_components(|component| {
+        error_on_slot_in_inner_builtin(component, &["MenuBar", "Menu"], diag);
         recurse_elem_including_sub_components_no_borrow(component, &(), &mut |elem, _| {
             if matches!(&elem.borrow().builtin_type(), Some(b) if matches!(b.name.as_str(), "MenuBar" | "ContextMenuArea" | "ContextMenuInternal" | "SystemTrayIcon")) {
                 has_menubar_or_context_menu = true;
@@ -253,6 +254,22 @@ fn process_context_menu(
     components: &UsefulMenuComponents,
     diag: &mut BuildDiagnostics,
 ) -> bool {
+    // This pass runs before inlining, so a component inheriting ContextMenuArea is lowered
+    // through its own root element, the only one whose base_type is the builtin. Skip the
+    // elements instantiating such a component, however deep the inheritance chain.
+    if !matches!(&context_menu_elem.borrow().base_type, ElementType::Builtin(_)) {
+        // A Menu declared here would be dropped silently.
+        for c in &context_menu_elem.borrow().children {
+            if matches!(&c.borrow().base_type, ElementType::Builtin(b) if b.name == "Menu") {
+                diag.push_error(
+                    "Menu must be declared inside the component inheriting ContextMenuArea".into(),
+                    &*c.borrow(),
+                );
+            }
+        }
+        return false;
+    }
+
     let is_internal = matches!(&context_menu_elem.borrow().base_type, ElementType::Builtin(b) if b.name == "ContextMenuInternal");
 
     if is_internal && context_menu_elem.borrow().property_declarations.contains_key(ENTRIES) {
@@ -267,35 +284,7 @@ fn process_context_menu(
         ty: crate::typeregister::logical_point_type().into(),
     };
     let expr = if !is_internal {
-        let menu_element_type = context_menu_elem
-            .borrow()
-            .base_type
-            .as_builtin()
-            .additional_accepted_child_types
-            .get("Menu")
-            .expect("ContextMenu should accept Menu")
-            .clone()
-            .into();
-
-        let mut menu_elem: Option<Rc<RefCell<Element>>> = None;
-        context_menu_elem.borrow_mut().children.retain(|x| {
-            if x.borrow().base_type == menu_element_type {
-                if let Some(ref existing) = menu_elem {
-                    diag.push_error(
-                        "Only one Menu is allowed in a ContextMenu".into(),
-                        &*x.borrow(),
-                    );
-                    diag.push_note("First Menu defined here".into(), &*existing.borrow());
-                } else {
-                    menu_elem = Some(x.clone());
-                }
-                false
-            } else {
-                true
-            }
-        });
-
-        let Some(menu_elem) = menu_elem else {
+        let Some(menu_elem) = find_root_menu(context_menu_elem, "ContextMenu", diag) else {
             diag.push_error(
                 "ContextMenuArea should have a Menu".into(),
                 &*context_menu_elem.borrow(),
@@ -353,12 +342,9 @@ fn process_context_menu(
         }
     };
 
-    let old = context_menu_elem
-        .borrow_mut()
-        .bindings
-        .insert(SmolStr::new_static(SHOW), RefCell::new(expr.into()));
+    let old = context_menu_elem.borrow_mut().set_binding(SmolStr::new_static(SHOW), expr.into());
     if let Some(old) = old {
-        diag.push_error("'show' is not a callback in ContextMenuArea".into(), &old.borrow().span);
+        diag.push_error("'show' is not a callback in ContextMenuArea".into(), &old.span);
     }
 
     true
@@ -370,35 +356,7 @@ fn process_system_tray_icon(
     diag: &mut BuildDiagnostics,
 ) {
     // A Menu child is optional; without it, no SetupSystemTrayIcon call is emitted.
-    let menu_element_type: ElementType = system_tray_elem
-        .borrow()
-        .base_type
-        .as_builtin()
-        .additional_accepted_child_types
-        .get("Menu")
-        .expect("SystemTrayIcon should accept Menu")
-        .clone()
-        .into();
-
-    let mut menu_elem: Option<Rc<RefCell<Element>>> = None;
-    system_tray_elem.borrow_mut().children.retain(|x| {
-        if x.borrow().base_type == menu_element_type {
-            if let Some(ref existing) = menu_elem {
-                diag.push_error(
-                    "Only one Menu is allowed in a SystemTrayIcon".into(),
-                    &*x.borrow(),
-                );
-                diag.push_note("First Menu defined here".into(), &*existing.borrow());
-            } else {
-                menu_elem = Some(x.clone());
-            }
-            false
-        } else {
-            true
-        }
-    });
-
-    let Some(menu_elem) = menu_elem else {
+    let Some(menu_elem) = find_root_menu(system_tray_elem, "SystemTrayIcon", diag) else {
         // No menu is a valid configuration; nothing to lower.
         return;
     };
@@ -491,6 +449,7 @@ fn process_window(
                 lhs: condition.into(),
                 rhs: supports_native_menu_bar.into(),
                 op: '&',
+                source_location: None,
             }),
             None => Some(supports_native_menu_bar),
         };
@@ -528,7 +487,10 @@ fn process_window(
 
     for prop in [ENTRIES, SUB_MENU, ACTIVATED] {
         // materialize the properties and callbacks
-        let ty = components.menubar_impl.lookup_property(prop).property_type;
+        let ty = components
+            .menubar_impl
+            .lookup_property(prop, PropertyLookupMode::ComponentLocal)
+            .property_type;
         assert_ne!(ty, Type::Invalid, "Can't lookup type for {prop}");
         let nr = NamedReference::new(&menu_bar, SmolStr::new_static(prop));
         let forward_expr = if let Type::Callback(cb) = &ty {
@@ -548,7 +510,7 @@ fn process_window(
         } else {
             Expression::PropertyReference(nr)
         };
-        menubar_impl.borrow_mut().bindings.insert(prop.into(), RefCell::new(forward_expr.into()));
+        menubar_impl.borrow_mut().set_binding(prop.into(), forward_expr.into());
         let old = menu_bar
             .borrow_mut()
             .property_declarations
@@ -559,12 +521,11 @@ fn process_window(
     }
 
     // Transfer the visible binding from MenuBar to MenuBarImpl
-    let visible_binding = menu_bar.borrow_mut().bindings.remove("visible");
+    let visible_binding = menu_bar.borrow_mut().take_binding("visible");
     if let Some(visible_binding) = &visible_binding {
         menubar_impl
             .borrow_mut()
-            .bindings
-            .insert(SmolStr::new_static("menubar-visible"), visible_binding.clone());
+            .set_binding(SmolStr::new_static("menubar-visible"), visible_binding.clone());
     }
 
     // Transform the MenuBar in a layout
@@ -616,7 +577,7 @@ fn process_window(
     }
 
     if let Some(visible_binding) = visible_binding {
-        arguments.push(visible_binding.borrow().expression.clone());
+        arguments.push(visible_binding.expression.clone());
     } else {
         arguments.push(Expression::BoolLiteral(true));
     }
@@ -629,6 +590,57 @@ fn process_window(
     component.init_code.borrow_mut().constructor_code.push(setup_menubar);
 
     true
+}
+
+/// The first Menu child of `owner`. The other ones are reported as errors.
+fn find_root_menu(
+    owner: &ElementRc,
+    owner_name: &str,
+    diag: &mut BuildDiagnostics,
+) -> Option<ElementRc> {
+    let menu_element_type: ElementType = owner
+        .borrow()
+        .base_type
+        .as_builtin()
+        .additional_accepted_child_types
+        .get("Menu")
+        .expect("owner should accept Menu")
+        .clone()
+        .into();
+    let mut menu_elem: Option<ElementRc> = None;
+    for x in &owner.borrow().children {
+        if x.borrow().base_type != menu_element_type {
+            continue;
+        }
+        if let Some(existing) = &menu_elem {
+            diag.push_error(format!("Only one Menu is allowed in a {owner_name}"), &*x.borrow());
+            diag.push_note("First Menu defined here".into(), &*existing.borrow());
+        } else {
+            menu_elem = Some(x.clone());
+        }
+    }
+    menu_elem
+}
+
+/// Move the root Menu of each ContextMenuArea and SystemTrayIcon out of the tree, into
+/// [`Component::optimized_elements`], which keeps its properties.
+pub fn remove_root_menus(component: &Rc<Component>) {
+    recurse_elem_including_sub_components_no_borrow(component, &(), &mut |elem, _| {
+        let is_menu_owner = matches!(&elem.borrow().base_type,
+            ElementType::Builtin(b) if matches!(b.name.as_str(), "ContextMenuInternal" | "SystemTrayIcon"));
+        if is_menu_owner {
+            let menus: Vec<_> = elem
+                .borrow()
+                .children
+                .iter()
+                .filter(|c| matches!(&c.borrow().base_type, ElementType::Builtin(b) if b.name == "Menu"))
+                .cloned()
+                .collect();
+            for menu in menus {
+                move_to_optimized_elements(&menu, elem);
+            }
+        }
+    });
 }
 
 /// Lower the MenuItem's and Menu's to either
@@ -657,22 +669,20 @@ fn lower_menu_items(
                 element.borrow_mut().enclosing_component = component_weak.clone();
                 element.borrow_mut().geometry_props = None;
 
-                if !in_menubar && let Some(binding) = element.borrow().bindings.get("shortcut") {
+                if !in_menubar && let Some(binding) = element.borrow().binding("shortcut") {
                     diag.push_error(
                         "MenuItem shortcuts are currently only supported in the MenuBar".into(),
-                        &*binding.borrow(),
+                        &*binding,
                     );
                 }
 
                 if element.borrow().base_type.type_name() == Some("MenuSeparator") {
-                    element.borrow_mut().bindings.insert(
+                    element.borrow_mut().set_binding(
                         "title".into(),
-                        RefCell::new(
-                            Expression::StringLiteral(SmolStr::new_static(
-                                MENU_SEPARATOR_PLACEHOLDER_TITLE,
-                            ))
-                            .into(),
-                        ),
+                        Expression::StringLiteral(SmolStr::new_static(
+                            MENU_SEPARATOR_PLACEHOLDER_TITLE,
+                        ))
+                        .into(),
                     );
                 }
                 // Menu/MenuSeparator -> MenuItem

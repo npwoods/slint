@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(PartialEq, Debug)]
 struct PropertyInfo {
@@ -66,16 +67,16 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
         );
 
         if result.accessible_role.is_none()
-            && let Some(role) = elem.borrow().bindings.get("accessible-role")
+            && let Some(role) = elem.borrow().binding("accessible-role")
         {
-            match &role.borrow().expression {
+            match role.expression.ignore_debug_hooks() {
                 Expression::Invalid => (),
                 Expression::EnumerationValue(e) => {
                     result.accessible_role = Some(e.enumeration.values[e.value].to_string())
                 }
                 e => panic!(
                     "accessible-role not an EnumerationValue : {e:?}    (for {:?})",
-                    role.borrow().span
+                    role.span
                 ),
             };
         }
@@ -103,7 +104,7 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                     result.properties.insert(
                         "focus".into(),
                         PropertyInfo {
-                            ty: Type::Function(Rc::new(Function {
+                            ty: Type::Function(Arc::new(Function {
                                 return_type: Type::Void,
                                 args: Vec::new(),
                                 arg_names: Vec::new(),
@@ -115,7 +116,7 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                     result.properties.insert(
                         "clear-focus".into(),
                         PropertyInfo {
-                            ty: Type::Function(Rc::new(Function {
+                            ty: Type::Function(Arc::new(Function {
                                 return_type: Type::Void,
                                 args: Vec::new(),
                                 arg_names: Vec::new(),
@@ -127,10 +128,9 @@ fn load_component(component: &Rc<i_slint_compiler::object_tree::Component>) -> C
                 }
                 break;
             }
-            i_slint_compiler::langtype::ElementType::Native(_) => unreachable!(),
             i_slint_compiler::langtype::ElementType::Error => unreachable!(),
             i_slint_compiler::langtype::ElementType::Global => break,
-            i_slint_compiler::langtype::ElementType::Interface => break,
+            i_slint_compiler::langtype::ElementType::Interface(_) => break,
         };
         elem = e;
     }
@@ -154,7 +154,7 @@ fn load_style(style_name: String) -> Style {
     }
 
     let doc = loader
-        .get_document(&loader.resolve_import_path(None, "std-widgets.slint").unwrap().0)
+        .get_document(&loader.resolve_import_path(None, "std-widgets.slint").unwrap())
         .unwrap();
 
     let mut style = Style::default();

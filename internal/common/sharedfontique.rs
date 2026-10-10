@@ -17,8 +17,26 @@ use std::sync::Arc;
 /// When `shared` is true, the collection uses `Arc`-based internal sharing,
 /// so that clones share the underlying data and mutations are visible across clones.
 pub fn create_collection(shared: bool) -> Collection {
-    let mut collection =
-        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts: true });
+    init_collection(system_collection(shared), shared)
+}
+
+/// Discovers the system fonts, without the fonts from `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH`.
+/// Pass the result to [`init_collection`].
+pub fn system_collection(shared: bool) -> fontique::Collection {
+    let create = || {
+        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts: !cfg!(miri) })
+    };
+    // Fontique's Foundation calls autorelease their results,
+    // and the calling thread may have no autorelease pool in place.
+    #[cfg(target_vendor = "apple")]
+    return objc2::rc::autoreleasepool(|_| create());
+    #[cfg(not(target_vendor = "apple"))]
+    create()
+}
+
+/// Adds the fonts from `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH` to a collection from [`system_collection`].
+/// They become the default font and the generic families.
+pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Collection {
     let mut source_cache =
         if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() };
 
@@ -141,6 +159,21 @@ impl Collection {
         self.inner.query(&mut self.source_cache)
     }
 
+    /// The first font any of `families` provides, in order, or `None` when none of them do.
+    pub fn first_match<'a>(
+        &mut self,
+        families: impl IntoIterator<Item = fontique::QueryFamily<'a>>,
+    ) -> Option<fontique::QueryFont> {
+        let mut query = self.query();
+        query.set_families(families);
+        let mut font = None;
+        query.matches_with(|queried_font| {
+            font = Some(queried_font.clone());
+            fontique::QueryStatus::Stop
+        });
+        font
+    }
+
     pub fn get_font_for_info(
         &mut self,
         family_id: fontique::FamilyId,
@@ -185,11 +218,8 @@ impl std::ops::DerefMut for Collection {
     }
 }
 
-pub const FALLBACK_FAMILIES: [fontique::GenericFamily; 2] = [
-    // FemtoVG renderer needs SansSerif first, as it has difficulties rendering from SystemUi on macOS
-    fontique::GenericFamily::SansSerif,
-    fontique::GenericFamily::SystemUi,
-];
+pub const FALLBACK_FAMILIES: [fontique::GenericFamily; 2] =
+    [fontique::GenericFamily::SystemUi, fontique::GenericFamily::SansSerif];
 
 /// Wrapper around fontique::Blob to permit use of the blob as a key in the cache in the different renderers,
 /// to map the blob to the native type face representation (skia_safe::Typeface, femtovg::FontId, QRawFont, etc.).
@@ -220,5 +250,31 @@ impl From<fontique::Blob<u8>> for HashedBlob {
 impl AsRef<fontique::Blob<u8>> for HashedBlob {
     fn as_ref(&self) -> &fontique::Blob<u8> {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // cspell:ignore fonttools varLib instancer opsz pyftsubset unicodes
+    use skrifa::MetadataProvider;
+
+    // Keep the embedded font small. Regenerate it with:
+    //   fonttools varLib.instancer -o pinned.ttf Inter-VariableFont.ttf opsz=14
+    //   pyftsubset pinned.ttf --unicodes="U+0000-DFFF,U+F900-10FFFF" --output-file=Inter-VariableFont.ttf
+    #[test]
+    fn embedded_fallback_font_is_minimal() {
+        let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
+        let font = skrifa::FontRef::new(data).unwrap();
+
+        let has_pua = font
+            .charmap()
+            .mappings()
+            .any(|(cp, _)| matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+        assert!(!has_pua, "the embedded font maps Private Use Area codepoints; regenerate it");
+
+        assert!(
+            font.axes().iter().all(|axis| axis.tag() != "opsz"),
+            "the embedded font still has an optical-size axis; pin it"
+        );
     }
 }

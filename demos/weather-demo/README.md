@@ -5,7 +5,7 @@ A simple, cross-platform (Desktop, Android, Wasm) weather application using real
 
 | `.slint` Design | Rust Source (Desktop) | Rust Source (Android / Wasm) | Online wasm Preview | Open in SlintPad |
 | --- | --- | --- | --- | --- |
-| [`main.slint`](./weather-demo/ui/main.slint) | [`main.rs`](./weather-demo/src/main.rs) | [`lib.rs`](./weather-demo/src/lib.rs) | [Online simulation](https://slint.dev/snapshots/master/demos/weather-demo/) | [Preview in Online Code Editor](https://slint.dev/snapshots/master/editor?load_url=https://raw.githubusercontent.com/slint-ui/slint/master/demos/weather-demo/ui/main.slint) |
+| [`main.slint`](./ui/main.slint) | [`main.rs`](./src/main.rs) | [`lib.rs`](./src/lib.rs) | [Online simulation](https://slint.dev/snapshots/master/demos/weather-demo/) | [Preview in Online Code Editor](https://slint.dev/snapshots/master/editor?load_url=https://raw.githubusercontent.com/slint-ui/slint/master/demos/weather-demo/ui/main.slint) |
 
 Weather Demo is a weather application made by [Felgo](https://felgo.com/).
 
@@ -62,7 +62,7 @@ To be able to compile the application for Android, you must follow an initial se
 To start the application, execute:
 
 ```
-cargo apk run --lib
+cargo apk2 run --lib
 ```
 
 ## WebAssembly

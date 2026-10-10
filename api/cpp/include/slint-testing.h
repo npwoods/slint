@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+#pragma once
+
 #include "slint.h"
 #include "private/slint_testing_internal.h"
 #include <cstdint>
@@ -407,6 +409,32 @@ public:
         return std::nullopt;
     }
 
+    /// Selects the text between two UTF-8 offsets.
+    ///
+    /// This will invoke the `accessible-action-set-selection-offsets` callback.
+    void set_accessible_selection_offsets(int anchor, int focus) const
+    {
+        if (inner.element_index != 0)
+            return;
+        if (auto item = private_api::upgrade_item_weak(inner.item)) {
+            union SetSelectionOffsetsHelper {
+                cbindgen_private::AccessibilityAction action;
+                SetSelectionOffsetsHelper(int anchor, int focus)
+                {
+                    new (&action.set_selection_offsets)
+                            cbindgen_private::AccessibilityAction::SetSelectionOffsets_Body {
+                                cbindgen_private::AccessibilityAction::Tag::SetSelectionOffsets,
+                                anchor, focus
+                            };
+                }
+                ~SetSelectionOffsetsHelper() { }
+
+            } action(anchor, focus);
+            item->item_tree.vtable()->accessibility_action(item->item_tree.borrow(), item->index,
+                                                           &action.action);
+        }
+    }
+
     /// Invokes the expand accessibility action of that element
     /// (`accessible-action-expand`).
     void invoke_accessible_expand_action() const
@@ -530,12 +558,12 @@ public:
     LogicalPosition absolute_position() const
     {
         if (auto item = private_api::upgrade_item_weak(inner.item)) {
-            cbindgen_private::LogicalRect rect =
-                    item->item_tree.vtable()->item_geometry(item->item_tree.borrow(), item->index);
+            // `slint_item_absolute_position` already returns the element's own absolute
+            // position (it maps the element's geometry origin through the ancestor transforms).
             cbindgen_private::LogicalPoint abs =
                     slint::cbindgen_private::slint_item_absolute_position(&item->item_tree,
                                                                           item->index);
-            return LogicalPosition({ abs.x + rect.x, abs.y + rect.y });
+            return LogicalPosition({ abs.x, abs.y });
         }
         return LogicalPosition({ 0, 0 });
     }

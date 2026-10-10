@@ -58,10 +58,11 @@ pub(crate) fn mock_drag_window(
     window.dispatch_event(WindowEvent::PointerReleased { position: end, button });
 }
 
+/// Shown when the application was built without element debug info.
+pub(crate) const MISSING_DEBUG_INFO_MESSAGE: &str = "The use of the ElementHandle API requires the presence of debug info in Slint compiler generated code. Set the `SLINT_EMIT_DEBUG_INFO=1` environment variable at application build time or use `compile_with_config` and `with_debug_info` with `slint_build`'s `CompilerConfiguration`";
+
 fn warn_missing_debug_info() {
-    i_slint_core::debug_log!(
-        "The use of the ElementHandle API requires the presence of debug info in Slint compiler generated code. Set the `SLINT_EMIT_DEBUG_INFO=1` environment variable at application build time or use `compile_with_config` and `with_debug_info` with `slint_build`'s `CompilerConfiguration`"
-    )
+    i_slint_core::debug_log!("{}", MISSING_DEBUG_INFO_MESSAGE)
 }
 
 mod internal {
@@ -123,6 +124,7 @@ enum SingleElementMatch {
     MatchByTypeName(String),
     MatchByTypeNameOrBase(String),
     MatchByAccessibleRole(crate::AccessibleRole),
+    MatchByAccessibleLabel(String),
     MatchByPredicate(Box<dyn Fn(&ElementHandle) -> bool>),
 }
 
@@ -153,6 +155,9 @@ impl SingleElementMatch {
             }
             SingleElementMatch::MatchByAccessibleRole(role) => {
                 element.accessible_role() == Some(*role)
+            }
+            SingleElementMatch::MatchByAccessibleLabel(label) => {
+                element.accessible_label().is_some_and(|candidate_label| candidate_label == label)
             }
             SingleElementMatch::MatchByPredicate(predicate) => (predicate)(element),
         }
@@ -279,6 +284,14 @@ impl ElementQuery {
         self
     }
 
+    /// Include only elements in the results where [`ElementHandle::accessible_label()`] is equal to the provided `label`.
+    pub fn match_accessible_label(mut self, label: impl Into<String>) -> Self {
+        self.query_stack.push(ElementQueryInstruction::MatchSingleElement(
+            SingleElementMatch::MatchByAccessibleLabel(label.into()),
+        ));
+        self
+    }
+
     pub fn match_predicate(mut self, predicate: impl Fn(&ElementHandle) -> bool + 'static) -> Self {
         self.query_stack.push(ElementQueryInstruction::MatchSingleElement(
             SingleElementMatch::MatchByPredicate(Box::new(predicate)),
@@ -323,6 +336,21 @@ impl ElementQuery {
 pub struct ElementHandle {
     item: ItemWeak,
     element_index: usize, // When multiple elements get optimized into a single ItemRc, this index separates.
+}
+
+/// Overrides scrolling behavior for Slint's internal tests.
+/// Panics if the handle has expired or does not refer to a Flickable.
+#[cfg(feature = "internal")]
+pub fn set_flickable_physics(
+    element: &ElementHandle,
+    bounce: i_slint_core::items::AutoBool,
+    carry_momentum: i_slint_core::items::AutoBool,
+) {
+    use i_slint_core::items::Flickable;
+
+    let item = element.item.upgrade().expect("Flickable element has expired");
+    let flickable = item.downcast::<Flickable>().expect("Element is not a Flickable");
+    flickable.as_pin_ref().set_physics(bounce, carry_momentum);
 }
 
 impl ElementHandle {
@@ -390,6 +418,27 @@ impl ElementHandle {
         })
     }
 
+    /// Returns whether both handles refer to the same element of the same item.
+    #[cfg(any(feature = "system-testing", feature = "mcp"))]
+    pub(crate) fn is_same_element(&self, other: &ElementHandle) -> bool {
+        self.item == other.item && self.element_index == other.element_index
+    }
+
+    /// Returns a hashable value that equal elements share, for use as a lookup key.
+    /// Elements of different item trees can collide, so compare candidates with
+    /// [`Self::is_same_element`]. Returns None once the element is gone.
+    #[cfg(any(feature = "system-testing", feature = "mcp"))]
+    pub(crate) fn identity_hint(&self) -> Option<(u32, usize)> {
+        self.item.upgrade().map(|item| (item.index(), self.element_index))
+    }
+
+    /// Returns whether the compiler emitted the debug info that type names, ids and
+    /// descendant traversal need. See `MISSING_DEBUG_INFO_MESSAGE`.
+    #[cfg(any(feature = "system-testing", feature = "mcp"))]
+    pub(crate) fn has_debug_info(&self) -> bool {
+        self.item.upgrade().is_some_and(|item| item.element_count().is_some())
+    }
+
     /// Creates a new [`ElementQuery`] to match any descendants of this element.
     pub fn query_descendants(&self) -> ElementQuery {
         ElementQuery {
@@ -405,15 +454,12 @@ impl ElementHandle {
         component: &impl ElementRoot,
         label: &str,
     ) -> impl Iterator<Item = Self> {
-        let label = label.to_string();
-        let results = component
+        component
             .root_element()
             .query_descendants()
-            .match_predicate(move |elem| {
-                elem.accessible_label().is_some_and(|candidate_label| candidate_label == label)
-            })
-            .find_all();
-        results.into_iter()
+            .match_accessible_label(label)
+            .find_all()
+            .into_iter()
     }
 
     /// This function searches through the entire tree of elements of this window and looks for
@@ -640,6 +686,18 @@ impl ElementHandle {
         }
         if let Some(item) = self.item.upgrade() {
             item.accessible_action(&AccessibilityAction::SetValue(value.into()))
+        }
+    }
+
+    /// Selects the text between two UTF-8 offsets, by invoking the element's
+    /// `accessible-action-set-selection-offsets` callback. Note that you can only do this if that callback
+    /// is declared in your Slint code.
+    pub fn set_accessible_selection_offsets(&self, anchor: i32, focus: i32) {
+        if self.element_index != 0 {
+            return;
+        }
+        if let Some(item) = self.item.upgrade() {
+            item.accessible_action(&AccessibilityAction::SetSelectionOffsets(anchor, focus))
         }
     }
 
@@ -921,7 +979,7 @@ impl ElementHandle {
         }
     }
 
-    fn window_adapter(&self) -> Option<Rc<dyn i_slint_core::window::WindowAdapter>> {
+    pub(crate) fn window_adapter(&self) -> Option<Rc<dyn i_slint_core::window::WindowAdapter>> {
         self.item.upgrade().and_then(|item| item.window_adapter())
     }
 
@@ -975,10 +1033,9 @@ impl ElementHandle {
 
     /// Simulates a double click (or touch tap) on the element at its center point.
     pub async fn double_click(&self, button: PointerEventButton) {
-        let Ok(click_interval) = i_slint_core::with_global_context(
-            || Err(i_slint_core::platform::PlatformError::NoPlatform),
-            |ctx| ctx.platform().click_interval(),
-        ) else {
+        let Ok(click_interval) =
+            i_slint_core::with_existing_context(|ctx| ctx.platform().click_interval())
+        else {
             return;
         };
         let Some(duration_recognized_as_double_click) =
@@ -1059,10 +1116,18 @@ impl ElementHandle {
         mock_drag_window(window_adapter.window(), self.absolute_center(), target, button);
     }
 
-    fn absolute_center(&self) -> LogicalPosition {
-        let item_pos = self.absolute_position();
-        let item_size = self.size();
-        LogicalPosition::new(item_pos.x + item_size.width / 2., item_pos.y + item_size.height / 2.)
+    /// The center of the element in the coordinate system that input events are dispatched in.
+    /// Unlike [`Self::absolute_position()`] this includes the location of an enclosing popup that's
+    /// rendered inside the window, such as a menu.
+    pub(crate) fn absolute_center(&self) -> LogicalPosition {
+        let Some(item) = self.item.upgrade() else {
+            return Default::default();
+        };
+        // Map the center rather than mapping the origin and adding a local half-extent,
+        // which ignores any scale or rotation an ancestor applies (#13242).
+        i_slint_core::lengths::logical_position_to_api(
+            item.map_to_native_window(item.geometry().center()),
+        )
     }
 
     pub fn scroll(&self, delta_x: f32, delta_y: f32) {
@@ -1264,6 +1329,9 @@ fn test_matches() {
             .unwrap_or_default(),
         "hello"
     );
+
+    assert_eq!(root.query_descendants().match_accessible_label("hello").find_all().len(), 1);
+    assert_eq!(root.query_descendants().match_accessible_label("hell").find_all().len(), 0);
 
     app.set_condition(true);
 

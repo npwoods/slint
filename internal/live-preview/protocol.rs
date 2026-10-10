@@ -2,21 +2,31 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 mod lsp_to_preview;
+pub mod pairing;
 mod preview_to_lsp;
+pub mod session;
 mod versioned_url;
 
 pub use lsp_to_preview::{
-    LspToPreviewMessage, PreviewComponent, PreviewConfig, RemoteConnectionState,
+    LspToPreview, LspToPreviewMessage, PreviewComponent, PreviewConfig, RemoteConnectionState,
 };
-pub use preview_to_lsp::{PreviewTarget, PreviewToLspMessage};
+pub use pairing::PairingRejection;
+pub use preview_to_lsp::{PreviewTarget, PreviewToLsp, PreviewToLspMessage};
 pub use versioned_url::VersionedUrl;
 
 pub use lsp_types;
 
-#[cfg(feature = "file-watcher")]
+/// The boxed error type the protocol traits report failures with.
+pub type Error = Box<dyn std::error::Error>;
+
+/// The protocol's own `Result`, shadowing `std::result::Result` for glob importers
+/// so the traits' fallible methods can be written as `Result<()>`.
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(any(feature = "file-watcher", feature = "preview-session"))]
 mod diagnostics_adapter;
-#[cfg(feature = "file-watcher")]
-pub use diagnostics_adapter::to_lsp_diagnostic;
+#[cfg(any(feature = "file-watcher", feature = "preview-session"))]
+pub use diagnostics_adapter::{diagnostic_url, to_lsp_diagnostic};
 
 pub type SourceFileVersion = Option<i32>;
 pub const SERVICE_TYPE: &str = "_slint-preview._tcp.local.";

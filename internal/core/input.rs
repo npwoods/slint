@@ -6,14 +6,15 @@
 */
 #![warn(missing_docs)]
 
+use crate::cursor::MouseCursorInner;
 use crate::item_tree::ItemTreeRc;
 use crate::item_tree::{ItemRc, ItemWeak, VisitChildrenResult};
 use crate::items::{
-    AllowedDragActions, DropEvent, ItemRef, MouseCursor, OperatingSystemType, TextCursorDirection,
+    AllowedDragActions, BuiltInMouseCursor, DropEvent, ItemRef, OperatingSystemType,
+    TextCursorDirection,
 };
 pub use crate::items::{FocusReason, KeyEvent, KeyboardModifiers, PointerEventButton};
 use crate::lengths::{ItemTransform, LogicalPoint, LogicalVector};
-use crate::timers::Timer;
 use crate::window::{WindowAdapter, WindowInner};
 use crate::{Coord, Property, SharedString};
 use alloc::rc::Rc;
@@ -28,7 +29,6 @@ use core::time::Duration;
 ///
 /// The only difference with [`crate::platform::WindowEvent`] is that it uses untyped `Point`
 /// TODO: merge with platform::WindowEvent
-#[repr(C)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MouseEvent {
     /// The mouse or finger was pressed
@@ -41,6 +41,8 @@ pub enum MouseEvent {
         click_count: u8,
         /// The touch ID if the event originated from touch input.
         touch_finger_id: i32,
+        /// Original sample time on the animation clock, independent of event delivery.
+        event_time: Option<crate::animations::Instant>,
     },
     /// The mouse or finger was released
     Released {
@@ -52,6 +54,8 @@ pub enum MouseEvent {
         click_count: u8,
         /// The touch ID if the event originated from touch input.
         touch_finger_id: i32,
+        /// Original sample time on the animation clock, independent of event delivery.
+        event_time: Option<crate::animations::Instant>,
     },
     /// The position of the pointer has changed
     Moved {
@@ -59,6 +63,10 @@ pub enum MouseEvent {
         position: LogicalPoint,
         /// The touch ID if the event originated from touch input.
         touch_finger_id: i32,
+        /// Original sample time on the animation clock, independent of event delivery.
+        event_time: Option<crate::animations::Instant>,
+        /// Movement samples coalesced into this event.
+        history: TouchHistory,
     },
     /// Wheel was operated.
     Wheel {
@@ -120,6 +128,12 @@ impl MouseEvent {
         }
     }
 
+    /// Whether the event originates from a touch screen rather than a mouse.
+    pub fn is_from_touch(&self) -> bool {
+        // touch events carry the finger id + 1, events from a mouse carry 0
+        self.touch_finger_id() != 0
+    }
+
     /// The position of the cursor for this event, if any
     pub fn position(&self) -> Option<LogicalPoint> {
         match self {
@@ -141,7 +155,12 @@ impl MouseEvent {
         let pos = match self {
             MouseEvent::Pressed { position, .. } => Some(position),
             MouseEvent::Released { position, .. } => Some(position),
-            MouseEvent::Moved { position, .. } => Some(position),
+            MouseEvent::Moved { position, history, .. } => {
+                for (position, _) in &mut history.history {
+                    *position += vec;
+                }
+                Some(position)
+            }
             MouseEvent::Wheel { position, .. } => Some(position),
             MouseEvent::PinchGesture { position, .. } => Some(position),
             MouseEvent::RotationGesture { position, .. } => Some(position),
@@ -163,7 +182,12 @@ impl MouseEvent {
         let pos = match self {
             MouseEvent::Pressed { position, .. } => Some(position),
             MouseEvent::Released { position, .. } => Some(position),
-            MouseEvent::Moved { position, .. } => Some(position),
+            MouseEvent::Moved { position, history, .. } => {
+                for (position, _) in &mut history.history {
+                    *position = transform.transform_point(position.cast()).cast();
+                }
+                Some(position)
+            }
             MouseEvent::Wheel { position, .. } => Some(position),
             MouseEvent::PinchGesture { position, .. } => Some(position),
             MouseEvent::RotationGesture { position, .. } => Some(position),
@@ -189,6 +213,101 @@ impl MouseEvent {
                 *click_count = count
             }
             _ => (),
+        }
+    }
+}
+
+/// Historical touch events between the current event and the previous one
+/// On different platforms like on android or ios not for every touchscreen move
+/// move events are send but with a less frequency. The touch events between are
+/// not lost, but attached to the next event. This data can be used to determine
+/// better the touch velocity because more data is available
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TouchHistory {
+    /// Chronological positions and sample times preceding the current event.
+    /// Positions use the same coordinate system as the current event.
+    pub history: Vec<(LogicalPoint, crate::animations::Instant)>,
+}
+
+/// The mouse events a backend can deliver to the runtime.
+#[allow(missing_docs)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackendMouseEvent {
+    /// The mouse or finger was pressed
+    Pressed {
+        position: LogicalPoint,
+        button: PointerEventButton,
+        click_count: u8,
+        touch_finger_id: i32,
+    },
+    /// The mouse or finger was released
+    Released {
+        position: LogicalPoint,
+        button: PointerEventButton,
+        click_count: u8,
+        touch_finger_id: i32,
+    },
+    /// The position of the pointer has changed.
+    Moved { position: LogicalPoint, touch_finger_id: i32 },
+    /// Wheel was operated.
+    Wheel { position: LogicalPoint, delta_x: Coord, delta_y: Coord, phase: TouchPhase },
+    /// A platform-recognized pinch gesture (macOS/iOS trackpad, Qt).
+    PinchGesture { position: LogicalPoint, delta: f32, phase: TouchPhase },
+    /// A platform-recognized rotation gesture (macOS/iOS trackpad, Qt).
+    RotationGesture { position: LogicalPoint, delta: f32, phase: TouchPhase },
+    /// The mouse exited the item or component
+    Exit,
+}
+
+impl From<BackendMouseEvent> for MouseEvent {
+    fn from(event: BackendMouseEvent) -> Self {
+        match event {
+            BackendMouseEvent::Pressed { position, button, click_count, touch_finger_id } => {
+                Self::Pressed { position, button, click_count, touch_finger_id, event_time: None }
+            }
+            BackendMouseEvent::Released { position, button, click_count, touch_finger_id } => {
+                Self::Released { position, button, click_count, touch_finger_id, event_time: None }
+            }
+            BackendMouseEvent::Moved { position, touch_finger_id } => Self::Moved {
+                position,
+                touch_finger_id,
+                event_time: None,
+                history: TouchHistory { history: Default::default() },
+            },
+            BackendMouseEvent::Wheel { position, delta_x, delta_y, phase } => {
+                Self::Wheel { position, delta_x, delta_y, phase }
+            }
+            BackendMouseEvent::PinchGesture { position, delta, phase } => {
+                Self::PinchGesture { position, delta, phase }
+            }
+            BackendMouseEvent::RotationGesture { position, delta, phase } => {
+                Self::RotationGesture { position, delta, phase }
+            }
+            BackendMouseEvent::Exit => Self::Exit,
+        }
+    }
+}
+
+/// The drag and drop events a backend can deliver, through [`WindowInner::process_drag_event`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackendDragEvent {
+    /// A drag is hovering over the window.
+    Move { event: DropEvent, allowed: AllowedDragActions },
+    /// A drag was released over the window.
+    Drop { event: DropEvent, allowed: AllowedDragActions },
+    /// A drag left the window, or was cancelled while hovering over it.
+    Leave,
+}
+
+impl From<BackendDragEvent> for MouseEvent {
+    fn from(event: BackendDragEvent) -> Self {
+        match event {
+            BackendDragEvent::Move { event, allowed } => Self::DragMove { event, allowed },
+            BackendDragEvent::Drop { event, allowed } => Self::Drop { event, allowed },
+            // A drag leaving tears down the hover state the same way the pointer leaving does.
+            BackendDragEvent::Leave => Self::Exit,
         }
     }
 }
@@ -449,7 +568,7 @@ impl From<InternalKeyboardModifierState> for KeyboardModifiers {
 /// syntax as the macro:
 ///
 /// ```rust
-/// use i_slint_core::input::Keys;
+/// use slint::Keys;
 ///
 /// let save = Keys::from_parts(["Control", "S"])?;
 /// let undo = Keys::from_parts(["Control", "Shift?", "Z"])?;
@@ -585,17 +704,26 @@ pub(crate) mod ffi {
             Err(_) => false,
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_keys_to_parts(
+        keys: &Keys,
+        out: &mut crate::SharedVector<SharedString>,
+    ) {
+        *out = keys.to_parts().map(SharedString::from).collect();
+    }
 }
 
 /// Normalize a key string: lowercase and NFC-normalize.
 fn normalize_key(key: &str) -> SharedString {
     let lowered = key.to_lowercase();
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "shared-parley")] {
+    core::cfg_select! {
+        feature = "shared-parley" => {
             let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
             let normalized = normalizer.normalize(&lowered);
             SharedString::from(normalized.as_ref())
-        } else {
+        }
+        _ => {
             SharedString::from(lowered.as_str())
         }
     }
@@ -616,7 +744,12 @@ fn keys_from_parts_inner<'a>(
     let mut key_part: Option<&str> = None;
 
     for part in parts {
-        let part = part.trim();
+        // Parts are *not* trimmed: whitespace is significant, so `" "`, `"\t"` and
+        // `"\n"` are valid literal spellings of the Space, Tab and Return keys, the
+        // same way `@keys(" ")` is valid in Slint. Trimming would silently swallow
+        // them and make those keys unreachable through a literal. Empty parts carry
+        // no information and are skipped, which keeps `from_parts([""])` equivalent
+        // to `from_parts([])`.
         if part.is_empty() {
             continue;
         }
@@ -667,7 +800,7 @@ fn keys_from_parts_inner<'a>(
     let key_name = match key_part {
         Some(k) => k,
         None if modifiers == KeyboardModifiers::default() && !ignore_shift && !ignore_alt => {
-            // Empty input (or only whitespace) → Keys::default(), same as @keys()
+            // Empty input (or only empty parts) → Keys::default(), same as @keys()
             return Ok(Keys::default());
         }
         None => return Err(KeysParseErrorInner::NoKey),
@@ -741,7 +874,13 @@ impl Keys {
     /// if not found, treated as a string literal (must be a single lowercase grapheme cluster).
     /// Exactly one non-modifier key must be present.
     ///
-    /// An empty iterator returns `Keys::default()` (same as `@keys()`).
+    /// Parts are taken verbatim — they are not trimmed — so whitespace is significant:
+    /// `" "`, `"\t"` and `"\n"` are literal spellings of the `Space`, `Tab` and `Return`
+    /// keys, just as `@keys(" ")` is valid in Slint. A part must therefore match a
+    /// modifier or key exactly; `" Control "` is not the `Control` modifier.
+    ///
+    /// An empty iterator returns `Keys::default()` (same as `@keys()`). Empty parts are
+    /// skipped, so `from_parts([""])` is also `Keys::default()`.
     ///
     /// See also the Slint documentation on [Key Bindings](slint:KeyBindingOverview).
     ///
@@ -750,6 +889,58 @@ impl Keys {
         parts: impl IntoIterator<Item = &'a str>,
     ) -> Result<Keys, KeysParseError> {
         keys_from_parts(parts.into_iter())
+    }
+
+    #[i_slint_core_macros::slint_doc]
+    /// Decompose this `Keys` value into the string parts that
+    /// [`Keys::from_parts`] accepts.
+    ///
+    /// See also the Slint documentation on [Key Bindings](slint:KeyBindingOverview).
+    ///
+    /// A `Keys` value that is converted into parts and then re-created from those parts
+    /// with [`Keys::from_parts`] will be equal to the input `Keys` value:
+    ///
+    /// ```
+    /// use slint::Keys;
+    /// let k = Keys::from_parts(["Control", "Shift?", "Z"])?;
+    /// let k_from_parts = Keys::from_parts(k.to_parts())?;
+    /// assert_eq!(k_from_parts, k);
+    /// # Ok::<(), i_slint_core::input::KeysParseError>(())
+    /// ```
+    ///
+    /// Note that while a round-trip guarantees that the resulting `Keys` instances will
+    /// be equal, the parts returned by `to_parts` can be different from the parts used
+    /// to construct the `Keys` instance with `from_parts`.
+    ///
+    /// A part is not necessarily printable, so a text format storing parts has to quote
+    /// or escape them. The
+    /// [`runtime_key_bindings`](https://github.com/slint-ui/slint/tree/master/examples/runtime_key_bindings)
+    /// example shows one way to persist a user-configured shortcut and restore it.
+    ///
+    /// An empty `Keys` (i.e. [`Keys::default()`]) returns an empty iterator.
+    pub fn to_parts(&self) -> impl Iterator<Item = &str> {
+        let inner = &self.inner;
+        let has_key = !inner.key.is_empty();
+        // Order matches the `@keys` macro / Debug impl: Meta, Control, Alt, Shift.
+        //
+        // The key itself is always emitted as the stored character, never as the
+        // name it may have been created from. Names are not reversed back: a
+        // `LocalizedShiftable` name auto-applies `ignore_shift` on re-parse, so
+        // emitting one would break the round-trip of a literal such as
+        // `["Control", "+"]` (which has `ignore_shift = false`). Emitting the raw
+        // character lets `ignore_shift` be carried explicitly by `Shift?`, so
+        // `@keys(Control + Plus)` comes back as `["Control", "Shift?", "+"]`.
+        [
+            (has_key && inner.modifiers.meta).then_some("Meta"),
+            (has_key && inner.modifiers.control).then_some("Control"),
+            (has_key && inner.modifiers.alt).then_some("Alt"),
+            (has_key && !inner.modifiers.alt && inner.ignore_alt).then_some("Alt?"),
+            (has_key && inner.modifiers.shift).then_some("Shift"),
+            (has_key && !inner.modifiers.shift && inner.ignore_shift).then_some("Shift?"),
+            has_key.then(|| inner.key.as_str()),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Check whether a `Keys` can be triggered by the given `KeyEvent`
@@ -938,7 +1129,7 @@ pub enum KeyEventType {
     CommitComposition = 3,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone, PartialEq)]
 /// This struct is used to pass key events to the runtime.
 pub struct InternalKeyEvent {
     /// That's the public type with only public fields
@@ -1171,9 +1362,14 @@ pub struct ClickState {
 
 impl ClickState {
     /// Resets the timer and count.
-    fn restart(&self, position: LogicalPoint, button: PointerEventButton) {
+    fn restart(
+        &self,
+        position: LogicalPoint,
+        button: PointerEventButton,
+        now: crate::animations::Instant,
+    ) {
         self.click_count.set(0);
-        self.click_count_time_stamp.set(Some(crate::animations::Instant::now()));
+        self.click_count_time_stamp.set(Some(now));
         self.click_position.set(position);
         self.click_button.set(button);
     }
@@ -1185,10 +1381,13 @@ impl ClickState {
     }
 
     /// Check if the click is repeated.
-    pub fn check_repeat(&self, mouse_event: MouseEvent, click_interval: Duration) -> MouseEvent {
+    /// Takes the context rather than just the interval: the timestamps it compares have to
+    /// come from the same clock, which only the context can name.
+    pub fn check_repeat(&self, mouse_event: MouseEvent, ctx: &crate::SlintContext) -> MouseEvent {
+        let click_interval = ctx.platform().click_interval();
         match mouse_event {
-            MouseEvent::Pressed { position, button, touch_finger_id, .. } => {
-                let instant_now = crate::animations::Instant::now();
+            MouseEvent::Pressed { position, button, touch_finger_id, event_time, .. } => {
+                let instant_now = crate::animations::Instant::now(ctx);
 
                 if let Some(click_count_time_stamp) = self.click_count_time_stamp.get() {
                     if instant_now - click_count_time_stamp < click_interval
@@ -1198,10 +1397,10 @@ impl ClickState {
                         self.click_count.set(self.click_count.get().wrapping_add(1));
                         self.click_count_time_stamp.set(Some(instant_now));
                     } else {
-                        self.restart(position, button);
+                        self.restart(position, button, instant_now);
                     }
                 } else {
-                    self.restart(position, button);
+                    self.restart(position, button, instant_now);
                 }
 
                 return MouseEvent::Pressed {
@@ -1209,14 +1408,16 @@ impl ClickState {
                     button,
                     click_count: self.click_count.get(),
                     touch_finger_id,
+                    event_time,
                 };
             }
-            MouseEvent::Released { position, button, touch_finger_id, .. } => {
+            MouseEvent::Released { position, button, touch_finger_id, event_time, .. } => {
                 return MouseEvent::Released {
                     position,
                     button,
                     click_count: self.click_count.get(),
                     touch_finger_id,
+                    event_time,
                 };
             }
             _ => {}
@@ -1234,6 +1435,19 @@ pub(crate) struct DragData {
     pub(crate) event: DropEvent,
     /// The actions the drag source permits, captured at drag start.
     pub(crate) allowed: AllowedDragActions,
+}
+
+/// A press held back by an item that returned [`InputEventFilterResult::DelayForwarding`].
+/// See "Delayed Event Handling" in `docs/development/input-event-system.md`.
+struct DelayedPress {
+    /// Replays `event_for_children` when it fires; dropping it cancels the replay.
+    _timer: crate::timers::Timer,
+    /// The press in the delaying item's local frame, replayed to its children when `timer` fires.
+    event_for_children: MouseEvent,
+    /// The press in `root`'s frame, replayed from `root` on release.
+    original_event: MouseEvent,
+    /// The item the press was dispatched from: the window's root item or a popup's.
+    root: ItemWeak,
 }
 
 /// The state which a window should hold for the mouse input
@@ -1261,9 +1475,13 @@ pub struct MouseInputState {
     /// this to decide whether to deliver a Drop — matching OS DnD pipelines, where a
     /// target that didn't previously accept never receives a drop.
     pub(crate) drop_target: Option<ItemWeak>,
-    delayed: Option<(crate::timers::Timer, MouseEvent)>,
+    delayed: Option<DelayedPress>,
+    /// Items that still need an Exit after a delayed or discarded dispatch.
     delayed_exit_items: Vec<ItemWeak>,
-    pub(crate) cursor: MouseCursor,
+    /// The previous target displaced by a delayed press, used for click counting.
+    /// Retained after replay until a committed dispatch replaces the input state.
+    delayed_previous_target: Option<ItemWeak>,
+    pub(crate) cursor: MouseCursorInner,
 }
 
 impl MouseInputState {
@@ -1287,9 +1505,21 @@ impl MouseInputState {
         drag_area.dragging.set(true);
     }
 
-    /// Returns the item in the top of the stack, if there is a delayed event, this would be the top of the delayed stack
+    /// Return the target displaced by a delayed press, or the current top item.
     pub fn top_item_including_delayed(&self) -> Option<ItemRc> {
-        self.delayed_exit_items.last().and_then(|x| x.upgrade()).or_else(|| self.top_item())
+        self.delayed_previous_target.as_ref().and_then(|x| x.upgrade()).or_else(|| self.top_item())
+    }
+
+    /// Send queued exits to items absent from the resolved dispatch.
+    fn send_delayed_exit_events(&mut self, window_adapter: &Rc<dyn WindowAdapter>) {
+        let cursor = &mut MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default);
+        for weak in core::mem::take(&mut self.delayed_exit_items) {
+            if self.item_stack.iter().any(|(w, _)| *w == weak) || self.observers.contains(&weak) {
+                continue;
+            }
+            let Some(item) = weak.upgrade() else { continue };
+            item.borrow().as_ref().input_event(&MouseEvent::Exit, window_adapter, &item, cursor);
+        }
     }
 
     /// Returns true if there is a pending delayed event (e.g. from a Flickable)
@@ -1329,8 +1559,7 @@ fn offer_native_drag(
     state: &mut MouseInputState,
 ) {
     let data = drag_area.data();
-    // A native drag only carries serializable data, so offer it only when there's some.
-    if data.has_plain_text() || data.has_image() {
+    if data.has_native_data() {
         let request = crate::window::DragRequest {
             data: data.clone(),
             allowed: drag_area.allowed_actions(),
@@ -1452,7 +1681,16 @@ pub(crate) fn handle_mouse_grab(
             // Return a move event so that the new position can be registered properly
             MouseGrabResult {
                 event: Some(mouse_event.position().map_or(MouseEvent::Exit, |position| {
-                    MouseEvent::Moved { position, touch_finger_id: mouse_event.touch_finger_id() }
+                    MouseEvent::Moved {
+                        position,
+                        touch_finger_id: mouse_event.touch_finger_id(),
+                        event_time: match mouse_event {
+                            MouseEvent::Pressed { event_time, .. }
+                            | MouseEvent::Moved { event_time, .. } => *event_time,
+                            _ => None,
+                        },
+                        history: Default::default(),
+                    }
                 })),
                 accepted: input_result == InputEventResult::EventAccepted,
             }
@@ -1467,12 +1705,10 @@ pub(crate) fn send_exit_events(
     window_adapter: &Rc<dyn WindowAdapter>,
 ) {
     // Note that exit events can't actually change the cursor from default so we'll ignore the result
-    let cursor = &mut MouseCursor::Default;
+    let cursor = &mut MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default);
 
-    for it in core::mem::take(&mut new_input_state.delayed_exit_items) {
-        let Some(item) = it.upgrade() else { continue };
-        item.borrow().as_ref().input_event(&MouseEvent::Exit, window_adapter, &item, cursor);
-    }
+    new_input_state.delayed_exit_items.extend(old_input_state.delayed_exit_items.iter().cloned());
+    new_input_state.send_delayed_exit_events(window_adapter);
 
     let mut clipped = false;
     for (idx, it) in old_input_state.item_stack.iter().enumerate() {
@@ -1496,6 +1732,7 @@ pub(crate) fn send_exit_events(
             // The item is still under the mouse, but no longer in the item stack. We should also sent the exit event, unless we delay it
             if new_input_state.delayed.is_some() {
                 new_input_state.delayed_exit_items.push(it.0.clone());
+                new_input_state.delayed_previous_target = Some(it.0.clone());
             } else {
                 item.borrow().as_ref().input_event(
                     &MouseEvent::Exit,
@@ -1545,7 +1782,7 @@ pub fn process_mouse_input(
         drag_data: mouse_input_state.drag_data.clone(),
         drag_source: mouse_input_state.drag_source.clone(),
         drop_target: mouse_input_state.drop_target.clone(),
-        cursor: mouse_input_state.cursor,
+        cursor: mouse_input_state.cursor.clone(),
         ..Default::default()
     };
     let r = send_mouse_event_to_item(
@@ -1554,7 +1791,9 @@ pub fn process_mouse_input(
         window_adapter,
         &mut result,
         mouse_input_state.top_item().as_ref(),
-        false,
+        None,
+        &root,
+        mouse_event,
     );
     let accepted = r.has_aborted();
     if matches!(mouse_event, MouseEvent::DragMove { .. }) {
@@ -1563,11 +1802,31 @@ pub fn process_mouse_input(
         result.drop_target =
             accepted.then(|| result.item_stack.last().map(|(w, _)| w.clone())).flatten();
     }
+    let delaying_item = mouse_input_state.item_stack.last().map(|(w, _)| w);
+    let is_move = matches!(mouse_event, MouseEvent::Moved { .. });
+    let moved_outside_delaying_item = accepted
+        && is_move
+        && delaying_item.is_some_and(|w| !result.item_stack.iter().any(|(x, _)| x == w));
+    let accepted_by_other_item = Option::zip(result.item_stack.last(), delaying_item)
+        .is_none_or(|((accepting_item, _), delaying_item)| accepting_item != delaying_item);
+    let delaying_item_still_undecided = is_move && !result.grabbed;
     if mouse_input_state.delayed.is_some()
-        && (!accepted
-            || Option::zip(result.item_stack.last(), mouse_input_state.item_stack.last())
-                .is_none_or(|(a, b)| a.0 != b.0))
+        && !moved_outside_delaying_item
+        && (!accepted || accepted_by_other_item || delaying_item_still_undecided)
     {
+        // The speculative dispatch above may still have run `input_event_filter_before_children`
+        // on items in its path or observer list before we knew it would be thrown away.
+        // Queue an Exit for items absent from the retained state so their hover and tooltip
+        // timers are cleared when the delayed dispatch resolves.
+        for weak in result.item_stack.iter().map(|(weak, _)| weak).chain(&result.observers) {
+            if mouse_input_state.item_stack.iter().any(|(w, _)| w == weak)
+                || mouse_input_state.observers.contains(weak)
+                || mouse_input_state.delayed_exit_items.contains(weak)
+            {
+                continue;
+            }
+            mouse_input_state.delayed_exit_items.push(weak.clone());
+        }
         // Keep the delayed event but transfer the just-attempted dispatch's cursor.
         mouse_input_state.cursor = result.cursor;
         return MouseInputResult { state: mouse_input_state, accepted };
@@ -1582,7 +1841,12 @@ pub fn process_mouse_input(
         // outcome the caller sees — the synthetic Moved is an internal implementation detail.
         let moved = process_mouse_input(
             root,
-            &MouseEvent::Moved { position: *position, touch_finger_id: 0 },
+            &MouseEvent::Moved {
+                position: *position,
+                touch_finger_id: 0,
+                event_time: None,
+                history: Default::default(),
+            },
             window_adapter,
             result,
         );
@@ -1597,18 +1861,23 @@ pub(crate) fn process_delayed_event(
     mut mouse_input_state: MouseInputState,
 ) -> MouseInputState {
     // the take bellow will also destroy the Timer
-    let event = match mouse_input_state.delayed.take() {
-        Some(e) => e.1,
+    let (event, original_event) = match mouse_input_state.delayed.take() {
+        Some(DelayedPress { event_for_children, original_event, .. }) => {
+            (event_for_children, original_event)
+        }
         None => return mouse_input_state,
     };
 
     let top_item = match mouse_input_state.top_item() {
         Some(i) => i,
-        None => return MouseInputState::default(),
+        None => {
+            mouse_input_state.send_delayed_exit_events(window_adapter);
+            return MouseInputState::default();
+        }
     };
 
     // Recover the real previous click target so click_count is preserved across delayed events
-    let prev_target = mouse_input_state.delayed_exit_items.last().and_then(|x| x.upgrade());
+    let prev_target = mouse_input_state.delayed_previous_target.as_ref().and_then(|x| x.upgrade());
     let last_top_item = prev_target.as_ref().unwrap_or(&top_item);
 
     let mut actual_visitor =
@@ -1619,7 +1888,9 @@ pub(crate) fn process_delayed_event(
                 window_adapter,
                 &mut mouse_input_state,
                 Some(last_top_item),
-                true,
+                Some(false),
+                &top_item,
+                &original_event,
             )
         };
     vtable::new_vref!(let mut actual_visitor : VRefMut<crate::item_tree::ItemVisitorVTable> for crate::item_tree::ItemVisitor = &mut actual_visitor);
@@ -1628,7 +1899,74 @@ pub(crate) fn process_delayed_event(
         crate::item_tree::TraversalOrder::FrontToBack,
         actual_visitor,
     );
+    mouse_input_state.send_delayed_exit_events(window_adapter);
     mouse_input_state
+}
+
+// #13118
+pub(crate) fn resolve_delayed_event_on_release(
+    window_adapter: &Rc<dyn WindowAdapter>,
+    mut mouse_input_state: MouseInputState,
+    current_event: &MouseEvent,
+) -> MouseInputState {
+    let same_pointer = match &mouse_input_state.delayed {
+        Some(DelayedPress { original_event, .. }) => {
+            original_event.touch_finger_id() == current_event.touch_finger_id()
+                && match (original_event, current_event) {
+                    (
+                        MouseEvent::Pressed { button: a, .. },
+                        MouseEvent::Released { button: b, .. },
+                    ) => a == b,
+                    _ => false,
+                }
+        }
+        None => false,
+    };
+    if !same_pointer {
+        return mouse_input_state;
+    }
+
+    let Some(DelayedPress { original_event, root, .. }) = mouse_input_state.delayed.take() else {
+        return mouse_input_state;
+    };
+    let Some(root) = root.upgrade() else {
+        return mouse_input_state;
+    };
+
+    let last_top_item = mouse_input_state.top_item_including_delayed();
+
+    let mut result = MouseInputState {
+        drag_data: mouse_input_state.drag_data.clone(),
+        drag_source: mouse_input_state.drag_source.clone(),
+        drop_target: mouse_input_state.drop_target.clone(),
+        cursor: mouse_input_state.cursor.clone(),
+        offset: mouse_input_state.offset,
+        ..Default::default()
+    };
+
+    let r = send_mouse_event_to_item(
+        &original_event,
+        root.clone(),
+        window_adapter,
+        &mut result,
+        last_top_item.as_ref(),
+        Some(true),
+        &root,
+        &original_event,
+    );
+
+    if !r.has_aborted() {
+        return mouse_input_state;
+    }
+
+    result.delayed_exit_items = mouse_input_state
+        .delayed_exit_items
+        .iter()
+        .filter(|it| !result.item_stack.iter().any(|(x, _)| x == *it))
+        .cloned()
+        .collect();
+    send_exit_events(&mouse_input_state, &mut result, original_event.position(), window_adapter);
+    result
 }
 
 fn send_mouse_event_to_item(
@@ -1637,7 +1975,9 @@ fn send_mouse_event_to_item(
     window_adapter: &Rc<dyn WindowAdapter>,
     result: &mut MouseInputState,
     last_top_item: Option<&ItemRc>,
-    ignore_delays: bool,
+    replaying: Option<bool>,
+    root: &ItemRc,
+    original_event: &MouseEvent,
 ) -> VisitChildrenResult {
     let item = item_rc.borrow();
     let geom = item_rc.geometry();
@@ -1670,9 +2010,11 @@ fn send_mouse_event_to_item(
         InputEventFilterResult::ForwardAndIgnore => (true, true),
         InputEventFilterResult::ForwardAndInterceptGrab => (true, false),
         InputEventFilterResult::Intercept => (false, false),
-        InputEventFilterResult::DelayForwarding(_) if ignore_delays => (true, false),
+        InputEventFilterResult::DelayForwarding(_) if replaying.is_some() => {
+            (true, replaying.unwrap())
+        }
         InputEventFilterResult::DelayForwarding(duration) => {
-            let timer = Timer::default();
+            let timer = WindowInner::from_pub(window_adapter.window()).context().new_timer();
             let w = Rc::downgrade(window_adapter);
             timer.start(
                 crate::timers::TimerMode::SingleShot,
@@ -1683,7 +2025,12 @@ fn send_mouse_event_to_item(
                     }
                 },
             );
-            result.delayed = Some((timer, event_for_children));
+            result.delayed = Some(DelayedPress {
+                _timer: timer,
+                event_for_children: event_for_children.clone(),
+                original_event: original_event.clone(),
+                root: root.downgrade(),
+            });
             result
                 .item_stack
                 .push((item_rc.downgrade(), InputEventFilterResult::DelayForwarding(duration)));
@@ -1705,7 +2052,9 @@ fn send_mouse_event_to_item(
                     window_adapter,
                     result,
                     last_top_item,
-                    ignore_delays,
+                    replaying,
+                    root,
+                    original_event,
                 )
             };
         vtable::new_vref!(let mut actual_visitor : VRefMut<crate::item_tree::ItemVisitorVTable> for crate::item_tree::ItemVisitor = &mut actual_visitor);
@@ -1720,6 +2069,21 @@ fn send_mouse_event_to_item(
     };
 
     let r = if ignore {
+        if replaying == Some(true)
+            && matches!(filter_result, InputEventFilterResult::DelayForwarding(_))
+        {
+            // The replay's own traversal is what first reached this item (its parent's delay
+            // aborted the original dispatch before recursing this far), so it never entered
+            // `old_input_state.item_stack` for `send_exit_events` to find. Its filter already
+            // set internal press state for this same replayed press; without this, that state
+            // never clears, since replaying always treats a delaying item as pass-through.
+            item.as_ref().input_event(
+                &MouseEvent::Exit,
+                window_adapter,
+                &item_rc,
+                &mut result.cursor,
+            );
+        }
         InputEventResult::EventIgnored
     } else {
         let mut event = mouse_event.clone();
@@ -1809,11 +2173,12 @@ impl TextCursorBlinker {
     pub fn set_binding(
         instance: Pin<Rc<TextCursorBlinker>>,
         prop: &Property<bool>,
+        ctx: &crate::SlintContext,
         cycle_duration: Duration,
     ) {
         instance.as_ref().cursor_visible.set(true);
         // Re-start timer, in case.
-        Self::start(&instance, cycle_duration);
+        Self::start(&instance, ctx, cycle_duration);
         prop.set_binding(move || {
             TextCursorBlinker::FIELD_OFFSETS.cursor_visible().apply_pin(instance.as_ref()).get()
         });
@@ -1821,7 +2186,7 @@ impl TextCursorBlinker {
 
     /// Starts the blinking cursor timer that will toggle the cursor and update all bindings that
     /// were installed on properties with set_binding call.
-    pub fn start(self: &Pin<Rc<Self>>, cycle_duration: Duration) {
+    pub fn start(self: &Pin<Rc<Self>>, ctx: &crate::SlintContext, cycle_duration: Duration) {
         if self.cursor_blink_timer.running() {
             self.cursor_blink_timer.restart();
         } else {
@@ -1838,7 +2203,8 @@ impl TextCursorBlinker {
                 }
             };
             if !cycle_duration.is_zero() {
-                self.cursor_blink_timer.start(
+                self.cursor_blink_timer.start_on(
+                    ctx,
                     crate::timers::TimerMode::Repeated,
                     cycle_duration / 2,
                     toggle_cursor,
@@ -2055,13 +2421,23 @@ impl TouchState {
         id: i32,
         position: LogicalPoint,
         phase: TouchPhase,
+        event_time: Option<crate::animations::Instant>,
+        history: TouchHistory,
     ) -> TouchEventBuffer {
         let mut events = TouchEventBuffer::new();
         match phase {
             TouchPhase::Started => self.process_started(id, position, &mut events),
-            TouchPhase::Moved => self.process_moved(id, position, &mut events),
+            TouchPhase::Moved => self.process_moved(id, position, history, &mut events),
             TouchPhase::Ended => self.process_ended(id, position, false, &mut events),
             TouchPhase::Cancelled => self.process_ended(id, position, true, &mut events),
+        }
+        for event in events.events[..events.len].iter_mut().flatten() {
+            match event {
+                MouseEvent::Pressed { event_time: time, .. }
+                | MouseEvent::Released { event_time: time, .. }
+                | MouseEvent::Moved { event_time: time, .. } => *time = event_time,
+                _ => {}
+            }
         }
         events
     }
@@ -2079,6 +2455,7 @@ impl TouchState {
                 button: PointerEventButton::Left,
                 click_count: 0,
                 touch_finger_id: id + 1,
+                event_time: None,
             });
         } else if total == 2 {
             // Second finger: transition Idle → TwoFingersDown.
@@ -2106,13 +2483,20 @@ impl TouchState {
                 button: PointerEventButton::Left,
                 click_count: 0,
                 touch_finger_id: id + 1,
+                event_time: None,
             });
         }
         // 3+ fingers: tracked in active_touches but ignored for gesture.
     }
 
     #[allow(clippy::collapsible_match)]
-    fn process_moved(&mut self, id: i32, position: LogicalPoint, events: &mut TouchEventBuffer) {
+    fn process_moved(
+        &mut self,
+        id: i32,
+        position: LogicalPoint,
+        history: TouchHistory,
+        events: &mut TouchEventBuffer,
+    ) {
         if let Some(tp) = self.active_touches.get_mut(id) {
             tp.position = position;
         }
@@ -2122,7 +2506,12 @@ impl TouchState {
         match self.gesture_state {
             GestureRecognitionState::Idle => {
                 if self.primary_touch_id == Some(id) {
-                    events.push(MouseEvent::Moved { position, touch_finger_id: id + 1 });
+                    events.push(MouseEvent::Moved {
+                        position,
+                        touch_finger_id: id + 1,
+                        event_time: None,
+                        history,
+                    });
                 }
             }
             GestureRecognitionState::TwoFingersDown {
@@ -2223,6 +2612,7 @@ impl TouchState {
                         button: PointerEventButton::Left,
                         click_count: 0,
                         touch_finger_id: id + 1,
+                        event_time: None,
                     });
                     events.push(MouseEvent::Exit);
                 }
@@ -2238,6 +2628,7 @@ impl TouchState {
                             button: PointerEventButton::Left,
                             click_count: 0,
                             touch_finger_id: remaining.id + 1,
+                            event_time: None,
                         });
                     } else {
                         self.primary_touch_id = None;
@@ -2282,6 +2673,7 @@ impl TouchState {
                         button: PointerEventButton::Left,
                         click_count: 0,
                         touch_finger_id: rid + 1,
+                        event_time: None,
                     });
                 } else {
                     events.push(MouseEvent::Exit);
@@ -2303,6 +2695,42 @@ mod touch_tests {
 
     fn pt(x: f32, y: f32) -> LogicalPoint {
         euclid::point2(x, y)
+    }
+
+    #[test]
+    fn original_event_times_follow_touch_and_synthetic_presses() {
+        use crate::animations::Instant;
+
+        let mut state = TouchState::default();
+        for (id, phase, nanos, expected_time) in [
+            (0, TouchPhase::Started, 0, Some(0)),
+            (0, TouchPhase::Moved, 10_500_125, Some(10_500_125)),
+            (1, TouchPhase::Started, 20_000_000, None),
+            (1, TouchPhase::Ended, 30_250_375, Some(30_250_375)),
+            (0, TouchPhase::Moved, 40_000_000, Some(40_000_000)),
+            (0, TouchPhase::Cancelled, 50_000_000, None),
+            (0, TouchPhase::Started, 60_000_000, Some(60_000_000)),
+            (0, TouchPhase::Moved, 70_000_000, Some(70_000_000)),
+        ] {
+            let events = state.process(
+                id,
+                pt(0., 0.),
+                phase,
+                Some(Instant::from_nanos(nanos)),
+                TouchHistory::default(),
+            );
+            let times: Vec<_> = events
+                .into_iter()
+                .filter_map(|event| match event {
+                    MouseEvent::Pressed { event_time, .. }
+                    | MouseEvent::Moved { event_time, .. } => Some(event_time),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> =
+                expected_time.into_iter().map(|nanos| Some(Instant::from_nanos(nanos))).collect();
+            assert_eq!(times, expected);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2444,13 +2872,13 @@ mod touch_tests {
     fn single_finger_press_move_release() {
         let mut state = TouchState::default();
 
-        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started);
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Pressed(100.0, 200.0)]);
 
-        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Moved);
+        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Moved, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Moved(110.0, 200.0)]);
 
-        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Ended);
+        let evs = state.process(1, pt(110.0, 200.0), TouchPhase::Ended, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Released(110.0, 200.0), Ev::Exit]);
     }
 
@@ -2458,9 +2886,10 @@ mod touch_tests {
     fn single_finger_cancel() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(100.0, 200.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
 
-        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled);
+        let evs =
+            state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Released(100.0, 200.0), Ev::Exit]);
     }
 
@@ -2468,10 +2897,10 @@ mod touch_tests {
     fn non_primary_move_ignored() {
         let mut state = TouchState::default();
         // Touch 1 is primary.
-        state.process(1, pt(100.0, 200.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
 
         // Move for a different ID that was never started (edge case).
-        let evs = state.process(99, pt(50.0, 50.0), TouchPhase::Moved);
+        let evs = state.process(99, pt(50.0, 50.0), TouchPhase::Moved, None, Default::default());
         assert!(classify(&evs).is_empty());
     }
 
@@ -2484,16 +2913,16 @@ mod touch_tests {
         let mut state = TouchState::default();
 
         // Finger 1 down.
-        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started);
+        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Pressed(100.0, 200.0)]);
 
         // Finger 2 down → synthesized release for finger 1.
-        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Started);
+        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Started, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Released(100.0, 200.0)]);
         assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
 
         // Move finger 2 far enough to trigger pinch (> 8px threshold).
-        let evs = state.process(2, pt(220.0, 200.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(220.0, 200.0), TouchPhase::Moved, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::PinchStarted, Ev::RotationStarted]);
         assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
     }
@@ -2502,11 +2931,11 @@ mod touch_tests {
     fn two_fingers_below_threshold_no_gesture() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(100.0, 200.0), TouchPhase::Started);
-        state.process(2, pt(200.0, 200.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, None, Default::default());
 
         // Small movement within threshold.
-        let evs = state.process(2, pt(202.0, 200.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(202.0, 200.0), TouchPhase::Moved, None, Default::default());
         assert!(classify(&evs).is_empty());
         assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
     }
@@ -2516,17 +2945,17 @@ mod touch_tests {
         let mut state = TouchState::default();
 
         // Set up: finger 1 at (0, 0), finger 2 at (100, 0) → distance = 100.
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 0.0), TouchPhase::Started);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, None, Default::default());
 
         // Move finger 2 to (120, 0) to exceed threshold and start pinching.
-        state.process(2, pt(120.0, 0.0), TouchPhase::Moved);
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
 
         // Now move finger 2 further to (180, 0).
         // New distance = 180, initial distance (re-snapshotted) = 120.
         // Scale = 180/120 = 1.5, delta = 1.5 - 1.0 = 0.5.
-        let evs = state.process(2, pt(180.0, 0.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(180.0, 0.0), TouchPhase::Moved, None, Default::default());
         let classified = classify(&evs);
         assert_eq!(classified.len(), 2);
         if let Ev::PinchMoved(delta) = classified[0] {
@@ -2542,18 +2971,18 @@ mod touch_tests {
 
         // Finger 1 at origin, finger 2 on the X axis at (100, 0).
         // Initial angle = atan2(0, 100) = 0°.
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 0.0), TouchPhase::Started);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, None, Default::default());
 
         // Move finger 2 far enough to trigger gesture.
-        state.process(2, pt(120.0, 0.0), TouchPhase::Moved);
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
 
         // Rotate ~45° clockwise: move finger 2 from (120, 0) to roughly
         // (70.7, 70.7) which is at 45° from origin.
         // atan2(70.7, 70.7) ≈ 45°. Delta from re-snapshotted 0° = +45°.
         // Slint convention: positive = clockwise → delta ≈ +45°.
-        let evs = state.process(2, pt(70.7, 70.7), TouchPhase::Moved);
+        let evs = state.process(2, pt(70.7, 70.7), TouchPhase::Moved, None, Default::default());
         let classified = classify(&evs);
         assert_eq!(classified.len(), 2);
         if let Ev::RotationMoved(delta) = classified[1] {
@@ -2569,18 +2998,18 @@ mod touch_tests {
 
         // Finger 1 at origin, finger 2 at (-100, -10).
         // angle = atan2(-10, -100) ≈ -174.3°.
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(-100.0, -10.0), TouchPhase::Started);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(-100.0, -10.0), TouchPhase::Started, None, Default::default());
 
         // Trigger gesture by moving far enough.
-        state.process(2, pt(-120.0, -10.0), TouchPhase::Moved);
+        state.process(2, pt(-120.0, -10.0), TouchPhase::Moved, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
 
         // Rotate across the ±180° boundary: move finger 2 to (-100, 10).
         // New angle = atan2(10, -100) ≈ 174.3°.
         // Raw angular change crosses ±180°, but per-frame delta should be
         // small (~11.4° which is 2 * 5.7°), NOT a ~349° jump.
-        let evs = state.process(2, pt(-100.0, 10.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(-100.0, 10.0), TouchPhase::Moved, None, Default::default());
         let classified = classify(&evs);
         if let Ev::RotationMoved(delta) = classified[1] {
             assert!(
@@ -2601,13 +3030,13 @@ mod touch_tests {
     fn pinch_end_with_remaining_finger() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 0.0), TouchPhase::Started);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, None, Default::default());
         // Trigger pinch.
-        state.process(2, pt(120.0, 0.0), TouchPhase::Moved);
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, None, Default::default());
 
         // Lift finger 2 → gesture ends, finger 1 gets re-pressed.
-        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Ended);
+        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Ended, None, Default::default());
         let classified = classify(&evs);
         assert_eq!(classified, vec![Ev::PinchEnded, Ev::RotationEnded, Ev::Pressed(0.0, 0.0)]);
         assert!(matches!(state.gesture_state, GestureRecognitionState::Idle));
@@ -2618,12 +3047,12 @@ mod touch_tests {
     fn pinch_cancel_emits_cancelled_and_exit() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(120.0, 0.0), TouchPhase::Moved);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(120.0, 0.0), TouchPhase::Moved, None, Default::default());
 
         // Cancel finger 2.
-        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Cancelled);
+        let evs = state.process(2, pt(120.0, 0.0), TouchPhase::Cancelled, None, Default::default());
         let classified = classify(&evs);
         assert_eq!(classified, vec![Ev::PinchCancelled, Ev::RotationCancelled, Ev::Exit]);
         assert!(state.primary_touch_id.is_none());
@@ -2633,12 +3062,12 @@ mod touch_tests {
     fn two_fingers_down_lift_before_threshold_returns_to_idle() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(100.0, 200.0), TouchPhase::Started);
-        state.process(2, pt(200.0, 200.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
 
         // Lift finger 2 without exceeding movement threshold.
-        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Ended);
+        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Ended, None, Default::default());
         let classified = classify(&evs);
         // Remaining finger 1 gets re-pressed.
         assert_eq!(classified, vec![Ev::Pressed(100.0, 200.0)]);
@@ -2650,15 +3079,17 @@ mod touch_tests {
     fn two_fingers_down_cancel_both_emits_exit() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(100.0, 200.0), TouchPhase::Started);
-        state.process(2, pt(200.0, 200.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 200.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(200.0, 200.0), TouchPhase::Started, None, Default::default());
 
         // Cancel finger 2 (gesture finger, no remaining → Exit).
-        let evs = state.process(2, pt(200.0, 200.0), TouchPhase::Cancelled);
+        let evs =
+            state.process(2, pt(200.0, 200.0), TouchPhase::Cancelled, None, Default::default());
         assert_eq!(classify(&evs), vec![Ev::Exit]);
 
         // Cancel finger 1 (now in Idle, but not primary since cancel cleared it).
-        let evs = state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled);
+        let evs =
+            state.process(1, pt(100.0, 200.0), TouchPhase::Cancelled, None, Default::default());
         assert!(classify(&evs).is_empty());
     }
 
@@ -2670,11 +3101,11 @@ mod touch_tests {
     fn third_finger_ignored_for_gesture() {
         let mut state = TouchState::default();
 
-        state.process(1, pt(0.0, 0.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 0.0), TouchPhase::Started);
+        state.process(1, pt(0.0, 0.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 0.0), TouchPhase::Started, None, Default::default());
 
         // Third finger: no additional events.
-        let evs = state.process(3, pt(50.0, 50.0), TouchPhase::Started);
+        let evs = state.process(3, pt(50.0, 50.0), TouchPhase::Started, None, Default::default());
         assert!(classify(&evs).is_empty());
         assert_eq!(state.active_touches.len(), 3);
     }
@@ -2699,12 +3130,12 @@ mod touch_tests {
         let mut state = TouchState::default();
 
         // Two fingers at the exact same position → distance = 0.
-        state.process(1, pt(100.0, 100.0), TouchPhase::Started);
-        state.process(2, pt(100.0, 100.0), TouchPhase::Started);
+        state.process(1, pt(100.0, 100.0), TouchPhase::Started, None, Default::default());
+        state.process(2, pt(100.0, 100.0), TouchPhase::Started, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::TwoFingersDown { .. }));
 
         // Move one finger far enough to trigger gesture.
-        let evs = state.process(2, pt(120.0, 100.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(120.0, 100.0), TouchPhase::Moved, None, Default::default());
         assert!(matches!(state.gesture_state, GestureRecognitionState::Pinching { .. }));
         let classified = classify(&evs);
         assert_eq!(classified.len(), 2);
@@ -2712,7 +3143,7 @@ mod touch_tests {
 
         // Move further — scale should not be inf/NaN despite initial_distance
         // having been 0 (re-snapshotted to 20.0 at threshold crossing).
-        let evs = state.process(2, pt(140.0, 100.0), TouchPhase::Moved);
+        let evs = state.process(2, pt(140.0, 100.0), TouchPhase::Moved, None, Default::default());
         let classified = classify(&evs);
         if let Ev::PinchMoved(delta) = classified[0] {
             assert!(delta.is_finite(), "scale delta should be finite, got {}", delta);
@@ -2852,6 +3283,7 @@ mod tests {
     fn test_from_parts_valid() {
         let f5_key = alloc::string::String::from(char::from(key_codes::Key::F5));
         let ret_key = alloc::string::String::from(char::from(key_codes::Key::Return));
+        let pause_key = alloc::string::String::from(char::from(key_codes::Key::Pause));
 
         // (description, input parts, expected key, modifiers, ignore_shift, ignore_alt)
         let cases: &[(&str, &[&str], &str, KeyboardModifiers, bool, bool)] = &[
@@ -2938,6 +3370,63 @@ mod tests {
                 false,
             ),
             ("A alone (named key)", &["A"], "a", KeyboardModifiers::default(), false, false),
+            // The special keys are represented by reserved unicode codepoints. Passing
+            // one of those characters as a literal must produce the same `Keys` as its
+            // name, so `to_parts` output stays acceptable to `from_parts`.
+            (
+                "F5 codepoint literal",
+                &[&f5_key],
+                &f5_key,
+                KeyboardModifiers::default(),
+                false,
+                false,
+            ),
+            (
+                "Pause codepoint literal",
+                &[&pause_key],
+                &pause_key,
+                KeyboardModifiers::default(),
+                false,
+                false,
+            ),
+            (
+                "Control + F5 codepoint literal",
+                &["Control", &f5_key],
+                &f5_key,
+                KeyboardModifiers { control: true, ..Default::default() },
+                false,
+                false,
+            ),
+            // Whitespace is significant: these literals name the Space/Tab/Return keys
+            // and must agree with their named spellings (parts are not trimmed).
+            ("\" \" literal → Space", &[" "], " ", KeyboardModifiers::default(), false, false),
+            ("Space named", &["Space"], " ", KeyboardModifiers::default(), false, false),
+            ("\"\\t\" literal → Tab", &["\t"], "\t", KeyboardModifiers::default(), false, false),
+            ("Tab named", &["Tab"], "\t", KeyboardModifiers::default(), false, false),
+            (
+                "\"\\n\" literal → Return",
+                &["\n"],
+                &ret_key,
+                KeyboardModifiers::default(),
+                false,
+                false,
+            ),
+            (
+                "Control+\" \" (literal space with a modifier)",
+                &["Control", " "],
+                " ",
+                KeyboardModifiers { control: true, ..Default::default() },
+                false,
+                false,
+            ),
+            (
+                "empty part is skipped → Keys::default()",
+                &[""],
+                "",
+                KeyboardModifiers::default(),
+                false,
+                false,
+            ),
             (
                 "a alone (literal fallback, same result as named A)",
                 &["a"],
@@ -2982,6 +3471,25 @@ mod tests {
                 &["Control", "ab"],
                 KeysParseError(KeysParseErrorInner::MultipleGraphemeClusters("ab".into())),
             ),
+            // Parts are not trimmed, so a padded modifier is no longer a modifier: it
+            // falls through to the key branch and fails as a multi-grapheme literal.
+            (
+                "padded modifier ' Control ' alone",
+                &[" Control "],
+                KeysParseError(KeysParseErrorInner::MultipleGraphemeClusters(" Control ".into())),
+            ),
+            (
+                "padded modifier ' Control ' is a key, so 'A' is a second key",
+                &[" Control ", "A"],
+                KeysParseError(KeysParseErrorInner::MultipleKeys),
+            ),
+            (
+                "padded key ' A '",
+                &["Control", " A "],
+                KeysParseError(KeysParseErrorInner::MultipleGraphemeClusters(" A ".into())),
+            ),
+            // Two whitespace literals are two keys, not one trimmed-away key.
+            ("two space literals", &[" ", " "], KeysParseError(KeysParseErrorInner::MultipleKeys)),
             (
                 "lowercase 'return' (not a named key)",
                 &["return"],
@@ -3017,6 +3525,81 @@ mod tests {
             let result = Keys::from_parts(parts.iter().copied());
             assert!(result.is_err(), "{desc}: expected error, got {result:?}");
             assert_eq!(&result.unwrap_err(), expected_err, "{desc}");
+        }
+    }
+
+    #[test]
+    fn test_to_parts_roundtrip() {
+        // Inputs that should round-trip identically through from_parts → to_parts.
+        let inputs: &[&[&str]] = &[
+            &[],
+            &["A"],
+            &["Control", "A"],
+            &["Control", "Shift", "A"],
+            &["Control", "Shift?", "Z"],
+            &["Control", "Alt?", "A"],
+            &["Control", "Alt", "Shift", "Meta", "A"],
+            &["Meta", "Control", "Alt", "Shift", "A"],
+            &["F5"],
+            &["Return"],
+            &["Space"],
+            &[" "],  // literal space: to_parts emits the "Space" name
+            &["\t"], // literal tab: to_parts emits the "Tab" name
+            &["\n"], // literal newline: to_parts emits the "Return" name
+            &["Control", " "],
+            &["Control", "Plus"], // LocalizedShiftable: desugars to ["Control", "Shift?", "+"]
+            &["Control", "+"],    // literal '+': stays ["Control", "+"] (no auto ignore_shift)
+            &["Control", "Digit0"],
+            &["Control", "€"],
+            &["Control", "é"],
+        ];
+        for parts in inputs {
+            let k = Keys::from_parts(parts.iter().copied()).unwrap();
+            let out_strs: alloc::vec::Vec<&str> = k.to_parts().collect();
+            let k2 = Keys::from_parts(out_strs.iter().copied()).unwrap();
+            assert_eq!(k, k2, "round-trip mismatch for {parts:?} → {out_strs:?}");
+        }
+    }
+
+    #[test]
+    fn test_to_parts_canonical_form() {
+        // Spot-check the exact strings to lock in the canonical output. Modifiers keep
+        // their names; the key is always the stored character, never a key name.
+        let f5 = alloc::string::String::from(char::from(key_codes::Key::F5));
+        let ret = alloc::string::String::from(char::from(key_codes::Key::Return));
+        let pause = alloc::string::String::from(char::from(key_codes::Key::Pause));
+        let cases: &[(&[&str], &[&str])] = &[
+            (&[], &[]),
+            (&["A"], &["a"]), // named key → its stored character
+            (&["a"], &["a"]),
+            (&["Control", "S"], &["Control", "s"]),
+            (&["Control", "Shift?", "Z"], &["Control", "Shift?", "z"]),
+            (&["Control", "Alt?", "A"], &["Control", "Alt?", "a"]),
+            (&["F5"], &[&f5]),
+            (&[&f5], &[&f5]), // reserved codepoint as a literal
+            (&["Pause"], &[&pause]),
+            (&[&pause], &[&pause]),
+            // Whitespace and control characters are emitted raw, which is why a text
+            // format storing these has to escape them (see the runtime_key_bindings
+            // example). They still round-trip, because from_parts does not trim.
+            (&[" "], &[" "]),
+            (&["Space"], &[" "]),
+            (&["\t"], &["\t"]),
+            (&["Tab"], &["\t"]),
+            (&["\n"], &[&ret]),
+            (&["Return"], &[&ret]),
+            (&["Control", " "], &["Control", " "]),
+            // LocalizedShiftable: the auto ignore_shift is surfaced as Shift? and the
+            // raw character is emitted, so the "Plus" name is not reproduced.
+            (&["Control", "Plus"], &["Control", "Shift?", "+"]),
+            (&["Control", "+"], &["Control", "+"]), // literal '+': no auto ignore_shift
+            (&["Control", "€"], &["Control", "€"]),
+            (&["Meta", "Control", "Alt", "Shift", "A"], &["Meta", "Control", "Alt", "Shift", "a"]),
+        ];
+        for (input, expected) in cases {
+            let k = Keys::from_parts(input.iter().copied()).unwrap();
+            let out_strs: alloc::vec::Vec<&str> = k.to_parts().collect();
+            assert_eq!(&out_strs.as_slice(), expected, "for input {input:?}");
         }
     }
 

@@ -4,7 +4,7 @@
 # cSpell:ignore openweather urlencoding
 [package]
 name = "weather-demo"
-version = "1.17.1"
+version = "1.19.0"
 authors = ["FELGO GmbH <contact@felgo.com>"]
 edition.workspace = true
 build = "build.rs"
@@ -18,7 +18,7 @@ directories = "6.0"
 log = "0.4.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.115"
-slint = { path = "../../api/rs/slint", features = ["backend-android-activity-06"] }
+slint = { path = "../../api/rs/slint", default-features = false, features = ["compat-1-18", "std", "backend-android-activity-06"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 env_logger = "0.11.3"
@@ -42,7 +42,7 @@ wasm-bindgen-futures = "0.4"
 slint-build = { path = "../../api/rs/build" }
 
 [features]
-default = ["chrono", "open_meteo"]
+default = ["slint/default", "chrono", "open_meteo"]
 open_meteo = ["dep:futures", "dep:reqwest", "dep:urlencoding"]
 
 # Android-activity / wasm support
@@ -55,15 +55,29 @@ name = "weather-demo"
 path = "src/main.rs"
 
 # Android settings
-# See more: https://github.com/rust-mobile/cargo-apk?tab=readme-ov-file#manifest
+# See more: https://github.com/mzdk100/cargo-apk2#manifest
 [package.metadata.android]
 package = "dev.slint.examples.weatherdemo"
 resources = "android-res"
 build_targets = ["aarch64-linux-android"]
 
+[package.metadata.android.sdk]
+min_sdk_version = 23
+target_sdk_version = 36
+
 [package.metadata.android.application]
 label = "Weather Demo"
 icon = "@mipmap/ic_launcher"
+
+[[package.metadata.android.application.activity]]
+name = "android.app.NativeActivity"
+
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.lib_name"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW", "android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"

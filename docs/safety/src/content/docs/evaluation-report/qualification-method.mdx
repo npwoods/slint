@@ -1,0 +1,32 @@
+---
+title: Qualification Method
+description: How the tools of Slint SC are qualified.
+---
+
+import Addresses from '../../../components/Addresses.astro';
+
+<Addresses>ISO 26262-8 11.4.4.1 f, 11.4.9</Addresses>
+
+This chapter states how each tool reaches the confidence level its [classification](/evaluation-report/tool-classification/) asks for.
+
+## Slint Compiler
+
+The Slint compiler is classified TCL1, so it needs no qualification methods, per ISO 26262-8 11.4.6.1.
+See [Tool Classification](/evaluation-report/tool-classification/#slint-compiler).
+The classification rests on the integrator verifying the generated code; see [`slint.aou.verify-generated`](/user-manual/#slint.aou.verify-generated).
+
+The compiler is tested all the same, which adds confidence beyond what TCL1 asks for:
+
+* Every paragraph of the [Language Specification](/reference/language/) carries an identifier, and the [Traceability Matrix](/qualification-report/traceability-matrix/) traces every identifier to at least one test.
+* The [compiler syntax tests](/safety-plan/test-suites/#compiler-syntax-tests) assert that the compiler rejects everything outside the subset with a diagnostic.
+* Malfunctions found by the tests are recorded in [Known Problems](/user-manual/known-problems/).
+
+## slint-sc-coverage
+
+`slint-sc-coverage` is classified TCL3, and qualified by validation per ISO 26262-8 11.4.9, using [`slint.coverage.avd.stated-coverage`](/evaluation-report/potential-errors/#slint.coverage.avd.stated-coverage).
+See [Coverage Tool Verification](/safety-plan/slint-coverage/).
+
+## Test Suites
+
+The suites that produce the validation evidence are described in [Test Suites](/safety-plan/test-suites/).
+The outcomes of the suites are in [Test Results](/qualification-report/test-results/).

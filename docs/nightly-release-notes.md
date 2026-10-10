@@ -57,7 +57,7 @@ Note that you need to disable or uninstall an existing version of the Slint  VS 
 For other editors, you compile the latest version of the Slint Language Server with:
 
 ```sh
-cargo install --git https://github.com/slint-ui/slint slint-lsp --branch {branch}
+cargo install --locked --git https://github.com/slint-ui/slint slint-lsp --branch {branch}
 ```
 
 Alternatively, download the binary from "Assets" section below.
@@ -68,4 +68,5 @@ Alternatively, download the binary from "Assets" section below.
  - SlintPad: https://slint.dev/snapshots/{feature}/editor
  - Demos: links from https://github.com/slint-ui/slint/tree/master/examples
  - Android demo APKs: https://snapshots.slint.dev/{feature}/demos/android/
- - Slint Viewer for Android: download `slint-viewer.apk` from the "Assets" section below
+ - Slint Viewer for Android: download `slint-viewer-arm64-v8a.apk` (most phones), `slint-viewer-armeabi-v7a.apk`
+   or `slint-viewer-x86_64.apk` from the "Assets" section below

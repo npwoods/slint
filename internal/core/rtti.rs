@@ -19,15 +19,16 @@ use core::convert::{TryFrom, TryInto};
 use core::ffi::c_void;
 use core::pin::Pin;
 
-macro_rules! declare_ValueType {
-    ($($ty:ty,)*) => {
-        pub trait ValueType: 'static + PartialEq + Default + Clone $(+ TryInto<$ty> + TryFrom<$ty>)* {}
-    };
+// There is no `Path` item without the `path` feature, and `()` is in the list anyway.
+cfg_select! {
+    feature = "path" => { use crate::graphics::PathData; }
+    _ => { type PathData = (); }
 }
 
-macro_rules! declare_ValueType_2 {
+// List here the type of every member of a builtin item.
+macro_rules! declare_ValueType {
     ($( $(#[$enum_doc:meta])* $vis:vis enum $Name:ident { $($body:tt)* })*) => {
-        declare_ValueType![
+        declare_ValueType![@types
             (),
             bool,
             u32,
@@ -39,7 +40,8 @@ macro_rules! declare_ValueType_2 {
             crate::SharedString,
             crate::graphics::Image,
             crate::Color,
-            crate::PathData,
+            PathData,
+            crate::SharedVector<crate::Coord>,
             crate::animations::EasingCurve,
             crate::items::StandardListViewItem,
             crate::items::TableColumn,
@@ -49,24 +51,28 @@ macro_rules! declare_ValueType_2 {
             crate::items::PointerEvent,
             crate::items::PointerScrollEvent,
             crate::lengths::LogicalLength,
-            crate::lengths::LogicalPoint,
-            crate::lengths::LogicalSize,
-            crate::lengths::LogicalEdges,
             crate::component_factory::ComponentFactory,
             crate::api::LogicalPosition,
+            crate::api::LogicalSize,
+            crate::items::Edges,
             crate::items::FontMetrics,
+            crate::items::InputMethodHints,
             crate::items::MenuEntry,
             crate::items::DropEvent,
             crate::model::ModelRc<crate::items::MenuEntry>,
             crate::styled_text::StyledText,
             crate::input::Keys,
             crate::data_transfer::DataTransfer,
+            crate::cursor::MouseCursorInner,
             $(crate::items::$Name,)*
         ];
     };
+    (@types $($ty:ty,)*) => {
+        pub trait ValueType: 'static + PartialEq + Default + Clone $(+ TryInto<$ty> + TryFrom<$ty>)* {}
+    };
 }
 
-i_slint_common::for_each_enums!(declare_ValueType_2);
+i_slint_common::for_each_enums!(declare_ValueType);
 
 /// What kind of animation is on a binding
 pub enum AnimatedBindingKind {
@@ -146,6 +152,11 @@ pub trait PropertyInfo<Item, Value> {
     fn set_debug_name(&self, _item: Pin<&Item>, _name: alloc::string::String) {}
 
     /// Prepare the property for two way binding and return the "common" shared property in the TwoWayBinding
+    ///
+    /// Every call for the same property must return the same property, otherwise a later
+    /// call detaches what an earlier one linked.
+    /// The item property links to the returned one, not the other way around,
+    /// so a binding set on the item property still reaches every link.
     fn prepare_for_two_way_binding(&self, item: Pin<&Item>) -> Pin<Rc<Property<Value>>>;
 
     /// Link another property to this property with a mapping function
@@ -167,6 +178,58 @@ pub trait PropertyInfo<Item, Value> {
         getter: Box<dyn Fn() -> Option<Value>>,
         setter: Box<dyn Fn(&Value)>,
     );
+}
+
+// The two helpers below only depend on `Value`, so they are kept out of the
+// generic `PropertyInfo` impl: there they would be instantiated once per
+// item property type instead of once.
+
+/// Returns the common property of `p`, installing a two-way binding on it first if needed.
+///
+/// link_two_way installs a TwoWayBinding on p (moving any
+/// existing binding into the shared common property), which
+/// check_common_property finds on subsequent calls. This keeps
+/// prepare_for_two_way_binding idempotent: when several fields of
+/// the same struct property are two-way bound, they must all share
+/// one common property instead of each creating its own.
+fn common_property<Value: Clone + PartialEq + Default + 'static>(
+    p: Pin<&Property<Value>>,
+) -> Pin<Rc<Property<Value>>> {
+    if let Some(cp) = Property::check_common_property(p) {
+        return cp;
+    }
+    let anchor = Rc::pin(Property::<Value>::default());
+    Property::link_two_way(anchor.as_ref(), p);
+    Property::check_common_property(p).unwrap()
+}
+
+/// Links `prop2` to the common property `prop1`, through `mapper` when given.
+fn link_common_properties<Value: Clone + PartialEq + 'static>(
+    prop1: Pin<Rc<Property<Value>>>,
+    prop2: Pin<Rc<Property<Value>>>,
+    mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
+) {
+    match mapper {
+        Some(m1) => {
+            let m2 = m1.clone();
+            Property::link_two_way_with_map_to_common_property(
+                prop2,
+                prop1.as_ref(),
+                move |value| m1.map_to(value),
+                move |value, value2| m2.map_from(value, value2),
+                true,
+            );
+        }
+        None => {
+            Property::link_two_way_with_map_to_common_property(
+                prop2,
+                prop1.as_ref(),
+                |value| value.clone(),
+                |value, value2| *value = value2.clone(),
+                true,
+            );
+        }
+    }
 }
 
 impl<Item: 'static, T, Value> PropertyInfo<Item, Value> for FieldOffset<Item, Property<T>>
@@ -226,22 +289,16 @@ where
         if let Some(self_) =
             (self as &dyn core::any::Any).downcast_ref::<FieldOffset<Item, Property<Value>>>()
         {
-            let p = self_.apply_pin(item);
-            if let Some(cp) = Property::check_common_property(p) {
-                return cp;
-            }
-            // link_two_way installs a TwoWayBinding on p (moving any
-            // existing binding into the shared common property), which
-            // check_common_property finds on subsequent calls. This keeps
-            // prepare_for_two_way_binding idempotent: when several fields of
-            // the same struct property are two-way bound, they must all share
-            // one common property instead of each creating its own.
-            let anchor = Rc::pin(Property::<Value>::default());
-            Property::link_two_way(anchor.as_ref(), p);
-            return Property::check_common_property(p).unwrap();
+            return common_property(self_.apply_pin(item));
         }
 
         let p1 = self.apply_pin(item);
+        if let Some(shared_property) = p1.check_mapped_common_property::<Value>().or_else(|| {
+            p1.check_common_property().and_then(|c| c.as_ref().check_mapped_common_property())
+        }) {
+            return shared_property;
+        }
+
         let value: Value = p1.get_internal().try_into().unwrap_or_default();
         let shared_property = Rc::pin(Property::new(value));
         Property::link_two_way_with_map_to_common_property(
@@ -261,28 +318,7 @@ where
         mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
     ) {
         let prop1 = self.prepare_for_two_way_binding(item);
-
-        match mapper {
-            Some(m1) => {
-                let m2 = m1.clone();
-                Property::link_two_way_with_map_to_common_property(
-                    prop2,
-                    prop1.as_ref(),
-                    move |value| m1.map_to(value),
-                    move |value, value2| m2.map_from(value, value2),
-                    true,
-                );
-            }
-            None => {
-                Property::link_two_way_with_map_to_common_property(
-                    prop2,
-                    prop1.as_ref(),
-                    |value| value.clone(),
-                    |value, value2| *value = value2.clone(),
-                    true,
-                );
-            }
-        }
+        link_common_properties(prop1, prop2, mapper);
     }
 
     fn link_two_way_to_model_data(

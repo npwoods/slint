@@ -5,8 +5,11 @@ include(FetchContent)
 FetchContent_Declare(
     Catch2
     GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.8.0
+    GIT_TAG v3.15.3
 )
+
+# Some tests assert from worker threads, which plain Catch2 forbids.
+set(CATCH_CONFIG_THREAD_SAFE_ASSERTIONS ON)
 
 FetchContent_MakeAvailable(Catch2)
 
@@ -59,6 +62,8 @@ endif()
 if(SLINT_FEATURE_COMPILER OR SLINT_COMPILER)
     add_subdirectory(multiple-includes)
     add_subdirectory(libraries)
+    add_subdirectory(project-file)
+    add_subdirectory(project-file-entry)
 endif()
 
 slint_test(platform_eventloop)

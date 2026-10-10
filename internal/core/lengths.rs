@@ -69,9 +69,11 @@ pub trait RectLengths {
     fn size_length(&self) -> Self::SizeType;
     fn width_length(&self) -> Self::LengthType;
     fn height_length(&self) -> Self::LengthType;
+    /// The typed horizontal range, unlike euclid's unitless [`euclid::Rect::x_range`].
+    fn x_length_range(&self) -> core::ops::Range<Self::LengthType>;
 }
 
-impl<T: Copy, U> RectLengths for euclid::Rect<T, U> {
+impl<T: Copy + core::ops::Add<Output = T>, U> RectLengths for euclid::Rect<T, U> {
     type LengthType = euclid::Length<T, U>;
     type SizeType = euclid::Size2D<T, U>;
     fn size_length(&self) -> Self::SizeType {
@@ -82,6 +84,9 @@ impl<T: Copy, U> RectLengths for euclid::Rect<T, U> {
     }
     fn height_length(&self) -> Self::LengthType {
         self.size_length().height_length()
+    }
+    fn x_length_range(&self) -> core::ops::Range<Self::LengthType> {
+        self.origin.x_length()..self.origin.x_length() + self.width_length()
     }
 }
 
@@ -116,6 +121,17 @@ pub struct LogicalEdges {
     pub left: f32,
     /// The right distance in logical pixels.
     pub right: f32,
+}
+
+impl From<LogicalEdges> for crate::items::Edges {
+    fn from(edges: LogicalEdges) -> Self {
+        Self {
+            left: edges.left as Coord,
+            top: edges.top as Coord,
+            right: edges.right as Coord,
+            bottom: edges.bottom as Coord,
+        }
+    }
 }
 
 impl LogicalEdges {

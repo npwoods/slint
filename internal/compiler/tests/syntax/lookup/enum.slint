@@ -17,13 +17,19 @@ export TestCase := Text {
         self.horizontal_alignment =
             TextHorizontalAlignment.lefti;
 //                                  >   <error{'lefti' is not a member of the enum TextHorizontalAlignment}
+
+        // wrong case
+        self.horizontal_alignment = TextHorizontalAlignment.Left;
+//                                                          >  <error{'Left' is not a member of the enum TextHorizontalAlignment. Did you mean 'left'?}
+        self.wrap = TextWrap.WordWrap;
+//                           >      <error{'WordWrap' is not a member of the enum TextWrap. Did you mean 'word-wrap'?}
     }
 
     vertical_alignment: TextVerticalAlignment.top.right;
-//                                                >   <error{Cannot access the field 'right' of enum TextVerticalAlignment}
+//                                                >   <error{Cannot access the field 'right' of TextVerticalAlignment}
     Text {
         horizontal-alignment: right.foo;
-//                                  > <error{Cannot access the field 'foo' of enum TextHorizontalAlignment}
+//                                  > <error{Cannot access the field 'foo' of TextHorizontalAlignment}
         vertical_alignment: TextVerticalAlignment;
 //                          >                   <error{Cannot take reference to an enum}
     }

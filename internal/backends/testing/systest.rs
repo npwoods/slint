@@ -32,22 +32,19 @@ impl TestingClient {
     fn start_if_needed(self: &Rc<Self>) {
         let this = self.clone();
         self.message_loop_future.get_or_init(|| {
-            i_slint_core::with_global_context(
-                || panic!("uninitialized platform"),
-                |context| {
-                    let this = this.clone();
-                    context
-                        .spawn_local(async move {
-                            message_loop(&this.server_addr, |request| {
-                                let this = this.clone();
-                                Box::pin(async move { this.handle_request(request).await })
-                            })
-                            .await;
+            i_slint_core::with_existing_context(|context| {
+                let this = this.clone();
+                context
+                    .spawn_local(async move {
+                        message_loop(&this.server_addr, |request| {
+                            let this = this.clone();
+                            Box::pin(async move { this.handle_request(request).await })
                         })
-                        .unwrap()
-                },
-            )
-            .unwrap()
+                        .await;
+                    })
+                    .unwrap()
+            })
+            .expect("uninitialized platform")
         });
     }
 
@@ -130,6 +127,7 @@ impl TestingClient {
                 element_handle,
                 action,
                 button,
+                modifiers,
             }) => {
                 let element_index =
                     handle_to_index(element_handle.ok_or_else(|| {
@@ -139,13 +137,14 @@ impl TestingClient {
                     .map_err(|_| format!("invalid PointerEventButton value: {button}"))?;
                 let action = proto::ClickAction::try_from(action)
                     .map_err(|_| format!("invalid ClickAction value: {action}"))?;
-                dispatch::click(&self.state, element_index, action, button).await?;
+                dispatch::click(&self.state, element_index, action, button, modifiers).await?;
                 Resp::ElementClickResponse(proto::ElementClickResponse {})
             }
             Req::RequestElementDrag(proto::RequestElementDrag {
                 element_handle,
                 target,
                 button,
+                modifiers,
             }) => {
                 let element_index =
                     handle_to_index(element_handle.ok_or_else(|| {
@@ -155,7 +154,7 @@ impl TestingClient {
                     .map_err(|_| format!("invalid PointerEventButton value: {button}"))?;
                 let target =
                     target.ok_or_else(|| "element drag request missing target".to_string())?;
-                dispatch::drag(&self.state, element_index, target, button).await?;
+                dispatch::drag(&self.state, element_index, target, button, modifiers).await?;
                 Resp::ElementDragResponse(proto::ElementDragResponse {})
             }
             Req::RequestDispatchWindowEvent(proto::RequestDispatchWindowEvent {

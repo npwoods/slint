@@ -135,10 +135,26 @@ inline slint::LogicalSize from_slint_value(const slint::interpreter::Value &val,
                                 float(s.get_field("height").value().to_number().value()) });
 }
 
-template<typename T>
-T from_slint_value(const slint::interpreter::Value &v)
+inline slint::interpreter::Value into_slint_value(const slint::cbindgen_private::Edges &val)
 {
-    return from_slint_value(v, static_cast<const T *>(nullptr));
+    slint::interpreter::Struct s;
+    s.set_field("left", val.left);
+    s.set_field("top", val.top);
+    s.set_field("right", val.right);
+    s.set_field("bottom", val.bottom);
+    return s;
+}
+
+inline slint::cbindgen_private::Edges from_slint_value(const slint::interpreter::Value &val,
+                                                       const slint::cbindgen_private::Edges *)
+{
+    auto s = val.to_struct().value();
+    return slint::cbindgen_private::Edges {
+        .left = float(s.get_field("left").value().to_number().value()),
+        .top = float(s.get_field("top").value().to_number().value()),
+        .right = float(s.get_field("right").value().to_number().value()),
+        .bottom = float(s.get_field("bottom").value().to_number().value()),
+    };
 }
 
 class LiveReloadingComponent
@@ -151,13 +167,14 @@ public:
                            const slint::SharedVector<slint::SharedString> &include_paths,
                            const slint::SharedVector<slint::SharedString> &libraries,
                            std::string_view style, std::string_view translation_domain,
-                           bool no_default_translation_context)
+                           bool no_default_translation_context,
+                           std::string_view bundled_translations_path)
     {
         assert_main_thread();
         inner = cbindgen_private::slint_live_preview_new(
                 string_to_slice(file_name), string_to_slice(component_name), &include_paths,
                 &libraries, string_to_slice(style), string_to_slice(translation_domain),
-                no_default_translation_context);
+                no_default_translation_context, string_to_slice(bundled_translations_path));
     }
 
     LiveReloadingComponent(const LiveReloadingComponent &other) : inner(other.inner)
@@ -287,7 +304,41 @@ public:
         }
         return {};
     }
+    static slint::interpreter::Value
+    value_from_mouse_cursor_inner(const slint::cbindgen_private::MouseCursorInner &cursor)
+    {
+        return slint::interpreter::Value(
+                cbindgen_private::slint_interpreter_value_new_mouse_cursor_inner(&cursor));
+    }
+    static slint::cbindgen_private::MouseCursorInner
+    mouse_cursor_inner_from_value(const slint::interpreter::Value &value)
+    {
+        if (auto *p =
+                    cbindgen_private::slint_interpreter_value_to_mouse_cursor_inner(value.inner)) {
+            return *p;
+        }
+        return {};
+    }
 };
+
+inline slint::interpreter::Value
+into_slint_value(const slint::cbindgen_private::MouseCursorInner &val)
+{
+    return private_api::live_preview::LiveReloadingComponent::value_from_mouse_cursor_inner(val);
+}
+
+inline slint::cbindgen_private::MouseCursorInner
+from_slint_value(const slint::interpreter::Value &val,
+                 const slint::cbindgen_private::MouseCursorInner *)
+{
+    return private_api::live_preview::LiveReloadingComponent::mouse_cursor_inner_from_value(val);
+}
+
+template<typename T>
+T from_slint_value(const slint::interpreter::Value &v)
+{
+    return from_slint_value(v, static_cast<const T *>(nullptr));
+}
 
 class LiveReloadModelWrapperBase : public private_api::ModelChangeListener
 {
@@ -332,6 +383,21 @@ class LiveReloadModelWrapperBase : public private_api::ModelChangeListener
             interpreter::Value v(std::move(value));
             reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)->set_row_data(row, v);
         };
+        auto push_row = [](VRef<ModelAdaptorVTable> self,
+                           slint::cbindgen_private::Value *value) -> bool {
+            interpreter::Value v(std::move(value));
+            return reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)->push_row(v);
+        };
+        auto remove_row = [](VRef<ModelAdaptorVTable> self, uintptr_t row) -> bool {
+            return reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)
+                    ->remove_row(int(row));
+        };
+        auto insert_row = [](VRef<ModelAdaptorVTable> self, uintptr_t row,
+                             slint::cbindgen_private::Value *value) -> bool {
+            interpreter::Value v(std::move(value));
+            return reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)
+                    ->insert_row(int(row), v);
+        };
         auto get_notify =
                 [](VRef<ModelAdaptorVTable> self) -> const cbindgen_private::ModelNotifyOpaque * {
             return &reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)->notify;
@@ -340,7 +406,8 @@ class LiveReloadModelWrapperBase : public private_api::ModelChangeListener
             reinterpret_cast<LiveReloadModelWrapperBase *>(self.instance)->self = nullptr;
         };
 
-        static const ModelAdaptorVTable vt { row_count, row_data, set_row_data, get_notify, drop };
+        static const ModelAdaptorVTable vt { row_count,  row_data,   set_row_data, push_row,
+                                             remove_row, insert_row, get_notify,   drop };
         return &vt;
     }
 
@@ -354,6 +421,9 @@ protected:
     virtual int row_count() const = 0;
     virtual std::optional<slint::interpreter::Value> row_data(int i) const = 0;
     virtual void set_row_data(int i, const slint::interpreter::Value &value) = 0;
+    virtual bool push_row(const slint::interpreter::Value &value) = 0;
+    virtual bool remove_row(int row) = 0;
+    virtual bool insert_row(int row, const slint::interpreter::Value &value) = 0;
 
     static interpreter::Value wrap(std::shared_ptr<LiveReloadModelWrapperBase> wrapper)
     {
@@ -400,6 +470,18 @@ public:
         model->set_row_data(i, from_slint_value<ModelData>(value));
     }
 
+    bool push_row(const slint::interpreter::Value &value) override
+    {
+        return model->push_row(from_slint_value<ModelData>(value));
+    }
+
+    bool remove_row(int row) override { return model->remove_row(row); }
+
+    bool insert_row(int row, const slint::interpreter::Value &value) override
+    {
+        return model->insert_row(row, from_slint_value<ModelData>(value));
+    }
+
     static slint::interpreter::Value wrap(std::shared_ptr<slint::Model<ModelData>> model)
     {
         auto self = std::make_shared<LiveReloadModelWrapper<ModelData>>(model);
@@ -436,7 +518,7 @@ from_slint_value(const slint::interpreter::Value &value,
         }
     }
     if constexpr (HasFromSlintValue<ModelData>) {
-        if (auto array = value.to_array(); array && array->size() > 0) {
+        if (auto array = value.to_array()) {
             std::vector<ModelData> data;
             data.reserve(array->size());
             for (auto &v : *array) {

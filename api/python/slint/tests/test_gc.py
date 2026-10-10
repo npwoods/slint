@@ -1,12 +1,13 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-from slint import slint as native
-import slint
-import weakref
 import gc
 import typing
+import weakref
 from pathlib import Path
+
+import slint
+from slint import slint as native
 
 
 def test_callback_gc() -> None:
@@ -66,7 +67,7 @@ def test_struct_gc() -> None:
     instance: native.ComponentInstance | None = compdef.create()
     assert instance is not None
 
-    model: typing.Optional[slint.ListModel[int]] = slint.ListModel([1, 2, 3])
+    model: slint.ListModel[int] | None = slint.ListModel([1, 2, 3])
     assert model
     assert model.row_count() == 3
 
@@ -94,7 +95,7 @@ def test_properties_gc() -> None:
     instance: native.ComponentInstance | None = compdef.create()
     assert instance is not None
 
-    model: typing.Optional[slint.ListModel[int]] = slint.ListModel([1, 2, 3])
+    model: slint.ListModel[int] | None = slint.ListModel([1, 2, 3])
     assert model
     assert model.row_count() == 3
 
@@ -102,3 +103,416 @@ def test_properties_gc() -> None:
     model = None
     gc.collect()
     assert instance.get_property("test-value").row_count() == 3
+
+
+def make_instance(source: str) -> native.ComponentInstance:
+    """Compile `source` and instantiate its `Test` component."""
+    compdef = native.Compiler().build_from_source(source, Path()).component("Test")
+    assert compdef is not None
+    instance = compdef.create()
+    assert instance is not None
+    return instance
+
+
+def test_model_survives_partial_gc() -> None:
+    """A model only Slint still references must survive a partial collection.
+
+    A young (partial) collection does not traverse the old component instance,
+    so the wrapper of a model held in a property must not rely on that
+    traversal to stay alive. It used to be collected, leaving the Rust model
+    without its Python implementation ("Model implementation is lacking self
+    object").
+    """
+    instance = make_instance(
+        """
+        export global TestGlobal {
+            in-out property <[int]> test-value;
+        }
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    # Park the instance in the old generation, like a long-running app does.
+    # Young collections then no longer traverse it.
+    gc.collect()
+
+    model: slint.ListModel[int] | None = slint.ListModel([1, 2, 3])
+    assert model is not None
+    instance.set_property("test-value", model)
+    instance.set_global_property("TestGlobal", "test-value", model)
+    model = None
+
+    # Collect only the young generations; a full collection would traverse the
+    # instance and hide the bug. Note: CPython 3.14's incremental GC may stop
+    # reproducing this scenario; if these tests start passing without the fix,
+    # the generation argument here is the thing to revisit.
+    gc.collect(0)
+    gc.collect(1)
+
+    assert instance.get_property("test-value").row_count() == 3
+    assert instance.get_global_property("TestGlobal", "test-value").row_count() == 3
+
+
+def test_model_released_with_instance() -> None:
+    """A model assigned to a property is released by reference count alone.
+
+    When the instance dies, its properties drop the last `ModelRc`, which
+    releases the wrapper. No garbage collection is needed.
+    """
+    instance: native.ComponentInstance | None = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    model: slint.ListModel[int] | None = slint.ListModel([1, 2, 3])
+    assert model is not None
+    instance.set_property("test-value", model)
+
+    instance_weak = weakref.ref(instance)
+    model_weak = weakref.ref(model)
+    model = None
+    instance = None
+
+    assert instance_weak() is None
+    assert model_weak() is None
+
+
+def test_unassigned_model_released_by_refcount() -> None:
+    """A model that never reached a property holds no reference cycle.
+
+    Such a model used to leak until the next full collection cleared the
+    cycle between the wrapper and its shared model.
+    """
+    model = slint.ListModel([1, 2, 3])
+    model_weak = weakref.ref(model)
+    del model
+    assert model_weak() is None
+
+
+def test_model_reassignment_after_drop() -> None:
+    """Assigning a model again after Slint dropped it brings it back.
+
+    Python can keep a model alive after its last `ModelRc` went away (the
+    replacement on a re-assignment). Handing such a model to Slint again
+    wraps it in a fresh shared model, with the rows intact.
+    """
+    instance = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    model = slint.ListModel([1, 2, 3])
+    instance.set_property("test-value", model)
+    # Replacing the property drops the last `ModelRc` of `model`.
+    instance.set_property("test-value", slint.ListModel([7]))
+    instance.set_property("test-value", model)
+
+    assert instance.get_property("test-value").row_count() == 3
+
+    # Mutations must still reach the views attached to the fresh model.
+    model.push_row(4)
+    assert instance.get_property("test-value").row_count() == 4
+
+
+def test_custom_model_survives_partial_gc() -> None:
+    """A user-defined Model keeps its Python state through a partial collection.
+
+    Unlike `ListModel`, the row data of a `Model` subclass lives in the
+    wrapper's Python state. The wrapper must survive partial collections
+    just like `ListModel`'s, so rows are not lost while Slint still
+    references the model.
+    """
+
+    class CustomModel(slint.Model[int]):
+        def __init__(self) -> None:
+            super().__init__()
+            self._rows = [1, 2, 3]
+
+        def row_count(self) -> int:
+            return len(self._rows)
+
+        def row_data(self, row: int) -> int | None:
+            if 0 <= row < len(self._rows):
+                return self._rows[row]
+            return None
+
+    instance = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    # Park the instance in the old generation, like a long-running app does.
+    gc.collect()
+
+    model: CustomModel | None = CustomModel()
+    assert model is not None
+    instance.set_property("test-value", model)
+    model = None
+
+    gc.collect(0)
+    gc.collect(1)
+
+    assert instance.get_property("test-value").row_count() == 3
+    assert instance.get_property("test-value").row_data(1) == 2
+
+
+def test_model_in_reference_cycle_survives_gc() -> None:
+    """A model only kept alive by Slint survives a full collection in a cycle.
+
+    Slint keeps the wrapper alive through a reference invisible to the
+    cyclic garbage collector. Even when the wrapper participates in a
+    Python reference cycle, a full collection must not release it while
+    Slint still owns the model: the wrapper has no `__clear__`, so this
+    self-cycle cannot be broken and the model stays alive and usable.
+    (A cycle through the component instance *is* collectable; see
+    test_model_referencing_instance_cycle_is_collectable.)
+    """
+
+    class CustomModel(slint.Model[int]):
+        def __init__(self) -> None:
+            super().__init__()
+            self._rows = [1, 2, 3]
+            self.cycle: object | None = None
+
+        def row_count(self) -> int:
+            return len(self._rows)
+
+        def row_data(self, row: int) -> int | None:
+            if 0 <= row < len(self._rows):
+                return self._rows[row]
+            return None
+
+    instance = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    model: CustomModel | None = CustomModel()
+    assert model is not None
+    instance.set_property("test-value", model)
+    model.cycle = model  # reference cycle through the wrapper
+    model = None
+
+    gc.collect()
+
+    assert instance.get_property("test-value").row_count() == 3
+    assert instance.get_property("test-value").row_data(1) == 2
+
+
+def test_model_referencing_instance_cycle_is_collectable() -> None:
+    """A model referencing its own component instance does not leak.
+
+    This is the ordinary pattern of a Model subclass keeping a handle to
+    the instance it serves: wrapper -> instance -> property ModelRc ->
+    shared model -> wrapper. The instance's `__traverse__` reports the
+    wrapper, and its `__clear__` drops the shared model's reference to
+    the wrapper, so the cyclic collector can reclaim the whole group.
+    """
+
+    class CustomModel(slint.Model[int]):
+        def __init__(self, instance: native.ComponentInstance) -> None:
+            super().__init__()
+            self._rows = [1, 2, 3]
+            self.instance = instance
+
+        def row_count(self) -> int:
+            return len(self._rows)
+
+        def row_data(self, row: int) -> int | None:
+            if 0 <= row < len(self._rows):
+                return self._rows[row]
+            return None
+
+    instance: native.ComponentInstance | None = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    model: CustomModel | None = CustomModel(instance)
+    assert model is not None
+    instance.set_property("test-value", model)
+
+    instance_weak = weakref.ref(instance)
+    model_weak = weakref.ref(model)
+    model = None
+    instance = None
+
+    gc.collect()
+
+    assert instance_weak() is None
+    assert model_weak() is None
+
+
+def test_model_handoff_during_model_call() -> None:
+    """Handing a model to Slint from inside a Model method must not panic.
+
+    Python code running inside row_count() used to run while the shared
+    model held a borrow of its self reference; assigning the model to a
+    property from there re-entered the hand-off and hit a BorrowMutError.
+    """
+
+    class CustomModel(slint.Model[int]):
+        def __init__(self) -> None:
+            super().__init__()
+            self._rows = [1, 2, 3]
+            self.instance: native.ComponentInstance | None = None
+            self.reassigned = False
+
+        def row_count(self) -> int:
+            if not self.reassigned:
+                self.reassigned = True
+                assert self.instance is not None
+                self.instance.set_property("test-value", self)
+            return len(self._rows)
+
+        def row_data(self, row: int) -> int | None:
+            if 0 <= row < len(self._rows):
+                return self._rows[row]
+            return None
+
+    instance = make_instance(
+        """
+        export component Test {
+            in-out property <[int]> test-value;
+        }
+    """
+    )
+
+    model = CustomModel()
+    model.instance = instance
+    instance.set_property("test-value", model)
+
+    # row_count() re-assigns the model to the property while being called.
+    assert instance.get_property("test-value").row_count() == 3
+    assert instance.get_property("test-value").row_data(1) == 2
+
+
+def test_map_model_cycle_is_collectable() -> None:
+    """A MapModel whose map function refers back to the MapModel does not leak."""
+
+    class SelfReferencingModel(slint.MapModel[int, int]):
+        def __init__(self, source: slint.Model[int]) -> None:
+            super().__init__(source, self.transform)
+
+        def transform(self, value: int) -> int:
+            return value
+
+    model: SelfReferencingModel | None = SelfReferencingModel(slint.ListModel([1]))
+    model_weak = weakref.ref(model)
+    model = None
+
+    gc.collect()
+
+    assert model_weak() is None
+
+
+def test_map_model_subclass_released_by_refcount() -> None:
+    """A MapModel subclass implementing map_row() is freed without the cyclic collector."""
+
+    class Doubled(slint.MapModel[int, int]):
+        def map_row(self, row_data: int) -> int:
+            return row_data * 2
+
+    model: Doubled | None = Doubled(slint.ListModel([1]))
+    assert model is not None
+    assert model[0] == 2
+    model_weak = weakref.ref(model)
+    model = None
+
+    assert model_weak() is None
+
+
+def test_reverse_model_released_by_refcount() -> None:
+    """A ReverseModel is freed without the cyclic collector, and releases its source."""
+
+    source: slint.ListModel[int] | None = slint.ListModel([1, 2])
+    model: slint.ReverseModel[int] | None = slint.ReverseModel(source)
+    assert model is not None
+    assert model[0] == 2
+    source_weak = weakref.ref(source)
+    model_weak = weakref.ref(model)
+    source = None
+    model = None
+
+    assert model_weak() is None
+    assert source_weak() is None
+
+
+def test_filter_model_subclass_released_by_refcount() -> None:
+    """A FilterModel subclass implementing filter_row() is freed without the cyclic collector."""
+
+    class Positive(slint.FilterModel[int]):
+        def filter_row(self, row_data: int) -> bool:
+            return row_data > 0
+
+    model: Positive | None = Positive(slint.ListModel([-1, 1]))
+    assert model is not None
+    assert list(model) == [1]
+    model_weak = weakref.ref(model)
+    model = None
+
+    assert model_weak() is None
+
+
+def test_sort_model_subclass_released_by_refcount() -> None:
+    """A SortModel subclass implementing sort_key() is freed without the cyclic collector."""
+
+    class Descending(slint.SortModel[int]):
+        def sort_key(self, row_data: int) -> int:
+            return -row_data
+
+    model: Descending | None = Descending(slint.ListModel([1, 2]))
+    assert model is not None
+    assert list(model) == [2, 1]
+    model_weak = weakref.ref(model)
+    model = None
+
+    assert model_weak() is None
+
+
+def test_adapter_cycle_through_unbound_source_is_collectable() -> None:
+    """A source that Slint no longer holds, in a cycle with its adapter, is freed."""
+
+    instance = make_instance(
+        """
+        export component Test {
+            in property <[int]> values;
+        }
+    """
+    )
+
+    class Source(slint.ListModel[int]):
+        adapter: slint.MapModel[int, int] | None = None
+
+    source: Source | None = Source([1])
+    assert source is not None
+    adapter: slint.MapModel[int, int] | None = slint.MapModel(source, lambda v: v)
+    instance.set_property("values", source)
+    instance.set_property("values", slint.ListModel([]))
+    source.adapter = adapter
+
+    source_weak = weakref.ref(source)
+    adapter_weak = weakref.ref(adapter)
+    source = None
+    adapter = None
+    gc.collect()
+
+    assert source_weak() is None
+    assert adapter_weak() is None

@@ -5,10 +5,11 @@
 //! The animation system
 
 use alloc::boxed::Box;
-use core::cell::Cell;
+use core::{cell::Cell, time::Duration};
 #[cfg(not(feature = "std"))]
 use num_traits::Float;
-pub(crate) mod physics_simulation;
+
+pub(crate) mod simulations;
 
 mod cubic_bezier {
     //! This is a copy from lyon_algorithms::geom::cubic_bezier implementation
@@ -97,20 +98,26 @@ mod cubic_bezier {
 
             // Newton's method.
             let mut t = (x - from) / (to - from);
+            let mut degenerate = false;
             for _ in 0..8 {
                 let x2 = self.x(t);
-
-                if S::abs(x2 - x) <= tolerance {
-                    return t;
-                }
-
                 let dx = self.dx(t);
 
                 if dx <= S::EPSILON {
+                    degenerate = true;
                     break;
                 }
 
-                t -= (x2 - x) / dx;
+                let step = (x2 - x) / dx;
+                t -= step;
+
+                if S::abs(step) <= tolerance {
+                    return t.max(t_range.start).min(t_range.end);
+                }
+            }
+
+            if !degenerate {
+                return t.max(t_range.start).min(t_range.end);
             }
 
             // Fall back to binary search.
@@ -160,44 +167,59 @@ pub enum EasingCurve {
     EaseOutBounce,
     /// Easing curve as defined at: <https://easings.net/#easeInOutBounce>
     EaseInOutBounce,
+    /// A spring animation, configured via `PropertyAnimation`'s `duration`, and the passed in
+    /// `bounce`
+    Spring(f32),
     // Custom(Box<dyn Fn(f32) -> f32>),
 }
 
-/// Represent an instant, in milliseconds since the AnimationDriver's initial_instant
+/// Represents an instant, in whole nanoseconds since the AnimationDriver's initial_instant.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Ord, PartialOrd, Eq)]
-pub struct Instant(pub u64);
+pub struct Instant(u64);
+
+impl From<Instant> for Duration {
+    fn from(value: Instant) -> Self {
+        Duration::from_nanos(value.0)
+    }
+}
 
 impl core::ops::Sub<Instant> for Instant {
-    type Output = core::time::Duration;
-    fn sub(self, other: Self) -> core::time::Duration {
-        core::time::Duration::from_millis(self.0 - other.0)
+    type Output = Duration;
+    fn sub(self, other: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(other.0))
     }
 }
 
-impl core::ops::Sub<core::time::Duration> for Instant {
+impl core::ops::Sub<Duration> for Instant {
     type Output = Instant;
-    fn sub(self, other: core::time::Duration) -> Instant {
-        Self(self.0 - other.as_millis() as u64)
+    fn sub(self, other: Duration) -> Instant {
+        Self(self.0.saturating_sub(other.as_nanos() as u64))
     }
 }
 
-impl core::ops::Add<core::time::Duration> for Instant {
+impl core::ops::Add<Duration> for Instant {
     type Output = Instant;
-    fn add(self, other: core::time::Duration) -> Instant {
-        Self(self.0 + other.as_millis() as u64)
+    fn add(self, other: Duration) -> Instant {
+        Self(self.0 + other.as_nanos() as u64)
     }
 }
 
-impl core::ops::AddAssign<core::time::Duration> for Instant {
-    fn add_assign(&mut self, other: core::time::Duration) {
-        self.0 += other.as_millis() as u64;
+impl core::ops::AddAssign<Duration> for Instant {
+    fn add_assign(&mut self, other: Duration) {
+        self.0 += other.as_nanos() as u64;
     }
 }
 
-impl core::ops::SubAssign<core::time::Duration> for Instant {
-    fn sub_assign(&mut self, other: core::time::Duration) {
-        self.0 -= other.as_millis() as u64;
+impl core::ops::SubAssign<Duration> for Instant {
+    fn sub_assign(&mut self, other: Duration) {
+        self.0 = self.0.saturating_sub(other.as_nanos() as u64);
+    }
+}
+
+impl From<Duration> for Instant {
+    fn from(duration: Duration) -> Self {
+        Self(duration.as_nanos() as u64)
     }
 }
 
@@ -205,24 +227,37 @@ impl Instant {
     /// Returns the amount of time elapsed since an other instant.
     ///
     /// Equivalent to `self - earlier`
-    pub fn duration_since(self, earlier: Instant) -> core::time::Duration {
+    pub fn duration_since(self, earlier: Instant) -> Duration {
         self - earlier
     }
 
     /// Wrapper around [`std::time::Instant::now()`] that delegates to the backend
     /// and allows working in no_std environments.
-    pub fn now() -> Self {
-        Self(Self::duration_since_start().as_millis() as u64)
+    ///
+    /// Takes the context rather than reaching for an ambient one because the origin is the
+    /// platform's start time: instants from different contexts are not comparable, so the
+    /// caller has to say which clock it means.
+    pub fn now(ctx: &crate::SlintContext) -> Self {
+        ctx.platform().duration_since_start().into()
     }
 
-    fn duration_since_start() -> core::time::Duration {
-        crate::context::GLOBAL_CONTEXT
-            .with(|p| p.get().map(|p| p.platform().duration_since_start()))
-            .unwrap_or_default()
+    /// Returns an `Instant` for the given number of milliseconds after the backend has started.
+    pub fn from_millis(millis: u64) -> Self {
+        Self(millis * 1_000_000)
+    }
+
+    /// Returns an `Instant` for the given number of nanoseconds after the backend has started.
+    pub fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
     }
 
     /// Return the number of milliseconds this `Instant` is after the backend has started
     pub fn as_millis(&self) -> u64 {
+        self.0 / 1_000_000
+    }
+
+    /// Return the number of nanoseconds this `Instant` is after the backend has started
+    pub fn as_nanos(&self) -> u64 {
         self.0
     }
 }
@@ -258,8 +293,8 @@ impl AnimationDriver {
         }
     }
 
-    /// Returns true if there are any active or ready animations. This is used by the windowing system to determine
-    /// if a new animation frame is required or not. Returns false otherwise.
+    /// Returns true if an active animation was evaluated in the current tick,
+    /// other than while rendering a window, which tracks its own animations.
     pub fn has_active_animations(&self) -> bool {
         self.active_animations.get()
     }
@@ -268,6 +303,19 @@ impl AnimationDriver {
     pub fn set_has_active_animations(&self) {
         self.active_animations.set(true);
     }
+
+    /// Runs `f` and returns whether it evaluated an active animation,
+    /// without recording it in [`Self::has_active_animations`].
+    pub(crate) fn track_active_animations<R>(&self, f: impl FnOnce() -> R) -> (R, bool) {
+        let tick = self.global_instant.as_ref().get_untracked();
+        let was_active = self.active_animations.replace(false);
+        let result = f();
+        // Advancing the tick in `f` (as the Qt backend does) drops the earlier state.
+        let same_tick = self.global_instant.as_ref().get_untracked() == tick;
+        let active = self.active_animations.replace(was_active && same_tick);
+        (result, active)
+    }
+
     /// The current instant that is to be used for animation
     /// using this function register the current binding as a dependency
     pub fn current_tick(&self) -> Instant {
@@ -290,10 +338,12 @@ pub fn current_tick() -> Instant {
 /// Same as [`current_tick`], but also register that one should be running animation
 /// on next frame
 pub fn animation_tick() -> u64 {
-    CURRENT_ANIMATION_DRIVER.with(|driver| {
-        driver.set_has_active_animations();
-        driver.current_tick().0
-    })
+    CURRENT_ANIMATION_DRIVER
+        .with(|driver| {
+            driver.set_has_active_animations();
+            driver.current_tick()
+        })
+        .as_millis()
 }
 
 fn ease_out_bounce_curve(value: f32) -> f32 {
@@ -312,6 +362,43 @@ fn ease_out_bounce_curve(value: f32) -> f32 {
         let value = value - (2.625 / D1);
         N1 * value * value + 0.984375
     }
+}
+
+/// How close to the target position/velocity a `SpringSimulation` must get before it is
+/// considered settled and snaps to rest. This is the "settling duration" and is distinct from the
+/// user-facing `duration` that fixes the natural frequency
+const SPRING_SETTLE_POSITION_EPSILON: f32 = 0.001;
+const SPRING_SETTLE_VELOCITY_EPSILON: f32 = 0.05;
+
+/// Evaluates a mass/stiffness/damping spring at `elapsed_secs`, returning `(progress, settled)`.
+pub fn spring_settle_progress(
+    regime: &simulations::spring::SpringRegime,
+    elapsed_secs: f32,
+) -> (f32, bool) {
+    let (rel_pos, rel_vel) = regime.evaluate(elapsed_secs);
+    let settled = rel_pos.abs() < SPRING_SETTLE_POSITION_EPSILON
+        && rel_vel.abs() < SPRING_SETTLE_VELOCITY_EPSILON;
+    (1.0 + rel_pos, settled)
+}
+
+/// The damping ratio (zeta) required for a spring to settle within 9x `duration` is a fixed
+/// value, since zeta is proportional to bounce and duration.
+///
+/// The spring runs at its literal bounce for every iteration except the last, where it gets
+/// clamped to this value if it hasn't settled by then -- hence needing to settle within 9x
+/// (not some other multiple of) `duration`. Found empirically: the actual value is ~0.8803, but
+/// 0.87 is used to leave some floating-point leeway for comparisons.
+const SPRING_SETTLE_ZETA: f32 = 1.0 - 0.87;
+
+/// Set the spring to settle within 10x duration
+pub fn spring_settle_within(
+    regime: &simulations::spring::SpringRegime,
+    elapsed_secs: f32,
+    w_n: f32,
+) -> simulations::spring::SpringRegime {
+    let (rel_pos, rel_vel) = regime.evaluate(elapsed_secs);
+    let zeta = regime.zeta().max(SPRING_SETTLE_ZETA);
+    simulations::spring::SpringRegime::new(rel_pos, rel_vel, w_n, zeta)
 }
 
 /// map a value between 0 and 1 to another value between 0 and 1 according to the curve
@@ -377,6 +464,9 @@ pub fn easing_curve(curve: &EasingCurve, value: f32) -> f32 {
                 (1.0 + ease_out_bounce_curve(2.0 * value - 1.0)) / 2.0
             }
         }
+        EasingCurve::Spring(_) => {
+            panic!("Springs are handled separately");
+        }
     }
 }
 
@@ -411,11 +501,16 @@ fn easing_test() {
 }
 */
 
-/// Update the global animation time to the current time
-pub fn update_animations() {
+/// Update the global animation time to `now`.
+///
+/// The driver is per-thread while `now` comes from whichever context is driving it, so a
+/// thread running several contexts with different clock origins would see the tick jump.
+/// Per-context animation drivers would mean reaching a context from every binding
+/// evaluation, which is a much larger change.
+pub fn update_animations(now: Instant) {
     CURRENT_ANIMATION_DRIVER.with(|driver| {
         #[allow(unused_mut)]
-        let mut duration = Instant::duration_since_start().as_millis() as u64;
+        let mut duration = now.0;
         #[cfg(feature = "std")]
         if let Ok(val) = std::env::var("SLINT_SLOW_ANIMATIONS") {
             let factor = val.parse().unwrap_or(2).max(1);

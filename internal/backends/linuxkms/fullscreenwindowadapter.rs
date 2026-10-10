@@ -9,15 +9,20 @@ use std::rc::Rc;
 
 use i_slint_core::Property;
 use i_slint_core::api::{LogicalPosition, PhysicalSize as PhysicalWindowSize};
+use i_slint_core::cursor::MouseCursorInner;
 use i_slint_core::graphics::{Image, euclid};
 use i_slint_core::item_rendering::ItemRenderer;
-use i_slint_core::lengths::LogicalRect;
+use i_slint_core::items::BuiltInMouseCursor;
+use i_slint_core::lengths::{LogicalRect, LogicalVector};
 use i_slint_core::platform::WindowEvent;
 use i_slint_core::renderer::DrawOutcome;
 use i_slint_core::slice::Slice;
-use i_slint_core::{platform::PlatformError, window::WindowAdapter};
+use i_slint_core::{platform::PlatformError, window::WindowAdapter, window::WindowAdapterInternal};
 
 use crate::display::RenderingRotation;
+
+#[cfg(all(test, enable_skia))]
+mod tests;
 
 pub trait FullscreenRenderer {
     fn as_core_renderer(&self) -> &dyn i_slint_core::renderer::Renderer;
@@ -35,6 +40,8 @@ pub struct FullscreenWindowAdapter {
     redraw_requested: Cell<bool>,
     rotation: RenderingRotation,
     loop_signal: RefCell<Option<calloop::LoopSignal>>,
+    mouse_cursor: RefCell<MouseCursorInner>,
+    last_cursor_rect: Cell<Option<LogicalRect>>,
 }
 
 impl WindowAdapter for FullscreenWindowAdapter {
@@ -62,9 +69,23 @@ impl WindowAdapter for FullscreenWindowAdapter {
             && let Some(scale_factor) =
                 std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|sf| sf.parse().ok())
         {
-            self.window.try_dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor })?;
+            self.window
+                .dispatch_event_with_result(WindowEvent::ScaleFactorChanged { scale_factor })?;
         }
         Ok(())
+    }
+
+    fn internal(&self, _: i_slint_core::InternalToken) -> Option<&dyn WindowAdapterInternal> {
+        Some(self)
+    }
+}
+
+impl WindowAdapterInternal for FullscreenWindowAdapter {
+    fn set_mouse_cursor(&self, cursor: MouseCursorInner) {
+        if *self.mouse_cursor.borrow() != cursor {
+            *self.mouse_cursor.borrow_mut() = cursor;
+            self.request_redraw();
+        }
     }
 }
 
@@ -91,6 +112,8 @@ impl FullscreenWindowAdapter {
             redraw_requested: Cell::new(true),
             rotation,
             loop_signal: RefCell::new(None),
+            mouse_cursor: RefCell::new(MouseCursorInner::default()),
+            last_cursor_rect: Cell::new(None),
         }))
     }
 
@@ -103,23 +126,33 @@ impl FullscreenWindowAdapter {
         mouse_position: Pin<&Property<Option<LogicalPosition>>>,
     ) -> Result<(), PlatformError> {
         if self.redraw_requested.replace(false) {
+            let cursor_hidden = matches!(
+                &*self.mouse_cursor.borrow(),
+                MouseCursorInner::BuiltIn(BuiltInMouseCursor::None)
+            );
+            let cursor = cursor_image_and_rect(&self.mouse_cursor.borrow(), mouse_position.get());
+            let cursor_rect = cursor.as_ref().map(|(_, rect)| *rect);
+            // Damage must reach the renderer before it calculates this frame's clip.
+            // Repaint the old position as well, including when the cursor is hidden.
+            for rect in self.last_cursor_rect.get().into_iter().chain(cursor_rect) {
+                self.renderer.as_core_renderer().mark_dirty_region(rect.into());
+            }
             let outcome = self.renderer.render_and_present(self.rotation, &|item_renderer| {
-                if let Some(mouse_position) = mouse_position.get() {
-                    let cursor_image = mouse_cursor_image();
+                // The renderer evaluates this inside the window's redraw tracker, so reading the
+                // position here is what makes pointer movement alone schedule the next frame.
+                if !cursor_hidden {
+                    let _ = mouse_position.get();
+                }
+                if let Some((image, rect)) = &cursor {
                     item_renderer.save_state();
-                    item_renderer.translate(
-                        i_slint_core::lengths::logical_point_from_api(mouse_position).to_vector(),
-                    );
-                    item_renderer.draw_image_direct(mouse_cursor_image());
+                    item_renderer.translate(rect.origin.to_vector());
+                    item_renderer.draw_image_direct(image.clone());
                     item_renderer.restore_state();
-                    let cursor_rect = LogicalRect::new(
-                        euclid::point2(mouse_position.x, mouse_position.y),
-                        euclid::Size2D::from_untyped(cursor_image.size().cast()),
-                    );
-                    self.renderer.as_core_renderer().mark_dirty_region(cursor_rect.into());
                 }
             })?;
-            if !matches!(outcome, DrawOutcome::Success) {
+            if matches!(outcome, DrawOutcome::Success) {
+                self.last_cursor_rect.set(cursor_rect);
+            } else {
                 self.redraw_requested.set(true);
             }
             // Check once after rendering if we have running animations and
@@ -141,6 +174,28 @@ impl FullscreenWindowAdapter {
         }
         Ok(())
     }
+}
+
+fn cursor_image_and_rect(
+    cursor: &MouseCursorInner,
+    position: Option<LogicalPosition>,
+) -> Option<(Image, LogicalRect)> {
+    let position = position?;
+    let (image, hotspot) = match cursor {
+        MouseCursorInner::CustomMouseCursor { image, hotspot_x, hotspot_y } => {
+            let size = image.size();
+            let hotspot = LogicalVector::new(
+                (*hotspot_x).clamp(0, size.width.saturating_sub(1) as i32) as f32,
+                (*hotspot_y).clamp(0, size.height.saturating_sub(1) as i32) as f32,
+            );
+            (image.clone(), hotspot)
+        }
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::None) => return None,
+        _ => (mouse_cursor_image(), LogicalVector::default()),
+    };
+    let origin = i_slint_core::lengths::logical_point_from_api(position) - hotspot;
+    let rect = LogicalRect::new(origin, euclid::Size2D::from_untyped(image.size().cast()));
+    Some((image, rect))
 }
 
 fn mouse_cursor_image() -> Image {

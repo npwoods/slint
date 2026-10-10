@@ -32,6 +32,12 @@ pub enum MudaType {
 
 static MUDA_SET_EVENT_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Returns true when `SLINT_NO_MUDA` is set, in which case the menu bar and the context menus
+/// are rendered by Slint. That's the only way to exercise these code paths on macOS and Windows.
+pub fn is_disabled() -> bool {
+    std::env::var_os("SLINT_NO_MUDA").is_some()
+}
+
 struct MudaPropertyTracker {
     window_adapter_weak: Weak<WinitWindowAdapter>,
 }
@@ -326,11 +332,11 @@ impl MudaAdapter {
 }
 
 fn key_string_to_key(string: &str) -> muda::accelerator::Key {
-    use muda::accelerator::Key;
+    use muda::accelerator::{Key, NamedKey};
     macro_rules! key_string_to_code_impl {
         ($($char:literal # $_name:ident # $($_shifted:ident)? $(=> $($muda:ident)? # $($_qt:ident)|* # $($_winit:ident $(($_pos:ident))?)|* # $($_xkb:ident)|*)?;)*) => {
             match string.chars().next() {
-                $($($(Some($char) => Key::$muda,)?)?)*
+                $($($(Some($char) => Key::Named(NamedKey::$muda),)?)?)*
                 _ => Key::Character(string.to_owned()),
             }
         };
@@ -352,7 +358,7 @@ fn keys_to_accelerator(
     let mut modifiers = Modifiers::empty();
     if shortcut.modifiers.control {
         if i_slint_core::is_apple_platform() {
-            modifiers |= Modifiers::SUPER;
+            modifiers |= Modifiers::META;
         } else {
             modifiers |= Modifiers::CONTROL;
         }
@@ -367,12 +373,12 @@ fn keys_to_accelerator(
         if i_slint_core::is_apple_platform() {
             modifiers |= Modifiers::CONTROL;
         } else {
-            modifiers |= Modifiers::SUPER;
+            modifiers |= Modifiers::META;
         }
     }
     let key = key_string_to_key(&shortcut.key);
 
-    Some(KeyAccelerator::new(Some(modifiers), key))
+    Some(KeyAccelerator::new(modifiers, key))
 }
 
 fn install_event_handler_if_necessary(proxy: EventLoopProxy<SlintEvent>) {

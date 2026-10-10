@@ -71,7 +71,11 @@ impl FileWatcherImpl for notify::RecommendedWatcher {
             notify::ErrorKind::PathNotFound
             | notify::ErrorKind::WatchNotFound
             | notify::ErrorKind::Generic(_) => true,
-            notify::ErrorKind::Io(e) => e.kind() == std::io::ErrorKind::NotFound,
+            // `InvalidInput` is `inotify_rm_watch` on a watch the kernel already dropped with
+            // the deleted directory, before notify processed that event.
+            notify::ErrorKind::Io(e) => {
+                matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput)
+            }
             _ => false,
         }
     }
@@ -103,6 +107,10 @@ impl FileWatcherImpl for notify::RecommendedWatcher {
 /// This allows the file watcher to be used with the OS APIs (i.e. notify) or the LSP file watcher.
 pub struct FileWatcher<Impl: FileWatcherImpl = notify::RecommendedWatcher> {
     tx: mpsc::Sender<WorkerMessage<Impl>>,
+
+    /// Base for resolving relative watch paths, captured at startup so it stays stable if the
+    /// process later changes its working directory.
+    base: PathBuf,
 
     /// Use a worker thread for processing file events and updating watches.
     ///
@@ -167,7 +175,11 @@ impl<Impl: FileWatcherImpl> FileWatcher<Impl> {
         });
 
         match startup_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx, worker: Some(worker) }),
+            Ok(Ok(())) => Ok(Self {
+                tx,
+                worker: Some(worker),
+                base: std::env::current_dir().unwrap_or_default(),
+            }),
             Ok(Err(err)) => {
                 let _ = worker.join();
                 Err(err)
@@ -180,13 +192,16 @@ impl<Impl: FileWatcherImpl> FileWatcher<Impl> {
     }
 
     /// Replaces the watched path set with `paths`.
+    ///
+    /// Relative paths are resolved against the working directory captured at watcher startup,
+    /// so that they compare equal to the absolute paths the backend reports for events.
     pub fn update_watched_paths<I>(&mut self, paths: I) -> Result<(), Impl::Error>
     where
         I: IntoIterator<Item = PathBuf>,
     {
         let watched_files = paths
             .into_iter()
-            .map(|path| i_slint_compiler::pathutils::clean_path(&path))
+            .map(|path| i_slint_compiler::source_path::clean_path(&self.base.join(path)))
             .collect::<HashSet<_>>();
 
         let (response_tx, response_rx) = mpsc::sync_channel(1);
@@ -224,14 +239,15 @@ fn classify_event(event: notify::Event) -> Vec<(PathBuf, FileChangeKind)> {
         event
             .paths
             .into_iter()
-            .map(|path| (i_slint_compiler::pathutils::clean_path(&path), kind))
+            .map(|path| (i_slint_compiler::source_path::clean_path(&path), kind))
             .collect()
     }
 
     match event.kind {
         EventKind::Create(_) => map_event(event, FileChangeKind::Created),
         EventKind::Remove(_) => map_event(event, FileChangeKind::Deleted),
-        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+        // kqueue reports a watched file renamed away as `Any`, on its old path
+        EventKind::Modify(ModifyKind::Name(RenameMode::From | RenameMode::Any)) => {
             map_event(event, FileChangeKind::Deleted)
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
@@ -241,10 +257,10 @@ fn classify_event(event: notify::Event) -> Vec<(PathBuf, FileChangeKind)> {
             let mut paths = event.paths.into_iter();
             [
                 paths.next().map(|path| {
-                    (i_slint_compiler::pathutils::clean_path(&path), FileChangeKind::Deleted)
+                    (i_slint_compiler::source_path::clean_path(&path), FileChangeKind::Deleted)
                 }),
                 paths.next().map(|path| {
-                    (i_slint_compiler::pathutils::clean_path(&path), FileChangeKind::Created)
+                    (i_slint_compiler::source_path::clean_path(&path), FileChangeKind::Created)
                 }),
             ]
             .into_iter()
@@ -337,13 +353,23 @@ impl WorkerState {
             return Ok(());
         }
 
+        // kqueue drops the watch of a file deleted or renamed away, even when another took its
+        // place, while inotify keeps following a directory renamed away. Unwatch either way, so
+        // that reconcile watches whatever is at the path now.
+        for (path, kind) in &events {
+            if *kind == FileChangeKind::Deleted && self.registered_watches.remove(path) {
+                match watcher.unwatch(path) {
+                    Ok(()) => {}
+                    Err(err) if Impl::is_transient_watch_error(&err) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
         let previous_states = self.target_states.clone();
         let changed_paths = events
             .into_iter()
-            .filter_map(|(path, kind)| {
-                (kind == FileChangeKind::Changed && self.watched_files.contains(&path))
-                    .then_some(path)
-            })
+            .filter_map(|(path, _kind)| self.watched_files.contains(&path).then_some(path))
             .collect::<HashSet<_>>();
 
         self.reconcile(watcher, previous_states, changed_paths, on_event)
@@ -540,7 +566,7 @@ fn desired_watches_for_states<Impl: FileWatcherImpl>(
 fn probe_dir_for_path(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         let parent = path.parent()?;
-        parent.is_dir().then(|| i_slint_compiler::pathutils::clean_path(parent))
+        parent.is_dir().then(|| i_slint_compiler::source_path::clean_path(parent))
     } else {
         nearest_existing_ancestor(path)
     }
@@ -552,7 +578,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
         current = current.parent()?;
     }
 
-    Some(i_slint_compiler::pathutils::clean_path(current))
+    Some(i_slint_compiler::source_path::clean_path(current))
 }
 
 #[cfg(test)]
@@ -560,28 +586,18 @@ mod tests {
     use super::*;
 
     use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     const WATCHER_SETTLE_DELAY: Duration = Duration::from_millis(50);
-    const EVENT_TIMEOUT: Duration = Duration::from_millis(100);
+    const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
     const QUIET_TIMEOUT: Duration = Duration::from_millis(50);
 
-    fn new_test_root() -> PathBuf {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-        let unique_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir()
-            .join(format!("slint-file-watcher-{timestamp}-{unique_id}-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        root
-    }
-
     struct TestContext {
-        root: PathBuf,
+        /// Declared before `root` so that it is dropped first: the watcher must not follow the
+        /// vanished paths up to the shared temp directory.
         watcher: FileWatcher,
+        root: tempfile::TempDir,
         events: Receiver<WatchEvent>,
         errors: Receiver<notify::Error>,
     }
@@ -592,7 +608,7 @@ mod tests {
         }
 
         fn new_with_passthrough(pass_through_unwatched_events: bool) -> Self {
-            let root = new_test_root();
+            let root = tempfile::Builder::new().prefix("slint-file-watcher-").tempdir().unwrap();
             let (event_tx, events) = mpsc::channel();
             let (error_tx, errors) = mpsc::channel();
 
@@ -613,11 +629,11 @@ mod tests {
             )
             .unwrap();
 
-            Self { root, watcher, events, errors }
+            Self { watcher, root, events, errors }
         }
 
         fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
-            self.root.join(relative)
+            self.root.path().join(relative)
         }
 
         fn create_dir_all(&self, relative: impl AsRef<Path>) -> PathBuf {
@@ -719,12 +735,6 @@ mod tests {
             }
 
             self.assert_no_errors();
-        }
-    }
-
-    impl Drop for TestContext {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
@@ -856,6 +866,59 @@ mod tests {
         ctx.rename("ui/temp.slint", "ui/main.slint");
 
         ctx.expect_event(&watched, FileChangeKind::Created);
+    }
+
+    #[test]
+    fn reports_changed_when_watched_file_is_replaced_by_rename() {
+        let mut ctx = TestContext::new();
+        let watched = ctx.write("ui/main.slint", "first");
+
+        ctx.watch(&["ui/main.slint"]);
+        for contents in ["second", "third"] {
+            ctx.write("ui/main.slint.tmp", contents);
+            ctx.rename("ui/main.slint.tmp", "ui/main.slint");
+            ctx.expect_event(&watched, FileChangeKind::Changed);
+            ctx.settle();
+            ctx.drain_events();
+        }
+
+        ctx.write("ui/main.slint", "in place");
+        ctx.expect_event(&watched, FileChangeKind::Changed);
+    }
+
+    #[test]
+    fn keeps_watching_after_watched_file_is_renamed_away_and_rewritten() {
+        let mut ctx = TestContext::new();
+        let watched = ctx.write("ui/main.slint", "first");
+
+        ctx.watch(&["ui/main.slint"]);
+        ctx.rename("ui/main.slint", "ui/main.slint~");
+        ctx.write("ui/main.slint", "second");
+        ctx.settle();
+        ctx.drain_events();
+
+        ctx.write("ui/main.slint", "in place");
+        ctx.expect_event(&watched, FileChangeKind::Changed);
+    }
+
+    // ReadDirectoryChangesW doesn't report the rename of the watched directory itself
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn stops_following_directory_renamed_away() {
+        let mut ctx = TestContext::new();
+        let watched = ctx.write("ui/main.slint", "first");
+
+        ctx.watch(&["ui/main.slint"]);
+        ctx.rename("ui", "ui-old");
+        ctx.expect_event(&watched, FileChangeKind::Deleted);
+
+        ctx.write("ui/main.slint", "second");
+        ctx.expect_event(&watched, FileChangeKind::Created);
+        ctx.settle();
+        ctx.drain_events();
+
+        ctx.write("ui-old/main.slint", "moved");
+        ctx.expect_quiet();
     }
 
     #[test]

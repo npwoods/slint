@@ -84,7 +84,7 @@ fn make_c_function_binding(
         }
     }
 
-    unsafe impl<T> BindingCallable<T> for CFunctionBinding<T> {
+    impl<T> BindingCallable<T> for CFunctionBinding<T> {
         fn evaluate(self: Pin<&Self>, value: &mut T) -> BindingResult {
             (self.binding_function)(self.user_data, value as *mut T);
             BindingResult::KeepBinding
@@ -190,6 +190,13 @@ pub extern "C" fn slint_property_mark_dirty(handle: &PropertyHandleOpaque) {
     handle.0.mark_dirty()
 }
 
+/// Returns true if a binding is currently being evaluated, so that property
+/// accesses register dependencies.
+#[unsafe(no_mangle)]
+pub extern "C" fn slint_property_is_currently_tracking() -> bool {
+    crate::properties::is_currently_tracking()
+}
+
 /// Marks the property as dirty and notifies dependencies.
 #[unsafe(no_mangle)]
 pub extern "C" fn slint_property_set_constant(handle: &PropertyHandleOpaque) {
@@ -212,7 +219,7 @@ fn c_set_animated_value<T: InterpolatedPropertyValue + Clone>(
 ) {
     let d = RefCell::new(properties_animations::PropertyValueAnimationData::new(
         from,
-        to,
+        Some(to),
         animation_data.clone(),
     ));
     // Safety: The BindingCallable is for type T
@@ -305,7 +312,7 @@ unsafe fn c_set_animated_binding<T: InterpolatedPropertyValue + Clone>(
         };
         let animation_data = RefCell::new(properties_animations::PropertyValueAnimationData::new(
             T::default(),
-            T::default(),
+            None,
             PropertyAnimation::default(),
         ));
 
@@ -326,10 +333,13 @@ unsafe fn c_set_animated_binding<T: InterpolatedPropertyValue + Clone>(
                 let start_instant = if start_instant_ref.is_null() {
                     None
                 } else {
-                    Some(crate::animations::Instant(start_instant))
+                    // This must be aligned with the section for llr::Animation::Transition in cpp.rs
+                    Some(crate::animations::Instant::from_nanos(start_instant))
                 };
                 (anim, start_instant)
             },
+            dirty_time: Cell::new(crate::animations::current_tick()),
+            carried_velocity: Cell::new(0.0),
         });
         handle.0.mark_dirty();
     }
@@ -432,8 +442,11 @@ pub unsafe extern "C" fn slint_property_set_state_binding(
     }
 
     let c_state_binding = CStateBinding { binding, user_data, drop_user_data };
-    let bind_callable =
-        StateInfoBinding { dirty_time: Cell::new(None), binding: move || c_state_binding.call() };
+    let bind_callable = StateInfoBinding {
+        dirty_time: Cell::new(None),
+        binding: move || c_state_binding.call(),
+        _phantom: core::marker::PhantomData::<fn() -> StateInfo>,
+    };
     unsafe { handle.0.set_binding(bind_callable) }
 }
 
@@ -566,6 +579,8 @@ pub unsafe extern "C" fn slint_change_tracker_init(
         mark_dirty: ChangeTracker::mark_dirty,
         intercept_set: |_, _| false,
         intercept_set_binding: |_, _| false,
+        velocity: |_| None,
+        common_property: |_| None,
     };
 
     ct.clear();
@@ -577,7 +592,6 @@ pub unsafe extern "C" fn slint_change_tracker_init(
         dep_nodes: Default::default(),
         vtable: VT,
         dirty: Cell::new(false),
-        is_two_way_binding: false,
         pinned: PhantomPinned,
         binding: inner,
         #[cfg(slint_debug_property)]

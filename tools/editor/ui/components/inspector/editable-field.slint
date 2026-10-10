@@ -1,0 +1,13 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+import { Style } from "../../style.slint";
+
+import { InspectorCodeField } from "code-field.slint";
+
+export component InspectorEditableField inherits InspectorCodeField {
+    in property <bool> wide: false;
+
+    style: Style.editable-field;
+    width: wide ? Style.inspector-layout.content-width : Style.inspector-layout.column-width;
+}

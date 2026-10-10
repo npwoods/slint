@@ -4,7 +4,7 @@
 use i_slint_compiler::layout;
 use i_slint_core::lengths::{LogicalPoint, LogicalRect};
 
-use crate::common;
+use crate::editor_preview;
 use crate::preview::ui;
 
 use slint_interpreter::ComponentInstance;
@@ -31,7 +31,7 @@ pub trait ElementRcNodeExt {
     ) -> Option<HighlightedRect>;
 }
 
-impl ElementRcNodeExt for common::ElementRcNode {
+impl ElementRcNodeExt for editor_preview::ElementRcNode {
     fn layout_kind(&self) -> crate::preview::ui::LayoutKind {
         self.with_element_debug(|di| match &di.layout {
             Some(layout::Layout::GridLayout(_)) => ui::LayoutKind::Grid,
@@ -48,7 +48,8 @@ impl ElementRcNodeExt for common::ElementRcNode {
     }
 
     fn geometries(&self, component_instance: &ComponentInstance) -> Vec<HighlightedRect> {
-        component_instance.element_positions(self.as_element())
+        let (path, offset) = self.path_and_offset();
+        component_instance.component_positions(&path, offset.into())
     }
 
     fn geometry_at(

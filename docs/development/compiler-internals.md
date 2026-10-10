@@ -94,13 +94,13 @@ The interpreter (`internal/interpreter/`) compiles `.slint` at runtime and uses 
 | `Element` | `compiler/object_tree.rs` | An element within a component |
 | `Expression` | `compiler/expression_tree.rs` | Compiled expressions |
 | `Type` | `compiler/langtype.rs` | Type system representation |
-| `CompilationUnit` | `compiler/llr/mod.rs` | LLR output ready for code generation |
+| `CompilationUnit` | `compiler/llr/item_tree.rs` | LLR output ready for code generation |
 
 ## Common Modification Patterns
 
 ### Adding a New Built-in Element
 
-1. **Define the element** in `internal/compiler/builtins.slint`
+1. **Declare the element** in `internal/compiler/builtin_elements.rs`
 2. **Add runtime item** in `internal/core/items/` (new file or existing)
 3. **Register the item** in `internal/core/items.rs` (add to `ItemVTable`)
 4. **Update type registry** in `internal/compiler/typeregister.rs`
@@ -110,9 +110,9 @@ The interpreter (`internal/interpreter/`) compiles `.slint` at runtime and uses 
 ### Adding a New Compiler Pass
 
 1. **Create pass file** in `internal/compiler/passes/your_pass.rs`
-2. **Add to mod.rs** in `internal/compiler/passes/mod.rs`
-3. **Register in pipeline** in `internal/compiler/passes.rs` (choose appropriate phase)
-4. **Add tests** - either unit tests in the pass file or `.slint` test cases
+2. **Declare the module and register it in the pipeline**, both in
+   `internal/compiler/passes.rs` (choose appropriate phase)
+3. **Add tests** - either unit tests in the pass file or `.slint` test cases
 
 ### Adding a New Property Type
 
@@ -138,3 +138,13 @@ cargo run -p slint-compiler -- -f cpp path/to/file.slint > path/to/file.slint.cp
 ```
 
 This is invaluable when debugging code generation issues — you can see exactly what the generators emit without running a full build of an application.
+
+### Binding Loop Chains
+
+A binding loop diagnostic shows each property the compiler invents, such as `layoutinfo-h` and `layout-cache-v`, as only its element,
+because the source can never name them.
+Set `SLINT_FULL_BINDING_LOOP_CHAIN` to keep them, which is what you want when the loop is the compiler's own doing:
+
+```sh
+SLINT_FULL_BINDING_LOOP_CHAIN=1 cargo run -p slint-compiler -- -f rust -o /dev/null path/to/file.slint
+```

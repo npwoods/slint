@@ -3,7 +3,11 @@
 
 import { CupertinoFontSettings, CupertinoPalette } from "styling.slint";
 
+import { GroupBoxInterface } from "../common/std-widget-interfaces.slint";
+
 export component GroupBox {
+    implement GroupBoxInterface <=> self;
+
     in property <string> title;
     in property <bool> enabled: true;
     in property <length> content-padding: 8px;
@@ -23,6 +27,7 @@ export component GroupBox {
             font-size: CupertinoFontSettings.body-strong.font-size;
             font-weight: CupertinoFontSettings.body-strong.font-weight;
             text: root.title;
+            accessible-role: none;
         }
 
         Rectangle {

@@ -100,8 +100,8 @@ fn node_to_ksni(
 
 pub struct PlatformTray {
     // SNI has no hide operation: the only way to make the icon disappear is to
-    // drop the registered handle (which deregisters from the watcher), and the
-    // only way to bring it back is to spawn a new `KsniTray`. The state needed
+    // shut down the registered service (which deregisters from the watcher), and
+    // the only way to bring it back is to spawn a new `KsniTray`. The state needed
     // to rebuild a fresh tray therefore lives on `PlatformTray`, not inside
     // `KsniTray` itself.
     icon: core::cell::RefCell<::ksni::Icon>,
@@ -124,14 +124,13 @@ impl PlatformTray {
         let (event_tx, event_rx) = async_channel::unbounded();
         let tooltip: std::string::String = params.tooltip.into();
         let title: std::string::String = params.title.into();
+        let menu = params
+            .menu
+            .map(|(menu, entries_out)| build_ksni_menu(menu, entries_out))
+            .unwrap_or_default();
 
-        let handle = spawn_tray(
-            icon.clone(),
-            tooltip.clone(),
-            title.clone(),
-            std::vec::Vec::new(),
-            &event_tx,
-        )?;
+        let handle =
+            spawn_tray(icon.clone(), tooltip.clone(), title.clone(), menu.clone(), &event_tx)?;
 
         let dispatcher = context
             .spawn_local(dispatch_loop(event_rx, self_weak))
@@ -142,7 +141,7 @@ impl PlatformTray {
             tooltip: core::cell::RefCell::new(tooltip),
             title: core::cell::RefCell::new(title),
             event_tx,
-            menu: core::cell::RefCell::new(std::vec::Vec::new()),
+            menu: core::cell::RefCell::new(menu),
             handle: core::cell::RefCell::new(Some(handle)),
             _dispatcher: dispatcher,
         })
@@ -153,7 +152,6 @@ impl PlatformTray {
         menu: vtable::VRef<'_, MenuVTable>,
         entries_out: &mut std::vec::Vec<MenuEntry>,
     ) {
-        entries_out.clear();
         let new_menu = build_ksni_menu(menu, entries_out);
         // Update the cache unconditionally so the next respawn picks up the
         // current menu even if we're hidden right now.
@@ -184,9 +182,12 @@ impl PlatformTray {
                 }
             }
             (false, true) => {
-                // Drop the handle: the ksni service loop tears down and the
+                // The service loop runs detached and outlives dropped handles;
+                // only an explicit shutdown tears it down so the
                 // StatusNotifierWatcher removes the item.
-                slot.take();
+                if let Some(handle) = slot.take() {
+                    handle.shutdown();
+                }
             }
             _ => {}
         }
@@ -226,12 +227,20 @@ impl PlatformTray {
     }
 }
 
+impl Drop for PlatformTray {
+    fn drop(&mut self) {
+        // The service loop would otherwise keep the icon registered until the
+        // process exits.
+        self.set_visible(false);
+    }
+}
+
 fn image_to_argb_icon(image: &Image) -> Result<::ksni::Icon, Error> {
     let pixel_buffer = image.to_rgba8().ok_or(Error::Rgba8)?;
     let mut data = pixel_buffer.as_bytes().to_vec();
     let width = pixel_buffer.width() as i32;
     let height = pixel_buffer.height() as i32;
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.rotate_right(1) // rgba to argb
     }
     Ok(::ksni::Icon { width, height, data })
@@ -246,9 +255,7 @@ fn spawn_tray(
 ) -> Result<::ksni::blocking::Handle<KsniTray>, Error> {
     let tray = KsniTray { icon, tooltip, title, menu, event_tx: event_tx.clone() };
     // Blocks briefly on D-Bus name claim / service setup, then spawns the
-    // service loop on its own background thread. Returning the handle
-    // synchronously eliminates the pending-menu race an async spawn would
-    // otherwise create.
+    // service loop on its own background thread.
     tray.spawn().map_err(|e| {
         Error::PlatformError(crate::platform::PlatformError::Other(std::format!(
             "Failed to spawn ksni tray: {e}"

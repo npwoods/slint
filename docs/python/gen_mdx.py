@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 import tomllib
 import urllib.request
 import zlib
@@ -101,14 +102,21 @@ def parse_inventory(raw: bytes, docs_url: str) -> dict[str, str]:
     return links
 
 
-def load_stdlib_inventory(docs_url: str) -> dict[str, str]:
+def load_stdlib_inventory(docs_url: str, attempts: int = 4) -> dict[str, str]:
     """Fetch CPython's Sphinx inventory and parse it (see parse_inventory). A
-    fetch failure aborts the build rather than silently dropping links."""
+    fetch failure aborts the build rather than silently dropping links, after
+    retrying, since docs.python.org sometimes answers 503."""
     inventory_url = docs_url + "objects.inv"
-    try:
-        raw = urllib.request.urlopen(inventory_url, timeout=30).read()  # noqa: S310
-    except OSError as exc:
-        raise SystemExit(f"error: could not fetch {inventory_url}: {exc}") from exc
+    for attempt in range(1, attempts + 1):
+        try:
+            raw = urllib.request.urlopen(inventory_url, timeout=30).read()
+            break
+        except OSError as exc:
+            if attempt == attempts:
+                raise SystemExit(
+                    f"error: could not fetch {inventory_url}: {exc}"
+                ) from exc
+            time.sleep(10 * attempt)
     return parse_inventory(raw, docs_url)
 
 
@@ -271,7 +279,7 @@ def reexport_target(attr: griffe.Attribute) -> griffe.Object | None:
         return None
     try:
         target: griffe.Object | griffe.Alias = attr.modules_collection[canonical]
-    except Exception:
+    except KeyError:
         return None
     seen: set[str] = set()
     while isinstance(target, griffe.Alias):
@@ -280,7 +288,7 @@ def reexport_target(attr: griffe.Attribute) -> griffe.Object | None:
         seen.add(target.path)
         try:
             target = target.final_target
-        except Exception:
+        except (griffe.AliasResolutionError, griffe.CyclicAliasError):
             return None
     if not target.path.startswith(PACKAGE + "."):
         return None
@@ -299,7 +307,7 @@ def resolve(obj: griffe.Object | griffe.Alias) -> griffe.Object | None:
         return obj
     try:
         target = obj.final_target
-    except Exception:
+    except (griffe.AliasResolutionError, griffe.CyclicAliasError):
         return None
     if not target.path.startswith(PACKAGE + "."):
         return None
@@ -329,15 +337,15 @@ def class_members(
 
     Includes public members inherited from base classes that live in the
     package (e.g. `Model` inherits `row_count` from the native `PyModelBase`),
-    mirroring the fix-up the old pdoc generator performed by hand. `init_self`
-    and underscore-prefixed names are excluded."""
+    mirroring the fix-up the old pdoc generator performed by hand.
+    Underscore-prefixed names are excluded."""
     seen: set[str] = set()
     members: list[griffe.Object] = []
     for _, m in public_named_members(cls):
         seen.add(m.name)
         members.append(m)
     for name, inherited in cls.inherited_members.items():
-        if name.startswith("_") or name == "init_self" or name in seen:
+        if name.startswith("_") or name in seen:
             continue
         resolved = resolve(inherited)
         if resolved is None or is_private_doc(resolved):
@@ -417,12 +425,15 @@ def render_class(
     if is_enum(cls):
         lines += ["## Values", ""]
         for m in members:
+            # The manifest points cross-references to a member at this anchor,
+            # so every value carries the id its `<XRef>` links to.
+            value = f'<span id="{m.name}">`{m.name}`</span>'
             if m.docstring:
                 lines.append(
-                    f"- **`{m.name}`** — {docstring_to_mdx(m.docstring.value, manifest)}"
+                    f"- **{value}** — {docstring_to_mdx(m.docstring.value, manifest)}"
                 )
             else:
-                lines.append(f"- **`{m.name}`**")
+                lines.append(f"- **{value}**")
         lines.append("")
         return "\n".join(lines)
 

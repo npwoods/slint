@@ -5,12 +5,17 @@ export interface ExportedInterface {
     in-out property <float> value;
 }
 
-export component ExportedBase implements ExportedInterface {
-    value: 2.71;
+export component ExportedBase {
+    implement ExportedInterface <=> self;
+    in-out property <float> value: 2.71;
 }
 
 export interface ComboBoxInterface {
     in property <[string]> model;
     in-out property <int> current-index;
     in-out property <string> current-value;
+}
+
+export interface ExportedDerived inherits ExportedInterface {
+    in-out property <string> label;
 }

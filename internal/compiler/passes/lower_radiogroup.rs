@@ -14,7 +14,6 @@ use crate::expression_tree::{Callable, Expression, NamedReference, Unit};
 use crate::langtype::{ElementType, Type};
 use crate::object_tree::*;
 use smol_str::SmolStr;
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -29,6 +28,7 @@ pub async fn lower_radiogroup(
     let mut seen = HashSet::new();
     let mut radio_groups = Vec::new();
     doc.visit_all_used_components(|component| {
+        error_on_slot_in_inner_builtin(component, &["RadioGroup"], diag);
         recurse_elem_including_sub_components_no_borrow(component, &(), &mut |elem, _| {
             if matches!(&elem.borrow().builtin_type(), Some(b) if b.name == "RadioGroup")
                 && seen.insert(Rc::as_ptr(elem))
@@ -128,9 +128,7 @@ fn process_radiogroup(
         },
         _ => Expression::NumberLiteral(children.len() as f64, Unit::None),
     };
-    elem.borrow_mut()
-        .bindings
-        .insert(SmolStr::new_static("item-count"), RefCell::new(count_expr.into()));
+    elem.borrow_mut().set_binding(SmolStr::new_static("item-count"), count_expr.into());
 
     for (position, child) in children.iter().enumerate() {
         let item_index_expr = match &child.borrow().repeated {
@@ -149,28 +147,26 @@ fn wire_radio_button(
 ) {
     child.borrow_mut().base_type = radio_button_impl.clone();
 
-    child
-        .borrow_mut()
-        .bindings
-        .insert(SmolStr::new_static("item-index"), RefCell::new(item_index_expr.into()));
+    child.borrow_mut().set_binding(SmolStr::new_static("item-index"), item_index_expr.into());
 
-    child.borrow_mut().bindings.insert(
+    child.borrow_mut().set_binding(
         SmolStr::new_static("group-enabled"),
-        RefCell::new(
-            Expression::PropertyReference(NamedReference::new(group, "enabled".into())).into(),
-        ),
+        Expression::PropertyReference(NamedReference::new(group, "enabled".into())).into(),
     );
 
     // row / col for the parent GridLayout — stack vertically (column 0,
     // increasing rows) for vertical orientation, otherwise stack horizontally.
     let orientation_vertical = crate::typeregister::BUILTIN
-        .with(|e| e.enums.Orientation.clone())
+        .enums
+        .Orientation
+        .clone()
         .try_value_from_string("vertical")
         .unwrap();
     let is_vertical = Expression::BinaryExpression {
         lhs: Expression::PropertyReference(NamedReference::new(group, "orientation".into())).into(),
         rhs: Expression::EnumerationValue(orientation_vertical).into(),
         op: '=',
+        source_location: None,
     };
     let item_index_ref =
         || Expression::PropertyReference(NamedReference::new(child, "item-index".into()));
@@ -178,14 +174,16 @@ fn wire_radio_button(
         condition: is_vertical.clone().into(),
         true_expr: item_index_ref().into(),
         false_expr: Expression::NumberLiteral(0.0, Unit::None).into(),
+        source_location: None,
     };
     let col_expr = Expression::Condition {
         condition: is_vertical.into(),
         true_expr: Expression::NumberLiteral(0.0, Unit::None).into(),
         false_expr: item_index_ref().into(),
+        source_location: None,
     };
-    child.borrow_mut().bindings.insert(SmolStr::new_static("row"), RefCell::new(row_expr.into()));
-    child.borrow_mut().bindings.insert(SmolStr::new_static("col"), RefCell::new(col_expr.into()));
+    child.borrow_mut().set_binding(SmolStr::new_static("row"), row_expr.into());
+    child.borrow_mut().set_binding(SmolStr::new_static("col"), col_expr.into());
 
     // Bind `group-current-index` rather than `checked` directly: the latter
     // is `in-out` so users can toggle it from outside, and an imperative
@@ -194,10 +192,9 @@ fn wire_radio_button(
     // for syncing `checked`.
     let group_current_index_expr =
         Expression::PropertyReference(NamedReference::new(group, "current-index".into()));
-    child.borrow_mut().bindings.insert(
-        SmolStr::new_static("group-current-index"),
-        RefCell::new(group_current_index_expr.into()),
-    );
+    child
+        .borrow_mut()
+        .set_binding(SmolStr::new_static("group-current-index"), group_current_index_expr.into());
 
     let select_call = Expression::FunctionCall {
         function: Callable::Function(NamedReference::new(group, "select".into())),
@@ -207,18 +204,12 @@ fn wire_radio_button(
         ],
         source_location: None,
     };
-    child
-        .borrow_mut()
-        .bindings
-        .insert(SmolStr::new_static("group-select"), RefCell::new(select_call.into()));
+    child.borrow_mut().set_binding(SmolStr::new_static("group-select"), select_call.into());
 
     let focus_call = Expression::FunctionCall {
         function: Callable::Function(NamedReference::new(group, "on-focus-change".into())),
         arguments: vec![Expression::FunctionParameterReference { index: 0, ty: Type::Bool }],
         source_location: None,
     };
-    child
-        .borrow_mut()
-        .bindings
-        .insert(SmolStr::new_static("focus-change"), RefCell::new(focus_call.into()));
+    child.borrow_mut().set_binding(SmolStr::new_static("focus-change"), focus_call.into());
 }

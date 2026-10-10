@@ -3,10 +3,11 @@
 
 // cSpell: ignore BBBX Sometype structurize
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::{collections::HashMap, iter::once, rc::Rc};
 
+use super::user_settings::PreviewUserSettings;
 use i_slint_compiler::parser::TextRange;
+use i_slint_compiler::source_path::SourcePath;
 use i_slint_compiler::{expression_tree, langtype};
 
 use i_slint_core::DataTransfer;
@@ -15,11 +16,45 @@ use slint::{Model, ModelRc, SharedString, ToSharedString, VecModel};
 use slint_interpreter::{DiagnosticLevel, PlatformError};
 use smol_str::SmolStr;
 
-use crate::common::{self, ComponentInformation};
+use crate::editor_preview::{self, component_catalog::ComponentInformation};
 use crate::preview::{self, DragItem, SelectionNotification, preview_data, properties};
 
-#[cfg(target_arch = "wasm32")]
-use crate::wasm_prelude::*;
+fn fuzzy_filter_iter<Item: std::fmt::Debug>(
+    input: &mut impl Iterator<Item = Item>,
+    transformer: impl Fn(&Item) -> String,
+    needle: &str,
+) -> Vec<Item> {
+    use nucleo_matcher::{Config, Matcher, pattern};
+
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = pattern::Pattern::parse(
+        needle,
+        pattern::CaseMatching::Ignore,
+        pattern::Normalization::Smart,
+    );
+
+    let mut all_matches = input
+        .filter_map(|item| {
+            let terms = [transformer(&item)];
+            pattern.match_list(terms.iter(), &mut matcher).pop().map(|(_, value)| (value, item))
+        })
+        .collect::<Vec<_>>();
+
+    all_matches.sort_by_key(|matched_item| std::cmp::Reverse(matched_item.0));
+
+    let cut_off = {
+        let lowest_value = all_matches.last().map(|(value, _)| *value).unwrap_or_default();
+        let highest_value = all_matches.first().map(|(value, _)| *value).unwrap_or_default();
+
+        if all_matches.len() < 10 {
+            lowest_value
+        } else {
+            highest_value - (highest_value - lowest_value) / 2
+        }
+    };
+
+    all_matches.drain(..).take_while(|(value, _)| *value >= cut_off).map(|(_, item)| item).collect()
+}
 
 mod brushes;
 pub mod log_messages;
@@ -93,8 +128,66 @@ impl AppWindow {
 
 pub type PropertyDeclarations = HashMap<SmolStr, PropertyDeclaration>;
 
+pub fn preview_user_settings_from_values(
+    always_on_top: bool,
+    show_library: bool,
+    show_properties: bool,
+    show_outline: bool,
+    show_simulation_data: bool,
+    show_console: bool,
+) -> PreviewUserSettings {
+    PreviewUserSettings {
+        version: PreviewUserSettings::CURRENT_VERSION,
+        always_on_top,
+        show_library,
+        show_properties,
+        show_outline,
+        show_simulation_data,
+        show_console,
+    }
+}
+
+pub fn apply_preview_user_settings(app_window: &AppWindow, settings: &PreviewUserSettings) {
+    // The `changed` handlers triggered by these setters run deferred and report
+    // back through `preview::update_user_settings_from_ui`, which dedupes them
+    // against the last synced settings, so no echo guard is needed here.
+    let api = app_window.api();
+    api.set_always_on_top(settings.always_on_top);
+
+    match app_window {
+        AppWindow::Preview(ui) => {
+            ui.set_library_widget(settings.show_library);
+            ui.set_properties_widget(settings.show_properties);
+            ui.set_outline_widget(settings.show_outline);
+            ui.set_data_widget(settings.show_simulation_data);
+            ui.set_console_panel_expanded(settings.show_console);
+        }
+        AppWindow::Editor(_) => {}
+    }
+}
+
+pub fn setup_preview_user_settings(api: &Api<'_>) {
+    api.on_preview_user_settings_changed(
+        |always_on_top,
+         show_library,
+         show_properties,
+         show_outline,
+         show_simulation_data,
+         show_console| {
+            preview::update_user_settings_from_ui(preview_user_settings_from_values(
+                always_on_top,
+                show_library,
+                show_properties,
+                show_outline,
+                show_simulation_data,
+                show_console,
+            ));
+        },
+    );
+}
+
 pub fn create_ui(
-    to_lsp: &Rc<dyn common::PreviewToLsp>,
+    to_lsp: &Rc<dyn editor_preview::PreviewToLsp>,
     style: &str,
     use_editor_ui: bool,
 ) -> Result<AppWindow, PlatformError> {
@@ -146,7 +239,9 @@ pub fn create_ui(
     api.on_show_document(move |file, line, column| {
         use lsp_types::{Position, Range};
         let pos = Position::new((line as u32).saturating_sub(1), (column as u32).saturating_sub(1));
-        lsp.ask_editor_to_show_document(&file, Range::new(pos, pos), false).ok();
+        if let Some(url) = SourcePath::new(file.as_str()).to_url() {
+            lsp.ask_editor_to_show_document(url, Range::new(pos, pos), false).ok();
+        }
     });
     api.on_show_document_offset_range(super::show_document_offset_range);
     api.on_show_preview_for(super::show_preview_for);
@@ -161,7 +256,7 @@ pub fn create_ui(
     });
     api.on_select_element(|path, offset, x, y| {
         super::element_selection::select_element_at_source_code_position(
-            PathBuf::from(path.to_string()),
+            SourcePath::new(path.as_str()),
             preview::TextSize::from(offset as u32),
             Some(i_slint_core::lengths::LogicalPoint::new(x, y)),
             SelectionNotification::Now,
@@ -232,6 +327,8 @@ pub fn create_ui(
     recent_colors::setup(&api, api_weak);
     super::outline::setup(&api);
     super::undo_redo::setup(&api);
+    setup_preview_user_settings(&api);
+    apply_preview_user_settings(&app_window, &PreviewUserSettings::default());
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "preview-remote"))]
     super::remote::setup(&app_window, to_lsp);
@@ -255,8 +352,7 @@ fn extract_definition_location(ci: &ComponentInformation) -> (SharedString, Shar
         return (Default::default(), Default::default());
     };
 
-    let path = url.to_file_path().unwrap_or_default();
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_name = SourcePath::from_url(url).file_name().unwrap_or_default().to_string();
 
     (url.to_string().into(), file_name.into())
 }
@@ -269,9 +365,9 @@ pub fn set_diagnostics(api: &Api<'_>, diagnostics: &[slint_interpreter::Diagnost
     let summary = diagnostics
         .iter()
         .inspect(|d| {
-            let location = d.source_file().map(|p| {
+            let location = d.source_path().map(|p| {
                 let (line, column) = d.line_column();
-                (p.to_string_lossy().to_string().into(), line, column)
+                (p.into(), line, column)
             });
 
             let level = match d.level() {
@@ -301,14 +397,13 @@ pub fn set_diagnostics(api: &Api<'_>, diagnostics: &[slint_interpreter::Diagnost
 
 pub fn ui_set_known_components(
     api: &Api<'_>,
-    known_components: &[crate::common::ComponentInformation],
+    known_components: &[crate::editor_preview::component_catalog::ComponentInformation],
     current_component_index: usize,
 ) {
     let mut builtins_map: HashMap<String, Vec<ComponentItem>> = Default::default();
     let mut std_widgets_map: HashMap<String, Vec<ComponentItem>> = Default::default();
-    let mut path_map: HashMap<PathBuf, (SharedString, Vec<ComponentItem>)> = Default::default();
+    let mut path_map: HashMap<String, (SharedString, Vec<ComponentItem>)> = Default::default();
     let mut library_map: HashMap<String, Vec<ComponentItem>> = Default::default();
-    let mut longest_path_prefix = PathBuf::new();
 
     for (idx, ci) in known_components.iter().enumerate() {
         if ci.is_global {
@@ -329,20 +424,7 @@ pub fn ui_set_known_components(
             if let Some(library) = position.url().path().strip_prefix("/@") {
                 library_map.entry(format!("@{library}")).or_default().push(item);
             } else {
-                let path = i_slint_compiler::pathutils::clean_path(
-                    &(position.url().to_file_path().unwrap_or_default()),
-                );
-                if path != PathBuf::new() {
-                    if longest_path_prefix == PathBuf::new() {
-                        longest_path_prefix = path.clone();
-                    } else {
-                        longest_path_prefix =
-                            std::iter::zip(longest_path_prefix.components(), path.components())
-                                .take_while(|(l, p)| l == p)
-                                .map(|(l, _)| l)
-                                .collect();
-                    }
-                }
+                let path = SourcePath::from_url(position.url()).to_string();
                 path_map.entry(path).or_insert((url, Vec::new())).1.push(item);
             }
         } else if ci.is_builtin {
@@ -380,20 +462,19 @@ pub fn ui_set_known_components(
     let std_widgets_components = sort_subset(std_widgets_map);
     let library_components = sort_subset(library_map);
 
+    let common_directory =
+        editor_preview::util::common_directory(path_map.keys().map(String::as_str));
     let mut file_components = path_map
         .drain()
         .map(|(p, (file_url, mut v))| {
             v.sort_by_key(|i| i.name.clone());
             let model = Rc::new(make_component_model(v));
-            let name = if p == longest_path_prefix {
-                p.file_name().unwrap_or_default().to_string_lossy().to_string()
-            } else {
-                p.strip_prefix(&longest_path_prefix).unwrap_or(&p).to_string_lossy().to_string()
-            };
+            let name = p.strip_prefix(common_directory.as_str()).unwrap_or(&p);
             ComponentListItem { category: name.into(), file_url, components: model.into() }
         })
         .collect::<Vec<_>>();
-    file_components.sort_by_key(|k| PathBuf::from(k.category.to_string()));
+    file_components
+        .sort_by(|a, b| a.category.split(['/', '\\']).cmp(b.category.split(['/', '\\'])));
 
     let mut all_components = Vec::with_capacity(
         builtin_components.len() + library_components.len() + file_components.len(),
@@ -468,7 +549,7 @@ fn string_to_code(
     }
 }
 
-fn unit_model(units: &[expression_tree::Unit]) -> ModelRc<SharedString> {
+fn unit_model(units: &[expression_tree::WrittenUnit]) -> ModelRc<SharedString> {
     Rc::new(VecModel::from(
         units.iter().map(|u| u.to_string().into()).collect::<Vec<SharedString>>(),
     ))
@@ -620,7 +701,7 @@ fn map_value_and_type(
             ..Default::default()
         });
     }
-    use i_slint_compiler::expression_tree::Unit;
+    use i_slint_compiler::expression_tree::WrittenUnit;
     use langtype::Type;
 
     match ty {
@@ -651,11 +732,11 @@ fn map_value_and_type(
         Type::Duration => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Ms),
+                display_string: slint::format!("{}{}", get_value::<f32>(value), WrittenUnit::Ms),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::S, Unit::Ms]),
+                visual_items: unit_model(&[WrittenUnit::S, WrittenUnit::Ms]),
                 value_int: 1,
                 code: get_code(value),
                 default_selection: 1,
@@ -666,18 +747,18 @@ fn map_value_and_type(
         Type::PhysicalLength => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Phx),
+                display_string: slint::format!("{}{}", get_value::<f32>(value), WrittenUnit::Phx),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
                 visual_items: unit_model(&[
-                    Unit::Px,
-                    Unit::Cm,
-                    Unit::Mm,
-                    Unit::In,
-                    Unit::Pt,
-                    Unit::Phx,
-                    Unit::Rem,
+                    WrittenUnit::Px,
+                    WrittenUnit::Cm,
+                    WrittenUnit::Mm,
+                    WrittenUnit::In,
+                    WrittenUnit::Pt,
+                    WrittenUnit::Phx,
+                    WrittenUnit::Rem,
                 ]),
                 value_int: 5,
                 code: get_code(value),
@@ -689,18 +770,18 @@ fn map_value_and_type(
         Type::LogicalLength => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Px),
+                display_string: slint::format!("{}{}", get_value::<f32>(value), WrittenUnit::Px),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
                 visual_items: unit_model(&[
-                    Unit::Px,
-                    Unit::Cm,
-                    Unit::Mm,
-                    Unit::In,
-                    Unit::Pt,
-                    Unit::Phx,
-                    Unit::Rem,
+                    WrittenUnit::Px,
+                    WrittenUnit::Cm,
+                    WrittenUnit::Mm,
+                    WrittenUnit::In,
+                    WrittenUnit::Pt,
+                    WrittenUnit::Phx,
+                    WrittenUnit::Rem,
                 ]),
                 value_int: 0,
                 code: get_code(value),
@@ -712,18 +793,18 @@ fn map_value_and_type(
         Type::Rem => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Rem),
+                display_string: slint::format!("{}{}", get_value::<f32>(value), WrittenUnit::Rem),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
                 visual_items: unit_model(&[
-                    Unit::Px,
-                    Unit::Cm,
-                    Unit::Mm,
-                    Unit::In,
-                    Unit::Pt,
-                    Unit::Phx,
-                    Unit::Rem,
+                    WrittenUnit::Px,
+                    WrittenUnit::Cm,
+                    WrittenUnit::Mm,
+                    WrittenUnit::In,
+                    WrittenUnit::Pt,
+                    WrittenUnit::Phx,
+                    WrittenUnit::Rem,
                 ]),
                 value_int: 6,
                 code: get_code(value),
@@ -735,11 +816,16 @@ fn map_value_and_type(
         Type::Angle => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Deg),
+                display_string: slint::format!("{}{}", get_value::<f32>(value), WrittenUnit::Deg),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Deg, Unit::Grad, Unit::Turn, Unit::Rad]),
+                visual_items: unit_model(&[
+                    WrittenUnit::Deg,
+                    WrittenUnit::Grad,
+                    WrittenUnit::Turn,
+                    WrittenUnit::Rad,
+                ]),
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
@@ -750,11 +836,15 @@ fn map_value_and_type(
         Type::Percent => {
             mapping.headers.push(mapping.name_prefix.clone());
             mapping.current_values.push(PropertyValue {
-                display_string: slint::format!("{}{}", get_value::<f32>(value), Unit::Percent),
+                display_string: slint::format!(
+                    "{}{}",
+                    get_value::<f32>(value),
+                    WrittenUnit::Percent
+                ),
                 kind: PropertyValueKind::Float,
                 value_kind: PropertyValueKind::Float,
                 value_float: get_value::<f32>(value),
-                visual_items: unit_model(&[Unit::Percent]),
+                visual_items: unit_model(&[WrittenUnit::Percent]),
                 value_int: 0,
                 code: get_code(value),
                 default_selection: 0,
@@ -1461,7 +1551,7 @@ fn update_properties(
 pub fn ui_set_properties(
     api: &Api<'_>,
     window: &slint::Window,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     properties: Option<properties::QueryPropertyResponse>,
 ) -> PropertyDeclarations {
     let win = i_slint_core::window::WindowInner::from_pub(window).window_adapter();
@@ -1562,6 +1652,22 @@ mod tests {
         assert_eq!(t.value.code.as_str(), "DDD");
 
         assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn preview_user_settings_from_values_maps_all_toggles() {
+        assert_eq!(
+            super::preview_user_settings_from_values(true, false, true, false, true, false),
+            super::PreviewUserSettings {
+                version: super::PreviewUserSettings::CURRENT_VERSION,
+                always_on_top: true,
+                show_library: false,
+                show_properties: true,
+                show_outline: false,
+                show_simulation_data: true,
+                show_console: false,
+            }
+        );
     }
 
     fn generate_preview_data(

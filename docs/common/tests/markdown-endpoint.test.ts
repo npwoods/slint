@@ -10,7 +10,9 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+    markdownHref,
     markdownStaticPaths,
+    renderLlmsTxt,
     renderMarkdownResponse,
     type MarkdownDocEntry,
 } from "../src/utils/markdown-endpoint.ts";
@@ -37,10 +39,31 @@ test("root index (empty id) maps to the index.md slug", () => {
     ]);
     assert.deepEqual(
         paths.map((p) => p.params.slug),
-        ["index", "guide/intro"],
+        ["index.md", "guide/intro.md"],
     );
     // The entry travels through as a prop for the GET handler.
     assert.equal(paths[1].props.entry.id, "guide/intro");
+});
+
+test("doc source extensions are stripped from route slugs", () => {
+    const mdEntry = entry({ id: "guide/backend_linuxkms.md" });
+    const paths = markdownStaticPaths([
+        mdEntry,
+        entry({ id: "guide/intro.mdx" }),
+        entry({ id: "guide/v1.2/intro" }),
+        entry({ id: "guide/file.name.markdown" }),
+    ]);
+
+    assert.deepEqual(
+        paths.map((p) => p.params.slug),
+        [
+            "guide/backend_linuxkms.md",
+            "guide/intro.md",
+            "guide/v1.2/intro.md",
+            "guide/file.name.md",
+        ],
+    );
+    assert.equal(paths[0].props.entry, mdEntry);
 });
 
 test("renders YAML frontmatter and serves text/markdown", async () => {
@@ -89,7 +112,7 @@ test("with a linkMap, <Link> resolves to a .md sibling under the base path", asy
             basePath: "/docs/",
             linkMap: {
                 Expressions: {
-                    href: "guide/language/coding/expressions-and-statements/#anchor",
+                    href: "reference/language/expressions/#anchor",
                 },
             },
         },
@@ -97,7 +120,7 @@ test("with a linkMap, <Link> resolves to a .md sibling under the base path", asy
     const text = await res.text();
     assert.match(
         text,
-        /\[Expr\]\(\/docs\/guide\/language\/coding\/expressions-and-statements\.md#anchor\)/,
+        /\[Expr\]\(\/docs\/reference\/language\/expressions\.md#anchor\)/,
     );
 });
 
@@ -239,4 +262,133 @@ test("angle-bracket types in a signature are decoded, not left as entities", asy
         /```cpp\nstd::optional< SharedPixelBuffer<Rgba8Pixel> > take_snapshot\(\)\n```/,
     );
     assert.doesNotMatch(text, /&#x|&lt;|&gt;/);
+});
+
+test("markdownHref matches the .md sibling's route, with or without a trailing slash", () => {
+    assert.equal(markdownHref("", "/docs/"), "/docs/index.md");
+    assert.equal(
+        markdownHref("guide/intro.mdx", "/docs"),
+        "/docs/guide/intro.md",
+    );
+    assert.equal(markdownHref("guide/intro", "/"), "/guide/intro.md");
+});
+
+test("llms.txt lists top-level pages first, and skips a description that repeats the title", async () => {
+    const response = renderLlmsTxt(
+        [
+            entry({
+                id: "reference/elements/text",
+                data: { title: "Text", description: "Text" },
+            }),
+            entry({
+                id: "index",
+                data: { title: "Overview", description: "Start here." },
+            }),
+            entry({
+                id: "language-integrations/rust",
+                data: { title: "Rust" },
+            }),
+        ],
+        {
+            title: "Slint Docs",
+            summary: "The Slint docs.",
+            basePath: "/docs/",
+            site: "https://example.com/docs/",
+        },
+    );
+    assert.equal(
+        response.headers.get("Content-Type"),
+        "text/markdown; charset=utf-8",
+    );
+    assert.equal(
+        await response.text(),
+        `# Slint Docs
+
+> The Slint docs.
+
+## Overview
+
+- [Overview](https://example.com/docs/index.md): Start here.
+
+## Language integrations
+
+- [Rust](https://example.com/docs/language-integrations/rust.md)
+
+## Reference
+
+- [Text](https://example.com/docs/reference/elements/text.md)
+`,
+    );
+});
+
+test("llms.txt links are root-relative without a site", async () => {
+    const response = renderLlmsTxt(
+        [entry({ id: "guide/intro", data: { title: "Intro" } })],
+        {
+            title: "T",
+            summary: "S",
+            basePath: "/docs/",
+        },
+    );
+    assert.match(
+        await response.text(),
+        /^- \[Intro\]\(\/docs\/guide\/intro\.md\)$/m,
+    );
+});
+
+const SC_PAGE = `import SC from '@slint/common-files/src/components/SC.astro';
+import OnlyInSC from '@slint/common-files/src/components/OnlyInSC.astro';
+import NotInSC from '@slint/common-files/src/components/NotInSC.astro';
+
+## Structs
+
+<SC>
+A struct is a named structure type. \\{#sls.struct.decl}
+
+<OnlyInSC>
+A field shall not declare a default value. \\{#sls.struct.no-field-default}
+</OnlyInSC>
+</SC>
+
+<NotInSC>
+A field may declare a default value.
+</NotInSC>
+`;
+
+test("Slint SC content is omitted outside the safety manual", async () => {
+    const res = renderMarkdownResponse(entry({ body: SC_PAGE }), {
+        scSafetyManual: false,
+    });
+    assert.equal(
+        await res.text(),
+        `---
+---
+
+## Structs
+
+A struct is a named structure type.
+
+
+A field may declare a default value.
+`,
+    );
+});
+
+test("the safety manual shows Slint SC content and identifiers", async () => {
+    const res = renderMarkdownResponse(entry({ body: SC_PAGE }), {
+        scSafetyManual: true,
+    });
+    assert.equal(
+        await res.text(),
+        `---
+---
+
+## Structs
+
+A struct is a named structure type. [sls.struct.decl]
+
+A field shall not declare a default value. [sls.struct.no-field-default]
+
+`,
+    );
 });

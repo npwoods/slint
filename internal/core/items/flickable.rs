@@ -11,12 +11,28 @@ use super::{
     VoidArg,
 };
 use crate::animations::Instant;
-use crate::animations::physics_simulation::ConstantDecelerationParameters;
-use crate::input::InternalKeyEvent;
+use crate::animations::simulations::PositionSimulation;
+use crate::animations::simulations::bounce::BounceFlick;
+use crate::animations::simulations::rubber_band;
+use crate::input::InputEventFilterResult::ForwardEvent;
 use crate::input::{
     FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, MouseEvent, TouchPhase,
 };
+use crate::input::{InternalKeyEvent, TouchHistory};
 use crate::item_rendering::CachedRenderingData;
+use crate::item_tree::ItemWeak;
+#[cfg(not(any(
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "none",
+    target_os = "macos"
+)))]
+use crate::items::flickable::velocity_tracker::GeneralVelocityTracker;
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "none"))]
+use crate::items::flickable::velocity_tracker::IOsVelocityTracker;
+#[cfg(target_os = "macos")]
+use crate::items::flickable::velocity_tracker::MacOsVelocityTracker;
+use crate::items::flickable::velocity_tracker::{Velocity, VelocityTracker as _};
 use crate::layout::{LayoutInfo, Orientation};
 use crate::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
@@ -27,7 +43,7 @@ use crate::rtti::*;
 use crate::window::WindowAdapter;
 use crate::{Callback, Coord, Property};
 use alloc::boxed::Box;
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
 use const_field_offset::FieldOffsets;
 use core::cell::RefCell;
 use core::pin::Pin;
@@ -38,33 +54,63 @@ use euclid::num::Zero;
 use i_slint_core_macros::*;
 #[allow(unused)]
 use num_traits::Float;
-mod data_ringbuffer;
-use data_ringbuffer::VelocityRingBuffer;
+mod animation;
+mod velocity_tracker;
+use animation::{FlickAnimation, FlickAnimationParameter};
 
-/// Deceleration during the animation. It slows down the initial velocity of the simulation
-/// so that the simulation stops at some point if it didn't reach the limit
-/// The unit is: LogicalPixel/s^2
-const DECELERATION: f32 = 2000.;
 /// Fixed-duration animation used for wheel scrolling, where we don't have enough phase
 /// information to derive a fling velocity.
 /// The unit is: millisecond
 const WHEEL_SCROLL_DURATION: Duration = Duration::from_millis(180);
-/// The maximum duration between a move and a release event to start an animation
-/// If the duration is larger than this value, no animation will be executed because
-/// it is not desired
-const MAX_DURATION: Duration = Duration::from_millis(100);
+#[cfg(not(any(target_os = "ios", target_os = "linux", target_os = "none", target_os = "macos")))]
+const VELOCITY_TRACKER_SAMPLES: usize = 20;
+/// How long a pause between two tracked move samples is still considered part of the same
+/// flick
+const MOMENTUM_RETAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+// Linux and bare metal use the iOS tracker, which is cheaper than the least-squares fit.
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "none"))]
+type VelocityTracker = IOsVelocityTracker;
+#[cfg(target_os = "macos")]
+type VelocityTracker = MacOsVelocityTracker;
+#[cfg(not(any(target_os = "ios", target_os = "linux", target_os = "none", target_os = "macos")))]
+type VelocityTracker = GeneralVelocityTracker<VELOCITY_TRACKER_SAMPLES>;
+
+#[derive(Clone, Copy)]
+enum Dimension {
+    X,
+    Y,
+}
+
+/// Whether a feature is on, off, or depends on the platform
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AutoBool {
+    /// Depends on the platform, to imitate its native behavior
+    #[default]
+    Auto,
+    /// Always on
+    On,
+    /// Always off
+    Off,
+}
 
 /// The implementation of the `Flickable` element
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
 pub struct Flickable {
-    pub viewport_x: Property<LogicalLength>,
-    pub viewport_y: Property<LogicalLength>,
-    pub viewport_width: Property<LogicalLength>,
-    pub viewport_height: Property<LogicalLength>,
+    pub content_x: Property<LogicalLength>,
+    pub content_y: Property<LogicalLength>,
+    pub content_width: Property<LogicalLength>,
+    pub content_height: Property<LogicalLength>,
 
     pub interactive: Property<bool>,
+    pub mouse_drag_pan_enabled: Property<bool>,
+
+    // Not public api yet
+    bounce: Property<AutoBool>,
+    carry_momentum: Property<AutoBool>,
 
     pub flicked: Callback<VoidArg>,
 
@@ -81,42 +127,33 @@ impl Item for Flickable {
             // Binding that returns if the Flickable is out of bounds:
             |self_weak| {
                 let Some(flick_rc) = self_weak.upgrade() else {
-                    return (false, false);
+                    return (false, false, Default::default());
                 };
                 let Some(flick) = flick_rc.downcast::<Flickable>() else {
-                    return (false, false);
+                    return (false, false, Default::default());
                 };
                 let flick = flick.as_pin_ref();
                 let geo = Self::geometry_without_virtual_keyboard(&flick_rc);
 
-                let zero = LogicalLength::zero();
-                let vpx = flick.viewport_x();
-                let vpy = flick.viewport_y();
-                let x_out_of_bounds =
-                    vpx > zero || vpx < (geo.width_length() - flick.viewport_width()).min(zero);
-                let y_out_of_bounds =
-                    vpy > zero || vpy < (geo.height_length() - flick.viewport_height()).min(zero);
+                let (inside_bounds_x, inside_bounds_y) = inside_bounds(
+                    flick,
+                    LogicalPoint::new(flick.content_x().get(), flick.content_y().get()),
+                    &geo,
+                );
 
-                (x_out_of_bounds, y_out_of_bounds)
+                (!inside_bounds_x, !inside_bounds_y, geo)
             },
             // Change event handler that puts the Flickable in bounds if it's not already
-            |self_weak, (x_out_of_bounds, y_out_of_bounds)| {
+            |self_weak, (x_out_of_bounds, y_out_of_bounds, geo)| {
                 let Some(flick_rc) = self_weak.upgrade() else { return };
                 let Some(flick) = flick_rc.downcast::<Flickable>() else { return };
-                let flick = flick.as_pin_ref();
-                let vpx = flick.viewport_x();
-                let vpy = flick.viewport_y();
-                let p = ensure_in_bound(flick, LogicalPoint::from_lengths(vpx, vpy), &flick_rc);
-
-                let x = (Flickable::FIELD_OFFSETS.viewport_x()).apply_pin(flick);
-                if *x_out_of_bounds && !x.has_binding() {
-                    x.set(p.x_length());
-                }
-
-                let y = (Flickable::FIELD_OFFSETS.viewport_y()).apply_pin(flick);
-                if *y_out_of_bounds && !y.has_binding() {
-                    y.set(p.y_length());
-                }
+                FlickableDataInner::move_within_limits(
+                    flick.data.inner.try_borrow_mut().ok().as_deref_mut(),
+                    &flick_rc,
+                    *x_out_of_bounds,
+                    *y_out_of_bounds,
+                    geo,
+                );
             },
         );
     }
@@ -138,7 +175,7 @@ impl Item for Flickable {
         event: &MouseEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
-        _: &mut super::MouseCursor,
+        _: &mut super::MouseCursorInner,
     ) -> InputEventFilterResult {
         if let Some(pos) = event.position() {
             let geometry = Self::geometry_without_virtual_keyboard(self_rc);
@@ -152,7 +189,7 @@ impl Item for Flickable {
                 return InputEventFilterResult::Intercept;
             }
         }
-        if !self.interactive() && !matches!(event, MouseEvent::Wheel { .. }) {
+        if !self.accepts_pan_event(event) {
             return InputEventFilterResult::ForwardAndIgnore;
         }
         self.data.handle_mouse_filter(self, event, window_adapter, self_rc)
@@ -163,9 +200,9 @@ impl Item for Flickable {
         event: &MouseEvent,
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
-        _: &mut super::MouseCursor,
+        _: &mut super::MouseCursorInner,
     ) -> InputEventResult {
-        if !self.interactive() && !matches!(event, MouseEvent::Wheel { .. }) {
+        if !self.accepts_pan_event(event) {
             return InputEventResult::EventIgnored;
         }
         if let Some(pos) = event.position() {
@@ -219,7 +256,6 @@ impl Item for Flickable {
         (*backend).combine_clip(
             LogicalRect::new(LogicalPoint::default(), size),
             LogicalBorderRadius::zero(),
-            LogicalLength::zero(),
         );
         RenderingResult::ContinueRenderingChildren
     }
@@ -244,14 +280,37 @@ impl ItemConsts for Flickable {
 }
 
 impl Flickable {
+    /// Overrides the scrolling physics that depend on the platform otherwise.
+    /// For Slint's internal tests.
+    pub fn set_physics(self: Pin<&Self>, bounce: AutoBool, carry_momentum: AutoBool) {
+        Self::FIELD_OFFSETS.bounce().apply_pin(self).set(bounce);
+        Self::FIELD_OFFSETS.carry_momentum().apply_pin(self).set(carry_momentum);
+    }
+
+    /// Whether the event may pan this Flickable, given that `interactive` and
+    /// `mouse-drag-pan-enabled` can disable it.
+    fn accepts_pan_event(self: Pin<&Self>, event: &MouseEvent) -> bool {
+        match event {
+            MouseEvent::Wheel { .. } => true,
+            MouseEvent::Pressed { .. } | MouseEvent::Moved { .. } | MouseEvent::Released { .. } => {
+                self.interactive() && (event.is_from_touch() || self.mouse_drag_pan_enabled())
+            }
+            MouseEvent::Exit
+            | MouseEvent::DragMove { .. }
+            | MouseEvent::Drop { .. }
+            | MouseEvent::PinchGesture { .. }
+            | MouseEvent::RotationGesture { .. } => self.interactive(),
+        }
+    }
+
     fn choose_min_move(
-        current_view_start: Coord, // vx or vy
+        current_view_start: Coord, // cx or cy
         view_len: Coord,           // w or h
-        content_len: Coord,        // vw or vh
+        content_len: Coord,        // cw or ch
         points: impl Iterator<Item = Coord>,
     ) -> Coord {
-        // Feasible translations t such that for all p: vx+t <= p <= vx+t+w
-        // -> t in [max_i(p_i - (vx + w)), min_i(p_i - vx)]
+        // Feasible translations t such that for all p: cx+t <= p <= cx+t+w
+        // -> t in [max_i(p_i - (cx + w)), min_i(p_i - cx)]
         let zero = 0 as Coord;
         let mut lower = Coord::MIN;
         let mut upper = Coord::MAX;
@@ -302,24 +361,24 @@ impl Flickable {
         // visible viewport size from base Item
         let geo = Self::geometry_without_virtual_keyboard(self_rc);
 
-        // content extents and current viewport origin (content coords)
-        let vw = Self::FIELD_OFFSETS.viewport_width().apply_pin(self).get().0;
-        let vh = Self::FIELD_OFFSETS.viewport_height().apply_pin(self).get().0;
-        let vx = -Self::FIELD_OFFSETS.viewport_x().apply_pin(self).get().0;
-        let vy = -Self::FIELD_OFFSETS.viewport_y().apply_pin(self).get().0;
+        // content extents and current content origin
+        let cw = Self::FIELD_OFFSETS.content_width().apply_pin(self).get().0;
+        let ch = Self::FIELD_OFFSETS.content_height().apply_pin(self).get().0;
+        let cx = -Self::FIELD_OFFSETS.content_x().apply_pin(self).get().0;
+        let cy = -Self::FIELD_OFFSETS.content_y().apply_pin(self).get().0;
 
         // choose minimal translation along each axis
-        let tx = Self::choose_min_move(vx, geo.width(), vw, pts.iter().map(|p| p.x));
-        let ty = Self::choose_min_move(vy, geo.height(), vh, pts.iter().map(|p| p.y));
+        let tx = Self::choose_min_move(cx, geo.width(), cw, pts.iter().map(|p| p.x));
+        let ty = Self::choose_min_move(cy, geo.height(), ch, pts.iter().map(|p| p.y));
 
-        let new_vx = vx + tx;
-        let new_vy = vy + ty;
+        let new_cx = cx + tx;
+        let new_cy = cy + ty;
 
-        Self::FIELD_OFFSETS.viewport_x().apply_pin(self).set(euclid::Length::new(-new_vx));
-        Self::FIELD_OFFSETS.viewport_y().apply_pin(self).set(euclid::Length::new(-new_vy));
+        Self::FIELD_OFFSETS.content_x().apply_pin(self).set(euclid::Length::new(-new_cx));
+        Self::FIELD_OFFSETS.content_y().apply_pin(self).set(euclid::Length::new(-new_cy));
     }
 
-    fn geometry_without_virtual_keyboard(self_rc: &ItemRc) -> LogicalRect {
+    pub(crate) fn geometry_without_virtual_keyboard(self_rc: &ItemRc) -> LogicalRect {
         let mut geometry = self_rc.geometry();
 
         // subtract keyboard rect if needed
@@ -363,7 +422,10 @@ impl core::ops::Deref for FlickableDataBox {
 }
 
 /// The distance required before it starts flicking if there is another item intercepting the mouse.
+#[cfg(not(target_os = "ios"))]
 pub(super) const DISTANCE_THRESHOLD: LogicalLength = LogicalLength::new(8 as _);
+#[cfg(target_os = "ios")]
+pub(super) const DISTANCE_THRESHOLD: LogicalLength = LogicalLength::new(10 as _);
 /// Time required before we stop caring about child event if the mouse hasn't been moved
 pub(super) const DURATION_THRESHOLD: Duration = Duration::from_millis(500);
 /// The delay to which press are forwarded to the inner item
@@ -382,20 +444,31 @@ pub(super) const SCROLL_FILTER_DISTANCE_SQUARED: LogicalLength = LogicalLength::
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum CaptureEvents {
-    MouseOrTouchScreen,
-    MouseWheel,
+    MouseStart,
+    MouseMove,
+    /// We captured a mouse wheel event but we did not yet decide if we are taking it or
+    /// if a child is taking it
+    WheelStart,
+    WheelMove,
+}
+
+struct RunningSimulation {
+    #[expect(unused, reason = "Will be used in a future pr for the listview")]
+    weak: ItemWeak,
+    x_simulation: Option<Rc<RefCell<dyn PositionSimulation>>>,
+    y_simulation: Option<Rc<RefCell<dyn PositionSimulation>>>,
 }
 
 #[derive(Default)]
 struct FlickableDataInner {
     /// The time and position in which the press was made
     ///
-    /// The position is in the coordinate system of the flickable, not of the viewport.
+    /// The position is in the coordinate system of the flickable, not of the content element.
     pressed_mouse_state: Option<(Instant, LogicalPoint)>,
     /// The last mouse position received, used to calculate the delta when flicking with the mouse.
     ///
-    /// This position is in the coordinate system of the flickable, not of the viewport.
-    last_mouse_position: LogicalPoint,
+    /// This position is in the coordinate system of the flickable, not of the content element.
+    last_mouse_position: Option<LogicalPoint>,
     /// Set to true if the flickable is flicking and capturing all mouse event, not forwarding back to the children
     capture_events: Option<CaptureEvents>,
     /// Heuristics for filtering scroll events from children after we have scrolled ourselves.
@@ -407,15 +480,36 @@ struct FlickableDataInner {
 
     /// Ringbuffer to store the last move deltas. From those data the velocity can be
     /// calculated required for the animation after the release event
-    velocity_rb: VelocityRingBuffer<5>,
+    velocity_rb: VelocityTracker,
 
-    /// The animation details of the currently running animation for smooth mouse wheel scrolling.
+    /// The animation details of the currently running animation for smooth mouse wheel, touchpad and touch screen scrolling.
     /// This allows us to add the missing delta of the animation to the next scroll event if the user scrolls again
     /// before the animation is finished.
-    running_animation: Option<(Instant, [Option<ConstantDecelerationParameters>; 2])>,
+    running_animation: Option<RunningSimulation>,
+
+    retained_velocity: Velocity,
 }
 
 impl FlickableDataInner {
+    /// Lose momentum if certain conditions are not fulfilled
+    fn maybe_lose_momentum(&mut self, tick: &Instant) {
+        let last_activity = self
+            .last_scroll_event
+            .map(|(time, _)| time)
+            .max(self.pressed_mouse_state.map(|(time, _)| time));
+        if last_activity.is_none_or(|time| (*tick - time) > MOMENTUM_RETAIN_TIMEOUT) {
+            self.retained_velocity = Default::default();
+        }
+    }
+
+    fn subtract_distance_threshold(delta: Coord) -> Coord {
+        if delta >= 0 as Coord {
+            (delta - DISTANCE_THRESHOLD.0).max(0 as Coord)
+        } else {
+            (delta + DISTANCE_THRESHOLD.0).min(0 as Coord)
+        }
+    }
+
     fn should_capture_scroll(&self, timeout: Duration, position: LogicalPoint) -> bool {
         self.last_scroll_event.is_some_and(|(last_time, last_position)| {
             // Note: Squared length for MCU support, which use i32 coords.
@@ -434,8 +528,88 @@ impl FlickableDataInner {
     ) -> bool {
         let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
 
-        (delta.y != 0 as Coord && flick.viewport_height() > geo.height_length())
-            || (delta.x != 0 as Coord && flick.viewport_width() > geo.width_length())
+        let allowed_y = delta.y != 0 as Coord && flick.content_height() > geo.height_length();
+        let allowed_x = delta.x != 0 as Coord && flick.content_width() > geo.width_length();
+
+        allowed_x || allowed_y
+    }
+
+    /// Calculate the position offset of this scroll move. If we would go beyond the limits and bouncing is enabled
+    /// the move is rubber-banded so the user cannot go far beyond the limits
+    fn calculate_move_offset(
+        &self,
+        current_pos: LogicalPoint,
+        delta: LogicalVector,
+        flick: Pin<&Flickable>,
+        flick_rc: &ItemRc,
+    ) -> LogicalVector {
+        let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
+        let use_bounce_x = FlickAnimation::use_bounce(effective_bounce(flick, &geo, Dimension::X));
+        let use_bounce_y = FlickAnimation::use_bounce(effective_bounce(flick, &geo, Dimension::Y));
+        FlickAnimation::rubber_band_move(
+            current_pos,
+            delta,
+            flick,
+            &geo,
+            use_bounce_x,
+            use_bounce_y,
+        ) - current_pos
+    }
+
+    fn track_press(&mut self, event_time: Instant) {
+        self.last_mouse_position = None;
+        self.velocity_rb = VelocityTracker::default();
+        self.velocity_rb.push(event_time, LogicalVector::default());
+    }
+
+    fn track_move(&mut self, event_time: Instant, position: LogicalPoint, history: &TouchHistory) {
+        let Some(mut previous_position) =
+            self.last_mouse_position.or(self.pressed_mouse_state.map(|(_, position)| position))
+        else {
+            return;
+        };
+        let mut last_time = self.velocity_rb.last_time().unwrap_or_default();
+        for (sample_position, sample_time) in
+            history.history.iter().copied().chain(core::iter::once((position, event_time)))
+        {
+            last_time = last_time.max(sample_time);
+            self.track_delta(last_time, sample_position - previous_position);
+            previous_position = sample_position;
+        }
+        self.last_mouse_position = Some(position);
+    }
+
+    fn track_delta(&mut self, event_time: Instant, delta: LogicalVector) {
+        self.maybe_lose_momentum(&event_time);
+        self.velocity_rb.push(event_time, delta);
+    }
+
+    /// Execute a scroll move
+    fn scroll_move(
+        &mut self,
+        flick: Pin<&Flickable>,
+        flick_rc: &ItemRc,
+        position: LogicalPoint,
+        delta: LogicalVector,
+        content_x: &Pin<&Property<LogicalLength>>,
+        content_y: &Pin<&Property<LogicalLength>>,
+    ) -> bool {
+        let current_tick = crate::animations::current_tick();
+        let current_pos = LogicalPoint::from_lengths(content_x.get(), content_y.get());
+
+        // We calculate the new content position by adding the mouse delta in the flickable
+        // coordinate system to the current content position.
+        // Do not rely on the existing content position to be stable, as e.g. the
+        // ListView will continuously update it.
+        // So we cannot calculate the delta in content coordinates.
+        let new_pos = current_pos + self.calculate_move_offset(current_pos, delta, flick, flick_rc);
+        content_x.set(new_pos.x_length());
+        content_y.set(new_pos.y_length());
+
+        self.last_scroll_event = Some((current_tick, position));
+
+        // Indicate if flicked
+        current_pos.x_length() != new_pos.x_length() || current_pos.y_length() != new_pos.y_length()
     }
 
     fn process_wheel_event(
@@ -446,6 +620,8 @@ impl FlickableDataInner {
         phase: TouchPhase,
         flick_rc: &ItemRc,
     ) -> InputEventResult {
+        let content_x = (Flickable::FIELD_OFFSETS.content_x()).apply_pin(flick);
+        let content_y = (Flickable::FIELD_OFFSETS.content_y()).apply_pin(flick);
         if phase != TouchPhase::Started
             && delta != LogicalVector::default()
             && !Self::is_allowed_scroll_direction(flick, delta, flick_rc)
@@ -453,99 +629,139 @@ impl FlickableDataInner {
             // Release the capture immediately, this event is not meant for this Flickable.
             self.capture_events = None;
             self.last_scroll_event = None;
+            content_x.remove_binding();
+            content_y.remove_binding();
             self.running_animation = None;
-            self.velocity_rb = VelocityRingBuffer::default();
+            self.velocity_rb = Default::default();
             return InputEventResult::EventIgnored;
         }
 
-        let viewport_x = (Flickable::FIELD_OFFSETS.viewport_x()).apply_pin(flick);
-        let viewport_y = (Flickable::FIELD_OFFSETS.viewport_y()).apply_pin(flick);
-        let current_pos = LogicalPoint::from_lengths(viewport_x.get(), viewport_y.get());
-
         if self.capture_events.is_none()
             && matches!(phase, TouchPhase::Moved)
-            && let Some((start_time, [x_simulation, y_simulation])) = &self.running_animation
+            && let Some(RunningSimulation { x_simulation, y_simulation, .. }) =
+                &self.running_animation
         {
             // If the animation is not finished, we add the remaining animations delta.
-            let animation_duration = crate::animations::current_tick().duration_since(*start_time);
+            let now = crate::animations::current_tick();
 
             if let Some(x_simulation) = x_simulation {
-                delta.x += x_simulation.remaining_distance(animation_duration);
+                delta.x += x_simulation.borrow().remaining_distance(now) as Coord;
             }
             if let Some(y_simulation) = y_simulation {
-                delta.y += y_simulation.remaining_distance(animation_duration);
+                delta.y += y_simulation.borrow().remaining_distance(now) as Coord;
             }
         }
 
-        let new_pos = ensure_in_bound(flick, current_pos + delta, flick_rc);
-        delta = new_pos - current_pos;
-
         if phase != TouchPhase::Ended {
-            viewport_x.remove_binding();
-            viewport_y.remove_binding();
+            if phase == TouchPhase::Started {
+                self.capture_momentum();
+            }
+
+            content_x.remove_binding();
+            content_y.remove_binding();
             self.running_animation = None;
         }
 
+        let mut flicked = false;
         match phase {
             TouchPhase::Cancelled => {
-                viewport_x.set(new_pos.x_length());
-                viewport_y.set(new_pos.y_length());
-                self.last_scroll_event = Some((crate::animations::current_tick(), position));
+                self.track_delta(crate::animations::current_tick(), delta);
+                flicked =
+                    self.scroll_move(flick, flick_rc, position, delta, &content_x, &content_y);
             }
             TouchPhase::Started => {
-                self.velocity_rb = VelocityRingBuffer::default();
-                self.capture_events = Some(CaptureEvents::MouseWheel);
+                self.velocity_rb = VelocityTracker::default();
+                self.capture_events = Some(CaptureEvents::WheelStart);
                 self.last_scroll_event = Some((crate::animations::current_tick(), position));
             }
             TouchPhase::Moved => {
-                if self.capture_events.is_some_and(|capture| capture == CaptureEvents::MouseWheel) {
+                if let Some(capture) = self.capture_events
+                    && matches!(capture, CaptureEvents::WheelStart | CaptureEvents::WheelMove)
+                {
+                    if matches!(capture, CaptureEvents::WheelStart) {
+                        // Otherwise we'd jump instead of starting the drag smoothly.
+                        delta.x = Self::subtract_distance_threshold(delta.x);
+                        delta.y = Self::subtract_distance_threshold(delta.y);
+                    }
+
+                    self.track_delta(crate::animations::current_tick(), delta);
                     // Touchpad case with different phases
-                    self.velocity_rb.push(crate::animations::current_tick(), new_pos - current_pos);
-                    viewport_x.set(new_pos.x_length());
-                    viewport_y.set(new_pos.y_length());
+                    flicked =
+                        self.scroll_move(flick, flick_rc, position, delta, &content_x, &content_y);
+                    self.capture_events = Some(CaptureEvents::WheelMove);
                 } else {
                     // Mousewheel case with no phase
                     // Add a short animation that covers the delta for smooth scrolling
                     //
-                    // Note that this animation must support the viewport_x/_y and width/height
-                    // changing, as e.g. the ListView might resize the viewport if it gets a new size
+                    // Note that this animation must support the content_x/_y and width/height
+                    // changing, as e.g. the ListView might resize the content if it gets a new size
                     // estimate.
                     //
                     // At the time of writing, in practice this means we must use a physics animation.
-                    let [limit_x, limit_y] = Self::flick_limits(flick_rc, delta);
+                    let limit_x = Self::flick_limits(flick_rc, delta.x as f32, Dimension::X);
+                    let limit_y = Self::flick_limits(flick_rc, delta.y as f32, Dimension::Y);
+                    let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
 
-                    let x_simulation = (delta.x != Coord::default()).then(|| {
-                        let simulation = ConstantDecelerationParameters::new_with_distance(
-                            delta.x as f32,
-                            WHEEL_SCROLL_DURATION.as_secs_f32(),
-                        );
-                        viewport_x.set_physic_animation_value(limit_x, simulation.clone());
-                        simulation
+                    let x_simulation: Option<Rc<RefCell<dyn PositionSimulation>>> = (delta.x
+                        != Coord::default())
+                    .then(|| {
+                        let simulation = Rc::new_cyclic(|weak: &Weak<RefCell<FlickAnimation>>| {
+                            let curr_val = content_x.get().0 as f32;
+                            content_x.set_physic_animation_value(weak.clone());
+                            RefCell::new(FlickAnimation::create_animation(
+                                FlickAnimationParameter::Distance {
+                                    delta: delta.x as f32,
+                                    duration: WHEEL_SCROLL_DURATION,
+                                },
+                                effective_bounce(flick, &geo, Dimension::X),
+                                curr_val,
+                                limit_x,
+                            ))
+                        });
+                        simulation as Rc<RefCell<dyn PositionSimulation>>
                     });
 
-                    let y_simulation = (delta.y != Coord::default()).then(|| {
-                        let simulation = ConstantDecelerationParameters::new_with_distance(
-                            delta.y as f32,
-                            WHEEL_SCROLL_DURATION.as_secs_f32(),
-                        );
-                        viewport_y.set_physic_animation_value(limit_y, simulation.clone());
-                        simulation
+                    let y_simulation: Option<Rc<RefCell<dyn PositionSimulation>>> = (delta.y
+                        != Coord::default())
+                    .then(|| {
+                        let simulation = Rc::new_cyclic(|weak: &Weak<RefCell<FlickAnimation>>| {
+                            let curr_val = content_y.get().0 as f32;
+                            content_y.set_physic_animation_value(weak.clone());
+                            RefCell::new(FlickAnimation::create_animation(
+                                FlickAnimationParameter::Distance {
+                                    delta: delta.y as f32,
+                                    duration: WHEEL_SCROLL_DURATION,
+                                },
+                                effective_bounce(flick, &geo, Dimension::Y),
+                                curr_val,
+                                limit_y,
+                            ))
+                        });
+                        simulation as Rc<RefCell<dyn PositionSimulation>>
                     });
 
                     if delta.x != 0 as Coord || delta.y != 0 as Coord {
                         (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
                     }
 
-                    self.running_animation =
-                        Some((crate::animations::current_tick(), [x_simulation, y_simulation]));
+                    self.running_animation = Some(RunningSimulation {
+                        x_simulation,
+                        y_simulation,
+                        weak: flick_rc.downgrade(),
+                    });
+                    self.last_scroll_event = Some((crate::animations::current_tick(), position));
                 }
-                self.last_scroll_event = Some((crate::animations::current_tick(), position));
             }
             TouchPhase::Ended => {
-                if self.capture_events.is_some_and(|capture| capture == CaptureEvents::MouseWheel) {
-                    self.animate(flick, flick_rc);
+                let moved =
+                    self.capture_events.is_some_and(|capture| capture == CaptureEvents::WheelMove);
+                if moved {
+                    self.animate(flick, flick_rc, crate::animations::current_tick());
                 }
                 self.capture_events = None;
+                if !moved {
+                    self.move_within_limits_if_outside(flick, flick_rc);
+                }
                 return if self.should_capture_scroll(SHORT_SCROLL_FILTER_DURATION, position) {
                     InputEventResult::EventAccepted
                 } else {
@@ -554,25 +770,48 @@ impl FlickableDataInner {
             }
         }
 
-        let flicked = current_pos.x_length() != new_pos.x_length()
-            || current_pos.y_length() != new_pos.y_length();
         if flicked {
             (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
             InputEventResult::EventAccepted
         } else if self.should_capture_scroll(SHORT_SCROLL_FILTER_DURATION, position) {
             // After reaching the end, keep accepting the input event for a while longer, then time
             // out (by not updating the last_scroll_event)
-            InputEventResult::EventAccepted
+            if phase == TouchPhase::Started {
+                InputEventResult::EventIgnored
+            } else {
+                InputEventResult::EventAccepted
+            }
         } else {
             self.last_scroll_event = None;
             InputEventResult::EventIgnored
         }
     }
 
+    fn capture_momentum(&mut self) {
+        self.retained_velocity = self
+            .running_animation
+            .as_ref()
+            .map(|sim| {
+                let now = crate::animations::current_tick();
+                Velocity::new(
+                    sim.x_simulation
+                        .as_ref()
+                        .map(|sim| sim.borrow().remaining_velocity(now))
+                        .unwrap_or_default(),
+                    sim.y_simulation
+                        .as_ref()
+                        .map(|sim| sim.borrow().remaining_velocity(now))
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+    }
+
     fn flick_limits(
         flick_rc: &ItemRc,
-        flick_velocity: LogicalVector,
-    ) -> [Pin<Box<Property<f32>>>; 2] {
+        flick_velocity: f32,
+        dimension: Dimension,
+    ) -> Pin<Box<Property<f32>>> {
         let flick_weak = flick_rc.downgrade();
         let calculate_limits = move || {
             flick_weak
@@ -582,69 +821,227 @@ impl FlickableDataInner {
                 })
                 .map(|(flick_rc, flick)| {
                     let flick = flick.as_pin_ref();
+                    let geo = Flickable::geometry_without_virtual_keyboard(&flick_rc);
                     ensure_in_bound(
                         flick,
-                        LogicalPoint::from_lengths(
-                            -flick.viewport_width(),
-                            -flick.viewport_height(),
-                        ),
-                        &flick_rc,
+                        LogicalPoint::from_lengths(-flick.content_width(), -flick.content_height()),
+                        &geo,
+                        false,
+                        false,
                     )
                 })
         };
 
-        let limit_x = if flick_velocity.x < 0 as Coord {
+        if flick_velocity < 0. {
             let property = Box::pin(Property::new(0.0));
             property.set_binding({
                 let calculate_limits = calculate_limits.clone();
-                move || calculate_limits().map(|limit| limit.x_length().get() as f32).unwrap_or(0.0)
+                move || {
+                    calculate_limits()
+                        .map(|limit| match dimension {
+                            Dimension::X => limit.x_length().get() as f32,
+                            Dimension::Y => limit.y_length().get() as f32,
+                        })
+                        .unwrap_or(0.0)
+                }
             });
             property
         } else {
             Box::pin(Property::new(0.0))
-        };
-
-        let limit_y = if flick_velocity.y < 0 as Coord {
-            let property = Box::pin(Property::new(0.0));
-            property.set_binding(move || {
-                calculate_limits().map(|limit| limit.y_length().get() as f32).unwrap_or(0.0)
-            });
-            property
-        } else {
-            Box::pin(Property::new(0.0))
-        };
-
-        [limit_x, limit_y]
+        }
     }
 
-    fn animate(&self, flick: Pin<&Flickable>, flick_rc: &ItemRc) {
-        if let Some(last_time) = self.velocity_rb.last_time() {
-            let mean_velocity = self.velocity_rb.mean_velocity();
-            if self.capture_events.is_some()
-                && mean_velocity.square_length() > 0 as Coord
-                && crate::animations::current_tick().duration_since(last_time) < MAX_DURATION
+    fn move_within_limits(
+        mut self_: Option<&mut Self>,
+        flick_rc: &ItemRc,
+        x_out_of_bounds: bool,
+        y_out_of_bounds: bool,
+        geo: &LogicalRect,
+    ) {
+        let Some(flick) = flick_rc.downcast::<Flickable>() else { return };
+        if !x_out_of_bounds && !y_out_of_bounds {
+            return;
+        }
+        let flick = flick.as_pin_ref();
+        let use_bounce_x = FlickAnimation::use_bounce(effective_bounce(flick, geo, Dimension::X))
+            && self_.is_some();
+        let use_bounce_y = FlickAnimation::use_bounce(effective_bounce(flick, geo, Dimension::Y))
+            && self_.is_some();
+        let vpx = flick.content_x();
+        let vpy = flick.content_y();
+        let p = ensure_in_bound(
+            flick,
+            LogicalPoint::from_lengths(vpx, vpy),
+            geo,
+            use_bounce_x,
+            use_bounce_y,
+        );
+
+        let x = (Flickable::FIELD_OFFSETS.content_x()).apply_pin(flick);
+        if x_out_of_bounds && !x.has_binding() {
+            if !use_bounce_x {
+                x.set(p.x_length());
+            } else if let Some(inner) = self_.as_deref_mut()
+                && inner.capture_events.is_none()
             {
-                let viewport_x = (Flickable::FIELD_OFFSETS.viewport_x()).apply_pin(flick);
-                let viewport_y = (Flickable::FIELD_OFFSETS.viewport_y()).apply_pin(flick);
-
-                let [limit_x, limit_y] = Self::flick_limits(flick_rc, mean_velocity);
-
-                {
-                    let simulation =
-                        ConstantDecelerationParameters::new(mean_velocity.x as f32, DECELERATION);
-                    viewport_x.set_physic_animation_value(limit_x, simulation);
-                }
-
-                {
-                    let animation_y =
-                        ConstantDecelerationParameters::new(mean_velocity.y as f32, DECELERATION);
-                    viewport_y.set_physic_animation_value(limit_y, animation_y);
-                }
-
-                if mean_velocity.x != 0 as Coord || mean_velocity.y != 0 as Coord {
-                    (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
-                }
+                inner.start_spring_back(flick, flick_rc, Dimension::X, geo);
             }
+        }
+
+        let y = (Flickable::FIELD_OFFSETS.content_y()).apply_pin(flick);
+        if y_out_of_bounds && !y.has_binding() {
+            if !use_bounce_y {
+                y.set(p.y_length());
+            } else if let Some(inner) = self_
+                && inner.capture_events.is_none()
+            {
+                inner.start_spring_back(flick, flick_rc, Dimension::Y, geo);
+            }
+        }
+    }
+
+    fn move_within_limits_if_outside(&mut self, flick: Pin<&Flickable>, flick_rc: &ItemRc) {
+        let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
+        let (inside_bounds_x, inside_bounds_y) = inside_bounds(
+            flick,
+            LogicalPoint::new(flick.content_x().get(), flick.content_y().get()),
+            &geo,
+        );
+        Self::move_within_limits(Some(self), flick_rc, !inside_bounds_x, !inside_bounds_y, &geo);
+    }
+
+    /// Springs the content back to the limit it is beyond.
+    /// `drag_velocity` is the pointer's velocity at the release.
+    fn spring_back(
+        flick: Pin<&Flickable>,
+        flick_rc: &ItemRc,
+        dimension: Dimension,
+        geo: &LogicalRect,
+        drag_velocity: f32,
+    ) -> Rc<RefCell<dyn PositionSimulation>> {
+        let content = match dimension {
+            Dimension::X => Flickable::FIELD_OFFSETS.content_x(),
+            Dimension::Y => Flickable::FIELD_OFFSETS.content_y(),
+        }
+        .apply_pin(flick);
+        let curr_val = content.get().0 as f32;
+        // Spring back to whichever edge we're already past
+        let limit = Self::flick_limits(flick_rc, curr_val, dimension);
+        let viewport_length = match dimension {
+            Dimension::X => geo.width_length().get(),
+            Dimension::Y => geo.height_length().get(),
+        } as f32;
+        let velocity = if viewport_length > 0. {
+            let overscroll =
+                rubber_band::uncompress(curr_val - limit.as_ref().get(), viewport_length);
+            drag_velocity * rubber_band::compress_slope(overscroll, viewport_length)
+        } else {
+            0.
+        };
+        Rc::new_cyclic(|weak: &Weak<RefCell<BounceFlick>>| {
+            content.set_physic_animation_value(weak.clone());
+            RefCell::new(FlickAnimation::create_spring_animation(
+                curr_val,
+                limit,
+                crate::animations::current_tick(),
+                velocity,
+                drag_velocity.abs(),
+            ))
+        })
+    }
+
+    /// Springs the content back on one axis and adds the simulation to the running ones.
+    fn start_spring_back(
+        &mut self,
+        flick: Pin<&Flickable>,
+        flick_rc: &ItemRc,
+        dimension: Dimension,
+        geo: &LogicalRect,
+    ) {
+        let simulation = Self::spring_back(flick, flick_rc, dimension, geo, 0.);
+        let running = self.running_animation.get_or_insert_with(|| RunningSimulation {
+            weak: flick_rc.downgrade(),
+            x_simulation: None,
+            y_simulation: None,
+        });
+        match dimension {
+            Dimension::X => running.x_simulation = Some(simulation),
+            Dimension::Y => running.y_simulation = Some(simulation),
+        }
+    }
+
+    /// `release_time` is when the pointer was released, on the clock of the tracked samples.
+    fn animate(&mut self, flick: Pin<&Flickable>, flick_rc: &ItemRc, release_time: Instant) {
+        if self.capture_events.is_some() {
+            let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
+            let (inside_bounds_x, inside_bounds_y) = inside_bounds(
+                flick,
+                LogicalPoint::new(flick.content_x().get(), flick.content_y().get()),
+                &geo,
+            );
+            let estimated_velocity =
+                self.velocity_rb.estimate_velocity(release_time).map(|v| v.velocity);
+
+            // The release simulation generic over the Dimension
+            let release_simulation = |dimension: Dimension,
+                                      velocity: Option<f32>,
+                                      inside_bounds: bool| {
+                if !inside_bounds {
+                    return Some(Self::spring_back(
+                        flick,
+                        flick_rc,
+                        dimension,
+                        &geo,
+                        velocity.unwrap_or(0.),
+                    ));
+                }
+                let velocity = velocity.filter(|velocity| {
+                    velocity.abs() >= FlickAnimation::minimum_flick_velocity_animation()
+                })?;
+                let (retained_velocity, content) = match dimension {
+                    Dimension::X => (
+                        self.retained_velocity.x,
+                        (Flickable::FIELD_OFFSETS.content_x()).apply_pin(flick),
+                    ),
+                    Dimension::Y => (
+                        self.retained_velocity.y,
+                        (Flickable::FIELD_OFFSETS.content_y()).apply_pin(flick),
+                    ),
+                };
+                let carried_velocity = FlickAnimation::carried_momentum(
+                    velocity,
+                    retained_velocity,
+                    flick.carry_momentum(),
+                );
+                let limit = Self::flick_limits(flick_rc, velocity, dimension);
+                let simulation = Rc::new_cyclic(|weak: &Weak<RefCell<FlickAnimation>>| {
+                    let curr_val = content.get().0 as f32;
+                    content.set_physic_animation_value(weak.clone());
+                    RefCell::new(FlickAnimation::create_animation(
+                        FlickAnimationParameter::Velocity { velocity: velocity + carried_velocity },
+                        effective_bounce(flick, &geo, dimension),
+                        curr_val,
+                        limit,
+                    ))
+                });
+                Some(simulation as Rc<RefCell<dyn PositionSimulation>>)
+            };
+
+            let x_simulation = release_simulation(
+                Dimension::X,
+                estimated_velocity.as_ref().map(|v| v.x),
+                inside_bounds_x,
+            );
+
+            let y_simulation =
+                release_simulation(Dimension::Y, estimated_velocity.map(|v| v.y), inside_bounds_y);
+
+            if x_simulation.is_some() || y_simulation.is_some() {
+                (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
+            }
+
+            self.running_animation =
+                Some(RunningSimulation { weak: flick_rc.downgrade(), x_simulation, y_simulation });
         }
     }
 }
@@ -682,14 +1079,23 @@ impl FlickableData {
     ) -> InputEventFilterResult {
         let mut inner = self.inner.borrow_mut();
         match event {
-            MouseEvent::Pressed { position, button: PointerEventButton::Left, .. } => {
-                inner.velocity_rb = VelocityRingBuffer::default();
+            MouseEvent::Pressed {
+                position, button: PointerEventButton::Left, event_time, ..
+            } => {
+                if inner.capture_events.is_none() && !Self::can_pan(flick, flick_rc) {
+                    // There is nothing to pan in either direction: don't hold up the press waiting to see if it turns into a drag,
+                    // just let it fall through to whatever is underneath,
+                    // the same way wheel events already are when the Flickable can't scroll in their direction.
+                    return InputEventFilterResult::ForwardAndIgnore;
+                }
+
                 inner.pressed_mouse_state = Some((crate::animations::current_tick(), *position));
-                inner.last_mouse_position = *position;
-                let viewport_x = (Flickable::FIELD_OFFSETS.viewport_x()).apply_pin(flick);
-                viewport_x.remove_binding(); // Stop animation by removing the binding
-                let viewport_y = (Flickable::FIELD_OFFSETS.viewport_y()).apply_pin(flick);
-                viewport_y.remove_binding(); // Stop animation by removing the binding
+                inner.track_press(event_time.unwrap_or_else(crate::animations::current_tick));
+                inner.capture_momentum();
+                let content_x = (Flickable::FIELD_OFFSETS.content_x()).apply_pin(flick);
+                content_x.remove_binding(); // Stop animation by removing the binding
+                let content_y = (Flickable::FIELD_OFFSETS.content_y()).apply_pin(flick);
+                content_y.remove_binding(); // Stop animation by removing the binding
 
                 if inner.capture_events.is_some() {
                     InputEventFilterResult::Intercept
@@ -702,6 +1108,7 @@ impl FlickableData {
                 if inner.capture_events.is_some() {
                     InputEventFilterResult::Intercept
                 } else {
+                    inner.move_within_limits_if_outside(flick, flick_rc);
                     InputEventFilterResult::ForwardEvent
                 }
             }
@@ -739,22 +1146,28 @@ impl FlickableData {
                             InputEventFilterResult::ForwardEvent
                         }
                     }
-                    TouchPhase::Started => InputEventFilterResult::Intercept,
+                    TouchPhase::Started => InputEventFilterResult::ForwardEvent,
                     TouchPhase::Moved => {
-                        if inner.capture_events.is_some() {
+                        if inner.capture_events.is_some_and(|v| v == CaptureEvents::WheelMove) {
                             InputEventFilterResult::Intercept
                         } else {
                             // If we recently handled a wheel event, intercept it to prevent children from grabbing
                             // the scroll event
                             let delta = Self::scroll_delta(window_adapter, *delta_x, *delta_y);
-                            if FlickableDataInner::is_allowed_scroll_direction(
+                            if !FlickableDataInner::is_allowed_scroll_direction(
                                 flick, delta, flick_rc,
-                            ) && inner.should_capture_scroll(SCROLL_FILTER_DURATION, *position)
+                            ) {
+                                inner.last_scroll_event = None;
+                                if inner.capture_events == Some(CaptureEvents::WheelStart) {
+                                    inner.capture_events = None;
+                                }
+                                InputEventFilterResult::ForwardEvent
+                            } else if inner.should_capture_scroll(SCROLL_FILTER_DURATION, *position)
+                                && inner.capture_events.is_none()
                             {
                                 InputEventFilterResult::Intercept
                             } else {
-                                inner.last_scroll_event = None;
-                                InputEventFilterResult::ForwardEvent
+                                ForwardEvent
                             }
                         }
                     }
@@ -789,16 +1202,34 @@ impl FlickableData {
         let flickable_geometry = Flickable::geometry_without_virtual_keyboard(flick_rc);
         let flickable_width = flickable_geometry.width_length();
         let flickable_height = flickable_geometry.height_length();
-        let viewport_width = flick.viewport_width();
-        let viewport_height = flick.viewport_height();
+        let content_width = flick.content_width();
+        let content_height = flick.content_height();
         let zero = LogicalLength::zero();
 
         // We should capture the mouse movement, if the flickable can move in this
         // axis, and the mouse has moved more than the threshold in this axis.
-        ((viewport_width > flickable_width || flick.viewport_x() != zero)
-            && abs(mouse_delta.x_length()) > DISTANCE_THRESHOLD)
-            || ((viewport_height > flickable_height || flick.viewport_y() != zero)
-                && abs(mouse_delta.y_length()) > DISTANCE_THRESHOLD)
+        let should_capture_x = (content_width > flickable_width || flick.content_x() != zero)
+            && abs(mouse_delta.x_length()) > DISTANCE_THRESHOLD;
+        let should_capture_y = (content_height > flickable_height || flick.content_y() != zero)
+            && abs(mouse_delta.y_length()) > DISTANCE_THRESHOLD;
+        should_capture_x || should_capture_y
+    }
+
+    /// Whether the flickable has any content to pan in either direction, regardless of mouse movement.
+    /// Used to decide whether a press that no descendant claimed is worth grabbing,
+    /// mirroring the direction check wheel events already get in `handle_mouse_filter`.
+    fn can_pan(flick: Pin<&Flickable>, flick_rc: &ItemRc) -> bool {
+        let flickable_geometry = Flickable::geometry_without_virtual_keyboard(flick_rc);
+        let flickable_width = flickable_geometry.width_length();
+        let flickable_height = flickable_geometry.height_length();
+        let content_width = flick.content_width();
+        let content_height = flick.content_height();
+        let zero = LogicalLength::zero();
+
+        let can_pan_x = content_width > flickable_width || flick.content_x() != zero;
+        let can_pan_y = content_height > flickable_height || flick.content_y() != zero;
+
+        can_pan_x || can_pan_y
     }
 
     fn handle_mouse(
@@ -811,88 +1242,85 @@ impl FlickableData {
         let mut inner = self.inner.borrow_mut();
         match event {
             MouseEvent::Pressed { .. } => {
-                inner.capture_events = Some(CaptureEvents::MouseOrTouchScreen);
+                inner.capture_events = Some(CaptureEvents::MouseStart);
+                inner.capture_momentum();
                 InputEventResult::GrabMouse
             }
             MouseEvent::Exit | MouseEvent::Released { .. } => {
-                if inner.capture_events.is_some_and(|f| f == CaptureEvents::MouseOrTouchScreen) {
-                    let was_capturing = true;
-                    inner.animate(flick, flick_rc);
-                    inner.capture_events = None;
-                    inner.pressed_mouse_state = None;
-                    if was_capturing {
+                inner.pressed_mouse_state = None;
+                if let Some(c) = inner.capture_events {
+                    if c == CaptureEvents::MouseMove {
+                        let release_time = match event {
+                            MouseEvent::Released { event_time: Some(time), .. } => *time,
+                            _ => crate::animations::current_tick(),
+                        };
+                        inner.animate(flick, flick_rc, release_time);
+                        inner.capture_events = None;
+                        InputEventResult::EventAccepted
+                    } else if c == CaptureEvents::MouseStart {
+                        inner.capture_events = None;
+                        inner.move_within_limits_if_outside(flick, flick_rc);
                         InputEventResult::EventAccepted
                     } else {
+                        // an accepted wheel event is followed by an Exit, so the wheel states must survive it
                         InputEventResult::EventIgnored
                     }
-                } else if inner.capture_events.is_none() {
-                    inner.pressed_mouse_state = None;
-                    InputEventResult::EventIgnored
                 } else {
                     InputEventResult::EventIgnored
                 }
             }
-            MouseEvent::Moved { position, .. } => {
-                // Important constraint: The viewport_y might not be stable, and might jump around
+            MouseEvent::Moved { position, event_time, history, .. } => {
+                // Important constraint: The content_y might not be stable, and might jump around
                 // wildly!
                 // This is especially the case if a ListView is involved, which will continuously
-                // update its own viewport_y to keep the current item visible, which can cause the
-                // viewport_y to jump.
+                // update its own content_y to keep the current item visible, which can cause the
+                // content_y to jump.
                 //
                 // So to correctly calculate the mouse delta, we need to use the position of
-                // the mouse in the flickables coordinate system and never the viewport coordinate
+                // the mouse in the flickables coordinate system and never the content coordinate
                 // system.
-                if let Some((_pressed_time, _pressed_mouse_position)) = inner.pressed_mouse_state {
-                    let mouse_delta = *position - inner.last_mouse_position;
-                    inner.velocity_rb.push(crate::animations::current_tick(), mouse_delta);
+                if let Some((_pressed_time, pressed_position)) = inner.pressed_mouse_state {
+                    let is_capturing = inner.capture_events.is_some_and(|f| {
+                        matches!(f, CaptureEvents::MouseStart | CaptureEvents::MouseMove)
+                    });
+                    let tracking_delta =
+                        *position - inner.last_mouse_position.unwrap_or(pressed_position);
+                    let mut mouse_delta =
+                        if is_capturing { tracking_delta } else { *position - pressed_position };
+                    inner.track_move(
+                        event_time.unwrap_or_else(crate::animations::current_tick),
+                        *position,
+                        history,
+                    );
 
-                    let is_capturing = inner
-                        .capture_events
-                        .is_some_and(|f| f == CaptureEvents::MouseOrTouchScreen);
                     if is_capturing
                         || self.should_capture_mouse_direction(mouse_delta, flick, flick_rc)
                     {
-                        // The drag event is meant to move the viewport, set it to the new position
+                        // The drag event is meant to move the content, set it to the new position
                         // and start capturing mouse events.
-                        let viewport_x = (Flickable::FIELD_OFFSETS.viewport_x()).apply_pin(flick);
-                        let viewport_y = (Flickable::FIELD_OFFSETS.viewport_y()).apply_pin(flick);
-                        let current_viewport_position =
-                            LogicalPoint::from_lengths(viewport_x.get(), viewport_y.get());
+                        let content_x = (Flickable::FIELD_OFFSETS.content_x()).apply_pin(flick);
+                        let content_y = (Flickable::FIELD_OFFSETS.content_y()).apply_pin(flick);
 
-                        // We calculate the new viewport position by adding the mouse delta in the flickable
-                        // coordinate system to the current viewport position.
-                        // Do not rely on the existing viewport position to be stable, as e.g. the
-                        // ListView will continuously update it.
-                        // So we cannot calculate the delta in viewport coordinates.
-                        let new_viewport_position = current_viewport_position + mouse_delta;
-                        let new_viewport_position =
-                            ensure_in_bound(flick, new_viewport_position, flick_rc);
-
-                        viewport_x.set(new_viewport_position.x_length());
-                        viewport_y.set(new_viewport_position.y_length());
-                        if current_viewport_position != new_viewport_position {
-                            (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
+                        if !is_capturing && event.is_from_touch() {
+                            // Otherwise we'd jump instead of starting the drag smoothly.
+                            mouse_delta.x =
+                                FlickableDataInner::subtract_distance_threshold(mouse_delta.x);
+                            mouse_delta.y =
+                                FlickableDataInner::subtract_distance_threshold(mouse_delta.y);
                         }
 
-                        // Only update the mouse position if we are actually applying the delta.
-                        // When the drag starts, there is a short dead zone that is determined by the
-                        // DISTANCE_THRESHOLD. We want to apply that threshold to the
-                        // delta once we've overcome it, so we need to update the position that we
-                        // calculate the delta from only after we've cleared the dead zone and are
-                        // actually moving.
-                        //
-                        // Note: As an alternative to updating the last_mouse_position to the new mouse position,
-                        // we could also update it by the amount that the viewport actually moved.
-                        // This would cause the mouse to stick to a given position in the viewport
-                        // instead of starting to drift if the drag goes into the viewport limits.
-                        // Then this code would need to be:
-                        //
-                        //  inner.last_mouse_position += new_viewport_position - current_viewport_position;
-                        //
-                        // But at least for a touchscreen, the current behavior is more intuitive.
-                        inner.last_mouse_position = *position;
-
-                        inner.capture_events = Some(CaptureEvents::MouseOrTouchScreen);
+                        let flicked = inner.scroll_move(
+                            flick,
+                            flick_rc,
+                            *position,
+                            mouse_delta,
+                            &content_x,
+                            &content_y,
+                        );
+                        if flicked {
+                            (Flickable::FIELD_OFFSETS.flicked()).apply_pin(flick).call(&());
+                        }
+                        inner.capture_events = Some(CaptureEvents::MouseMove);
 
                         InputEventResult::GrabMouse
                     } else if abs(mouse_delta.x_length()) > DISTANCE_THRESHOLD
@@ -925,17 +1353,50 @@ fn abs(l: LogicalLength) -> LogicalLength {
     LogicalLength::new(l.get().abs())
 }
 
+/// The effective bounce setting for one axis: the shared `bounce` property,
+/// forced off when that axis has nothing to overflow into (the content
+/// doesn't exceed the viewport on that axis, so there's nothing to
+/// overscroll past).
+fn effective_bounce(flick: Pin<&Flickable>, geo: &LogicalRect, dimension: Dimension) -> AutoBool {
+    let has_overflow = match dimension {
+        Dimension::X => flick.content_width() > geo.width_length(),
+        Dimension::Y => flick.content_height() > geo.height_length(),
+    };
+    if has_overflow { flick.bounce() } else { AutoBool::Off }
+}
+
 /// Make sure that the point is within the bounds
-fn ensure_in_bound(flick: Pin<&Flickable>, p: LogicalPoint, flick_rc: &ItemRc) -> LogicalPoint {
-    let geo = Flickable::geometry_without_virtual_keyboard(flick_rc);
+fn ensure_in_bound(
+    flick: Pin<&Flickable>,
+    mut p: LogicalPoint,
+    geo: &LogicalRect,
+    use_bounce_x: bool,
+    use_bounce_y: bool,
+) -> LogicalPoint {
     let w = geo.width_length();
     let h = geo.height_length();
-    let vw = (Flickable::FIELD_OFFSETS.viewport_width()).apply_pin(flick).get();
-    let vh = (Flickable::FIELD_OFFSETS.viewport_height()).apply_pin(flick).get();
+    let cw = flick.content_width();
+    let ch = flick.content_height();
 
-    let min = LogicalPoint::from_lengths(w - vw, h - vh);
-    let max = LogicalPoint::default();
-    p.max(min).min(max)
+    if !use_bounce_x {
+        p.x = p.x.max((w - cw).get()).min(Default::default());
+    }
+    if !use_bounce_y {
+        p.y = p.y.max((h - ch).get()).min(Default::default());
+    }
+    p
+}
+
+fn inside_bounds(flick: Pin<&Flickable>, p: LogicalPoint, geo: &LogicalRect) -> (bool, bool) {
+    let w = geo.width_length();
+    let h = geo.height_length();
+    let cw = flick.content_width();
+    let ch = flick.content_height();
+
+    let inside_bounds_x = p.x >= (w - cw).get().min(0 as Coord) && p.x <= 0 as Coord;
+    let inside_bounds_y = p.y >= (h - ch).get().min(0 as Coord) && p.y <= 0 as Coord;
+
+    (inside_bounds_x, inside_bounds_y)
 }
 
 /// # Safety
@@ -954,5 +1415,145 @@ pub unsafe extern "C" fn slint_flickable_data_init(data: *mut FlickableDataBox) 
 pub unsafe extern "C" fn slint_flickable_data_free(data: *mut FlickableDataBox) {
     unsafe {
         core::ptr::drop_in_place(data);
+    }
+}
+
+#[cfg(test)]
+mod velocity_history_tests {
+    use super::*;
+
+    #[test]
+    fn original_sample_time_is_independent_of_delivery_delay() {
+        let start = crate::animations::current_tick();
+        crate::animations::update_animations(start + Duration::from_millis(100));
+        let mut inner = FlickableDataInner {
+            pressed_mouse_state: Some((start, LogicalPoint::new(50., 100.))),
+            ..Default::default()
+        };
+        inner.track_press(start);
+        inner.track_move(
+            start + Duration::from_millis(20),
+            LogicalPoint::new(50., 220.),
+            &TouchHistory::default(),
+        );
+        assert_eq!(inner.velocity_rb.last_time(), Some(start + Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn release_time_decides_whether_the_pointer_stopped() {
+        let start = crate::animations::current_tick();
+        // The release is delivered 100 ms late, which must not lose the fling.
+        crate::animations::update_animations(start + Duration::from_millis(120));
+        let mut inner = FlickableDataInner {
+            pressed_mouse_state: Some((start, LogicalPoint::new(50., 100.))),
+            ..Default::default()
+        };
+        inner.track_press(start);
+        for millis in [10, 20] {
+            inner.track_move(
+                start + Duration::from_millis(millis),
+                LogicalPoint::new(50., 100. + millis as f32 * 6.),
+                &TouchHistory::default(),
+            );
+        }
+        assert!(inner.velocity_rb.estimate_velocity(start + Duration::from_millis(25)).is_some());
+        assert!(inner.velocity_rb.estimate_velocity(start + Duration::from_millis(80)).is_none());
+    }
+
+    #[test]
+    fn coalesced_history_preserves_leading_segment() {
+        for sign in [-1., 1.] {
+            for historical_positions in [alloc::vec![], alloc::vec![15], alloc::vec![12, 15]] {
+                let start = crate::animations::current_tick();
+                let press_position = LogicalPoint::new(45., 125.);
+                let mut inner = FlickableDataInner {
+                    pressed_mouse_state: Some((start, press_position)),
+                    ..Default::default()
+                };
+                inner.track_press(start);
+                inner.track_move(
+                    start + Duration::from_millis(5),
+                    press_position + LogicalVector::new(sign * 5., sign * 10.),
+                    &TouchHistory::default(),
+                );
+                inner.track_move(
+                    start + Duration::from_millis(10),
+                    press_position + LogicalVector::new(sign * 10., sign * 20.),
+                    &TouchHistory::default(),
+                );
+                let end = start + Duration::from_millis(20);
+                let history = TouchHistory {
+                    history: historical_positions
+                        .into_iter()
+                        .map(|time| {
+                            (
+                                press_position
+                                    + LogicalVector::new(
+                                        sign * time as f32,
+                                        sign * time as f32 * 2.,
+                                    ),
+                                start + Duration::from_millis(time),
+                            )
+                        })
+                        .collect(),
+                };
+                inner.track_move(
+                    end,
+                    press_position + LogicalVector::new(sign * 20., sign * 40.),
+                    &history,
+                );
+                let estimate = inner.velocity_rb.estimate_velocity(end).unwrap();
+                assert!(
+                    (estimate.velocity.x - sign * 1000.).abs() < 0.01,
+                    "{}",
+                    estimate.velocity.x
+                );
+                assert!(
+                    (estimate.velocity.y - sign * 2000.).abs() < 0.01,
+                    "{}",
+                    estimate.velocity.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coalesced_history_preserves_zero_leading_movement() {
+        let start = crate::animations::current_tick();
+        let press_position = LogicalPoint::new(100., 200.);
+        let mut with_history = FlickableDataInner::default();
+        let mut without_history = FlickableDataInner::default();
+        for inner in [&mut with_history, &mut without_history] {
+            inner.pressed_mouse_state = Some((start, press_position));
+            inner.track_press(start);
+            inner.track_move(
+                start + Duration::from_millis(10),
+                press_position + LogicalVector::new(0., 10.),
+                &TouchHistory::default(),
+            );
+        }
+        let middle = start + Duration::from_millis(15);
+        let end = start + Duration::from_millis(20);
+        with_history.track_move(
+            end,
+            press_position + LogicalVector::new(0., 20.),
+            &TouchHistory {
+                history: alloc::vec![(press_position + LogicalVector::new(0., 10.), middle)],
+            },
+        );
+        without_history.track_move(
+            middle,
+            press_position + LogicalVector::new(0., 10.),
+            &TouchHistory::default(),
+        );
+        without_history.track_move(
+            end,
+            press_position + LogicalVector::new(0., 20.),
+            &TouchHistory::default(),
+        );
+        assert_eq!(
+            with_history.velocity_rb.estimate_velocity(end).unwrap().velocity,
+            without_history.velocity_rb.estimate_velocity(end).unwrap().velocity,
+        );
     }
 }

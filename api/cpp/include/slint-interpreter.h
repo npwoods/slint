@@ -5,6 +5,9 @@
 
 #include "slint.h"
 
+#include <concepts>
+#include <filesystem>
+
 #ifndef SLINT_FEATURE_INTERPRETER
 #    warning "slint-interpreter.h API only available when SLINT_FEATURE_INTERPRETER is activated"
 #else
@@ -19,11 +22,11 @@ class QWidget;
 
 namespace slint::cbindgen_private {
 //  This has to stay opaque, but VRc don't compile if it is just forward declared
-struct ErasedItemTreeBox : vtable::Dyn
+struct Instance : vtable::Dyn
 {
-    ~ErasedItemTreeBox() = delete;
-    ErasedItemTreeBox() = delete;
-    ErasedItemTreeBox(ErasedItemTreeBox &) = delete;
+    ~Instance() = delete;
+    Instance() = delete;
+    Instance(Instance &) = delete;
 };
 }
 namespace slint::private_api::live_preview {
@@ -480,6 +483,19 @@ inline Value::Value(const std::shared_ptr<slint::Model<Value>> &model)
         Value v(std::move(value));
         reinterpret_cast<ModelWrapper *>(self.instance)->model->set_row_data(int(row), v);
     };
+    auto push_row = [](VRef<ModelAdaptorVTable> self,
+                       slint::cbindgen_private::Value *value) -> bool {
+        Value v(std::move(value));
+        return reinterpret_cast<ModelWrapper *>(self.instance)->model->push_row(v);
+    };
+    auto remove_row = [](VRef<ModelAdaptorVTable> self, uintptr_t row) -> bool {
+        return reinterpret_cast<ModelWrapper *>(self.instance)->model->remove_row(int(row));
+    };
+    auto insert_row = [](VRef<ModelAdaptorVTable> self, uintptr_t row,
+                         slint::cbindgen_private::Value *value) -> bool {
+        Value v(std::move(value));
+        return reinterpret_cast<ModelWrapper *>(self.instance)->model->insert_row(int(row), v);
+    };
     auto get_notify =
             [](VRef<ModelAdaptorVTable> self) -> const cbindgen_private::ModelNotifyOpaque * {
         return &reinterpret_cast<ModelWrapper *>(self.instance)->notify;
@@ -488,7 +504,8 @@ inline Value::Value(const std::shared_ptr<slint::Model<Value>> &model)
         reinterpret_cast<ModelWrapper *>(self.instance)->self = nullptr;
     };
 
-    static const ModelAdaptorVTable vt { row_count, row_data, set_row_data, get_notify, drop };
+    static const ModelAdaptorVTable vt { row_count,  row_data,   set_row_data, push_row,
+                                         remove_row, insert_row, get_notify,   drop };
     inner = cbindgen_private::slint_interpreter_value_new_model(
             reinterpret_cast<uint8_t *>(wrapper.get()), &vt);
 }
@@ -557,11 +574,11 @@ class ComponentInstance : vtable::Dyn
     ComponentInstance &operator=(ComponentInstance &) = delete;
     friend class ComponentDefinition;
 
-    // ComponentHandle<ComponentInstance>  is in fact a VRc<ItemTreeVTable, ErasedItemTreeBox>
-    const cbindgen_private::ErasedItemTreeBox *inner() const
+    // ComponentHandle<ComponentInstance> is in fact a VRc<ItemTreeVTable, Instance>
+    const cbindgen_private::Instance *inner() const
     {
         slint::private_api::assert_main_thread();
-        return reinterpret_cast<const cbindgen_private::ErasedItemTreeBox *>(this);
+        return reinterpret_cast<const cbindgen_private::Instance *>(this);
     }
 
 public:
@@ -957,7 +974,7 @@ inline ComponentDefinition ComponentInstance::definition() const
 
 /// ComponentCompiler is the entry point to the Slint interpreter that can be used
 /// to load .slint files or compile them on-the-fly from a string
-/// (using build_from_source()) or from a path  (using build_from_source())
+/// (using build_from_source()) or from a path  (using build_from_path())
 class ComponentCompiler
 {
     cbindgen_private::ComponentCompilerOpaque inner;
@@ -967,6 +984,9 @@ class ComponentCompiler
 
 public:
     /// Constructs a new ComponentCompiler instance.
+    ///
+    /// A `slint-project.json` next to the compiled `.slint` file, or in a directory above
+    /// it, provides the settings. What you set below wins over it.
     ComponentCompiler() { cbindgen_private::slint_interpreter_component_compiler_new(&inner); }
 
     /// Destroys this ComponentCompiler.
@@ -976,13 +996,14 @@ public:
     }
 
     /// Sets the include paths used for looking up `.slint` imports to the specified vector of
-    /// paths.
+    /// paths. This wins over the include paths of the project file.
     void set_include_paths(const slint::SharedVector<slint::SharedString> &paths)
     {
         cbindgen_private::slint_interpreter_component_compiler_set_include_paths(&inner, &paths);
     }
 
     /// Sets the style to be used for widgets.
+    /// This wins over the style of the project file.
     void set_style(std::string_view style)
     {
         cbindgen_private::slint_interpreter_component_compiler_set_style(
@@ -1021,7 +1042,11 @@ public:
         return result;
     }
 
-    /// Compile a .slint file into a ComponentDefinition
+    /// Compile some .slint code into a ComponentDefinition
+    ///
+    /// The `path` argument will be used for diagnostics and to compute relative
+    /// paths while importing.
+    /// Both \a source_code and \a path must be UTF-8 encoded; otherwise this function fails.
     ///
     /// Returns the compiled `ComponentDefinition` if there were no errors.
     ///
@@ -1044,14 +1069,17 @@ public:
         }
     }
 
-    /// Compile some .slint code into a ComponentDefinition
+    /// Compile a .slint file into a ComponentDefinition
     ///
-    /// The `path` argument will be used for diagnostics and to compute relative
-    /// paths while importing.
+    /// \a path must be UTF-8 encoded; otherwise this function fails.
+    ///
+    /// If `path` is a `slint-project.json`, its `entry` is compiled with its settings.
+    ///
+    /// Returns the compiled `ComponentDefinition` if there were no errors.
     ///
     /// Any diagnostics produced during the compilation, such as warnings or errors, are collected
-    /// in this ComponentCompiler and can be retrieved after the call using the
-    /// Self::diagnostics() function.
+    /// in this ComponentCompiler and can be retrieved after the call using the diagnostics()
+    /// function.
     ///
     /// Diagnostics from previous calls are cleared when calling this function.
     std::optional<ComponentDefinition> build_from_path(std::string_view path)
@@ -1060,6 +1088,28 @@ public:
         if (cbindgen_private::slint_interpreter_component_compiler_build_from_path(
                     &inner, slint::private_api::string_to_slice(path), &result)) {
 
+            return ComponentDefinition(result);
+        } else {
+            return {};
+        }
+    }
+
+    /// Compile the .slint file at \a path into a ComponentDefinition,
+    /// like build_from_path(std::string_view).
+    ///
+    /// Use this overload for paths that may not be UTF-8 encoded,
+    /// such as paths obtained from `std::filesystem`.
+    template<typename P>
+    // A template so that strings still pick the std::string_view overload
+    // instead of being ambiguous between the two.
+        requires std::same_as<P, std::filesystem::path>
+    std::optional<ComponentDefinition> build_from_path(const P &path)
+    {
+        cbindgen_private::ComponentDefinitionOpaque result;
+        const auto &native = path.native();
+        if (cbindgen_private::slint_interpreter_component_compiler_build_from_native_path(
+                    &inner, slint::private_api::make_slice(native.data(), native.size()),
+                    &result)) {
             return ComponentDefinition(result);
         } else {
             return {};

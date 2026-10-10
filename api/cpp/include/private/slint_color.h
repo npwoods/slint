@@ -4,8 +4,53 @@
 #pragma once
 
 #include "private/slint_color_internal.h"
+#include "private/slint_generated_public.h"
 
 namespace slint {
+
+/// A 16bit pixel that has 5 red bits, 6 green bits and 5 blue bits
+struct Rgb565Pixel
+{
+    /// The blue component, encoded in 5 bits.
+    uint16_t b : 5;
+    /// The green component, encoded in 6 bits.
+    uint16_t g : 6;
+    /// The red component, encoded in 5 bits.
+    uint16_t r : 5;
+
+    /// Default constructor.
+    constexpr Rgb565Pixel() : b(0), g(0), r(0) { }
+
+    /// \brief Constructor that constructs from an Rgb8Pixel.
+    explicit constexpr Rgb565Pixel(const Rgb8Pixel &pixel)
+        : b(pixel.b >> 3), g(pixel.g >> 2), r(pixel.r >> 3)
+    {
+    }
+
+    /// \brief Get the red component as an 8-bit value.
+    ///
+    /// The bits are shifted so that the result is between 0 and 255.
+    /// \return The red component as an 8-bit value.
+    constexpr uint8_t red() const { return (r << 3) | (r >> 2); }
+
+    /// \brief Get the green component as an 8-bit value.
+    ///
+    /// The bits are shifted so that the result is between 0 and 255.
+    /// \return The green component as an 8-bit value.
+    constexpr uint8_t green() const { return (g << 2) | (g >> 4); }
+
+    /// \brief Get the blue component as an 8-bit value.
+    ///
+    /// The bits are shifted so that the result is between 0 and 255.
+    /// \return The blue component as an 8-bit value.
+    constexpr uint8_t blue() const { return (b << 3) | (b >> 2); }
+
+    /// \brief Convert to Rgb8Pixel.
+    constexpr operator Rgb8Pixel() const { return { red(), green(), blue() }; }
+
+    /// Returns true if \a lhs \a rhs are pixels with identical colors.
+    friend bool operator==(const Rgb565Pixel &lhs, const Rgb565Pixel &rhs) = default;
+};
 
 namespace private_api {
 class LinearGradientBrush;
@@ -34,6 +79,9 @@ struct RgbaColor
     /// Creates a new RgbaColor instance from a given color. This template function is
     /// specialized and thus implemented for T == uint8_t and T == float.
     RgbaColor(const Color &col);
+
+    /// Compares two RgbaColor values component-wise.
+    friend bool operator==(const RgbaColor &lhs, const RgbaColor &rhs) = default;
 };
 
 /// HsvaColor stores the hue, saturation, value, and alpha components of a color in the HSV color
@@ -48,6 +96,9 @@ struct HsvaColor
     float value;
     /// The alpha component, between 0 and 1.
     float alpha;
+
+    /// Compares two HsvaColor values component-wise.
+    friend bool operator==(const HsvaColor &lhs, const HsvaColor &rhs) = default;
 };
 
 /// OklchColor stores the lightness, chroma, hue, and alpha components of a color in the Oklch
@@ -62,6 +113,9 @@ struct OklchColor
     float hue;
     /// The alpha component, between 0 and 1.
     float alpha;
+
+    /// Compares two OklchColor values component-wise.
+    friend bool operator==(const OklchColor &lhs, const OklchColor &rhs) = default;
 };
 
 /// Color represents a color in the Slint run-time, represented using 8-bit channels for

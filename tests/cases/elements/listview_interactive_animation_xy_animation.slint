@@ -10,7 +10,7 @@ export component TestCase inherits Window {
     preferred-height: 300px;
 
     in-out property <string> result;
-    in-out property <length> viewport-y <=> lv.viewport-y;
+    in-out property <length> content-y <=> lv.content-y;
 
     lv := ListView {
         mouse-drag-pan-enabled: true;
@@ -43,7 +43,7 @@ pub fn send_mouse_press_and_release<Component: slint::ComponentHandle>(
     let released_position = LogicalPosition::new(released_x, released_y);
     let button = platform::PointerEventButton::Left;
 
-    const NUM_MOVEMENTS: u64 = 2;
+    const NUM_MOVEMENTS: u64 = 5;
     let diff_x = (released_position.x - pressed_position.x) / NUM_MOVEMENTS as f32;
     let diff_y = (released_position.y - pressed_position.y) / NUM_MOVEMENTS as f32;
 
@@ -65,10 +65,10 @@ send_mouse_press_and_release(&instance, 5., 130., x_release, 5., time); // Scrol
 // let the animation run for a bit
 slint_testing::mock_elapsed_time(10);
 // Due to the animation the value must be more than the diff of scrolling
-assert!(instance.get_viewport_y() < -125., "Received: {}, Desired: smaller than {}", instance.get_viewport_y(), -125);
-let viewport_y = instance.get_viewport_y();
+assert!(instance.get_content_y() < -125., "Received: {}, Desired: smaller than {}", instance.get_content_y(), -125);
+let content_y = instance.get_content_y();
 slint_testing::mock_elapsed_time(100);
-assert!(instance.get_viewport_y() < viewport_y, "Received: {}, Desired: smaller than {}", instance.get_viewport_y(), viewport_y);
+assert!(instance.get_content_y() < content_y, "Received: {}, Desired: smaller than {}", instance.get_content_y(), content_y);
 ```
 
 */

@@ -60,9 +60,9 @@ Integrate [Servo](https://github.com/servo/servo) Web Engine as WebView Componen
                 if !matches!(state, slint::RenderingState::RenderingSetup) || initialized.get() {
                     return;
                 }
-                let slint::GraphicsAPI::WGPU29 { device, queue, .. } = graphics_api else {
+                let slint::GraphicsAPI::WGPU30 { device, queue, .. } = graphics_api else {
                     panic!(
-                        "Slint did not select a wgpu-29 renderer; \
+                        "Slint did not select a wgpu-30 renderer; \
                         enable a wgpu-capable renderer feature"
                     );
                 };
@@ -75,18 +75,18 @@ Integrate [Servo](https://github.com/servo/servo) Web Engine as WebView Componen
     }
 
     fn setup_slint_with_wgpu() {
-        use slint::wgpu_29::{WGPUConfiguration, WGPUSettings};
+        use slint::wgpu_30::{WGPUConfiguration, WGPUSettings};
 
         #[allow(unused_mut)]
         let mut wgpu_settings = WGPUSettings::default();
 
         #[cfg(target_os = "windows")]
         {
-            wgpu_settings.backends = slint::wgpu_29::wgpu::Backends::DX12;
+            wgpu_settings.backends = slint::wgpu_30::wgpu::Backends::DX12;
         }
 
         slint::BackendSelector::new()
-            .require_wgpu_29(WGPUConfiguration::Automatic(wgpu_settings))
+            .require_wgpu_30(WGPUConfiguration::Automatic(wgpu_settings))
             .select()
             .unwrap();
     }
@@ -113,14 +113,14 @@ To build on Windows, you will need Visual Studio installed. Cargo requires the `
 ### Install platform-tools
 
 ```bash
-${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-30"
+${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-36"
 ```
 
-### Add rust target and install cargo apk
+### Add rust target and install cargo-apk2
 
 ```bash
 rustup target add aarch64-linux-android
-cargo install cargo-apk
+cargo install cargo-apk2
 ```
 
 ### Setup Bindgen for Android
@@ -134,5 +134,5 @@ export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android30 --sysroot=$AND
 ### Run on android emulator or device
 
 ```bash
-cargo apk run --target aarch64-linux-android --lib
+cargo apk2 run --target aarch64-linux-android --lib
 ```

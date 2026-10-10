@@ -5,7 +5,7 @@ use slint::language::{PointerEvent, PointerEventButton, PointerEventKind};
 
 use servo::{
     InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, TouchEvent,
-    TouchEventType, TouchId, WebViewPoint,
+    TouchEventType, TouchId, TouchPointerType, WebViewPoint,
 };
 
 pub fn convert_slint_pointer_event_to_servo_input_event(
@@ -22,9 +22,13 @@ pub fn convert_slint_pointer_event_to_servo_input_event(
 fn handle_touch_events(pointer_event: &PointerEvent, point: WebViewPoint) -> InputEvent {
     let touch_finger_id = TouchId(pointer_event.touch_finger_id);
     let touch_event = match pointer_event.kind {
-        PointerEventKind::Down => TouchEvent::new(TouchEventType::Down, touch_finger_id, point),
-        PointerEventKind::Up => TouchEvent::new(TouchEventType::Up, touch_finger_id, point),
-        _ => TouchEvent::new(TouchEventType::Move, touch_finger_id, point),
+        PointerEventKind::Down => {
+            TouchEvent::new(TouchEventType::Down, touch_finger_id, point, TouchPointerType::Touch)
+        }
+        PointerEventKind::Up => {
+            TouchEvent::new(TouchEventType::Up, touch_finger_id, point, TouchPointerType::Touch)
+        }
+        _ => TouchEvent::new(TouchEventType::Move, touch_finger_id, point, TouchPointerType::Touch),
     };
     InputEvent::Touch(touch_event)
 }
@@ -46,9 +50,9 @@ fn handle_mouse_events(pointer_event: &PointerEvent, point: WebViewPoint) -> Inp
 
 fn get_mouse_button(point_event: &PointerEvent) -> MouseButton {
     match point_event.button {
-        PointerEventButton::Left => MouseButton::Left,
-        PointerEventButton::Right => MouseButton::Right,
-        PointerEventButton::Middle => MouseButton::Middle,
-        _ => MouseButton::Left,
+        PointerEventButton::Left => MouseButton::Primary,
+        PointerEventButton::Right => MouseButton::Secondary,
+        PointerEventButton::Middle => MouseButton::Auxiliary,
+        _ => MouseButton::Primary,
     }
 }

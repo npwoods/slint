@@ -1,0 +1,13 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+use slint_build::CompilerConfiguration;
+
+fn main() {
+    // Some tests use the ElementHandle API, which requires debug info
+    slint_build::compile_with_config(
+        "slint-project.json",
+        CompilerConfiguration::new().with_debug_info(true),
+    )
+    .unwrap();
+}
